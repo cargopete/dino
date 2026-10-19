@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use gyr_model::DEFAULT_PROFILE;
 use gyr_model::ModelSession;
 use gyr_model::anthropic::AnthropicConfig;
 use gyr_model::anthropic::AnthropicSession;
@@ -82,12 +83,7 @@ pub struct RunSettings {
 pub fn resolve_profile(flag: Option<&str>) -> Result<ModelProfile> {
     let key = match flag {
         Some(key) => key.to_owned(),
-        None => std::env::var("GYR_MODEL").map_err(|_| {
-            anyhow::anyhow!(
-                "no model selected: pass --model or set GYR_MODEL ({})",
-                known_keys()
-            )
-        })?,
+        None => std::env::var("GYR_MODEL").unwrap_or_else(|_| DEFAULT_PROFILE.to_owned()),
     };
     builtin_profile(&key).with_context(|| format!("unknown model {key:?} ({})", known_keys()))
 }
@@ -155,15 +151,23 @@ fn build_session_from(
             Ok(Box::new(OpenAiSession::new(config)?))
         }
         ProviderKind::Qwen => {
-            let api_base = match &settings.api_base {
-                Some(api_base) => api_base.clone(),
-                None => require_env(env, "QWEN_API_BASE", profile)?,
+            let configured = settings
+                .api_base
+                .clone()
+                .or_else(|| env("QWEN_API_BASE").filter(|base| !base.is_empty()));
+            let (api_base, api_key) = match (configured, &profile.hosted_api_base) {
+                (Some(base), _) => (base, env("QWEN_API_KEY").filter(|key| !key.is_empty())),
+                (None, Some(hosted)) => (
+                    hosted.clone(),
+                    Some(require_env(env, "QWEN_API_KEY", profile)?),
+                ),
+                (None, None) => (require_env(env, "QWEN_API_BASE", profile)?, None),
             };
             let mut config = QwenConfig::new(api_base, profile.clone());
             if settings.disable_thinking {
                 config.enable_thinking = Some(false);
             }
-            config.api_key = env("QWEN_API_KEY").filter(|key| !key.is_empty());
+            config.api_key = api_key;
             config.system_prompt = system_prompt;
             config.tools = tools;
             config.max_output_tokens = profile.max_output_tokens;
@@ -260,6 +264,21 @@ mod tests {
                 "{key} should name {expected}, said: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_hosted_default_needs_a_key_and_no_endpoint() {
+        let settings = settings(builtin_profile(DEFAULT_PROFILE).expect("default profile"));
+
+        let Err(error) = build_session_from(&settings, String::new(), Vec::new(), &empty_env)
+        else {
+            panic!("a hosted endpoint must not be called without a key");
+        };
+        assert!(error.to_string().contains("QWEN_API_KEY"), "{error}");
+
+        let with_key = |name: &str| (name == "QWEN_API_KEY").then(|| "sk-test".to_owned());
+        build_session_from(&settings, String::new(), Vec::new(), &with_key)
+            .expect("a key alone is enough for the hosted endpoint");
     }
 
     #[test]

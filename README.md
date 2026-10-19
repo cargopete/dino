@@ -1,9 +1,18 @@
 # Gyrfalcon
 
 Gyrfalcon is an open-source terminal coding agent written in Rust and designed
-for Rust work. It runs against a deliberately bounded set of strong hosted and
-open-weight models rather than assuming that every model behaves like one API
-wearing a false moustache.
+for Rust work. It is built around open-weight models: by default Qwen3.8 27B,
+called through Alibaba Cloud Model Studio, whose Apache-2.0 weights anyone can
+serve on their own hardware instead. Hosted Claude models are kept as the
+baseline the open model is measured against. The catalogue is deliberately
+bounded, rather than assuming that every model behaves like one API wearing a
+false moustache.
+
+**The default has not yet completed a single turn.** Every measurement in this
+README is of Claude. The one request sent to Qwen3.8 27B on Model Studio, on
+2026-10-19, reached Alibaba and was refused because the model had not been
+activated on the account. Until it has passed the eval corpus, treat the default
+as a stated intention, not as a recommendation. RFC-0017 is the plan.
 
 It is also a serious educational implementation of the machinery behind tools
 such as Claude Code and Codex, published with its design record, its failures
@@ -30,7 +39,8 @@ CI and evals.
   real socket and asserts the same normalised events from each: three wires, one
   semantics. Only Anthropic has been driven against a live endpoint, so what the
   suite proves is that the adapters agree, not that a provider accepts what they
-  send.
+  send. In particular, nobody yet knows whether Model Studio honours the
+  thinking control, which the Qwen adapter sends in vLLM's form.
 - **Six tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals. `list` shows what is
   in the workspace through the same ignore rules, with `all` to see what those
@@ -110,8 +120,9 @@ keeps no local history to reduce, and which wants a live credential to verify
 rather than merely to write. Summarising compaction. Rollback: the diagnostic
 gate refused rather than reverting, because a shadow copy of the workspace is a
 worse version of git. Resuming *from* a log as opposed to replaying one, which
-RFC-0014 section 2 argues cannot be done honestly. A conformance suite: RFC-0003
-lists twelve provider scenarios and none has run against a live endpoint.
+RFC-0014 section 2 argues cannot be done honestly. A conformance run against a live
+endpoint: the suite exists and has only ever seen recorded traffic. `gyr probe`,
+which would let you run it against your own endpoint, is RFC-0017's next step.
 
 These are missing features. None is delegated to the system prompt and none is
 claimed to be present.
@@ -163,6 +174,7 @@ substring. An adapter may expose less than a model can do and never more.
 
 | Key | Provider | Model | Status |
 |---|---|---|---|
+| `qwen3.8-27b` | Qwen Chat Completions | `qwen3.8-27b` | **default**, development |
 | `terra` | OpenAI Responses | `gpt-5.6-terra` | development |
 | `claude-opus` | Anthropic Messages | `claude-opus-5` | supported |
 | `claude-sonnet` | Anthropic Messages | `claude-sonnet-5` | supported |
@@ -176,6 +188,14 @@ substring. An adapter may expose less than a model can do and never more.
 `supported` means the corpus has passed against a live endpoint, which so far is
 true of the two Claude profiles and nothing else. The rest have passed the wire
 conformance suite and no live run; RFC-0017 says what promotes them.
+
+`qwen3.8-27b` is the default because it has open weights and a hosted endpoint,
+and a single profile serves both. With no endpoint configured it calls Model
+Studio's international (Singapore) endpoint with `QWEN_API_KEY`. With
+`--api-base`, `QWEN_API_BASE` or `api_base` in the user config file, it calls
+that endpoint instead and sends the same model name, so a self-hosted server must
+serve the weights under the name `qwen3.8-27b`. Its parsers, sampling and thinking
+behaviour are left unset in the catalogue until something has been measured.
 
 Qwen's reference serving stacks are vLLM and SGLang. Ollama and other local
 runtimes may follow once they pass the same conformance suite. `qwen3-8b` is
@@ -199,8 +219,26 @@ gyr models
 gyr prompt --model claude-sonnet
 ```
 
-Running against a model needs that provider's credential in the environment:
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `QWEN_API_BASE` for a self-hosted
+The default needs a Model Studio API key from the Singapore region, with
+Qwen3.8 27B activated on that account. A key without the activation gets
+`403 AccessDenied.Unpurchased` on the first turn.
+
+```console
+export QWEN_API_KEY=...
+gyr
+```
+
+To serve the same model yourself, give the server the name Gyrfalcon sends and
+point `gyr` at it. **Not yet tried:** this is the documented vLLM flag, not a
+tested quickstart, and RFC-0017 owes one per hardware tier.
+
+```console
+vllm serve Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b
+gyr --api-base http://localhost:8000/v1
+```
+
+The other profiles need their provider's credential: `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, or `QWEN_API_BASE` for the Qwen profiles without a hosted
 endpoint. A missing one fails before any request is sent, naming the variable.
 
 ```console

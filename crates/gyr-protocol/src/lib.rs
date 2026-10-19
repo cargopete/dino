@@ -79,6 +79,10 @@ pub struct ModelProfile {
     pub tool_call_parser: Option<String>,
     pub reasoning_parser: Option<String>,
     pub sampling: Option<SamplingDefaults>,
+    /// Endpoint used when none is configured, for open weights that are also
+    /// served by a provider. A self-hosted server must use `provider_model` as
+    /// its served model name.
+    pub hosted_api_base: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

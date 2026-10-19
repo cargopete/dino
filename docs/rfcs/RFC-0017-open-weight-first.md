@@ -27,6 +27,27 @@ and why.
 The project remains Rust-first, educational and honest about what it has and
 has not measured. Nothing in this RFC relaxes RFC-0001 §8. Safety is still code.
 
+### 1.1 The default, decided 2026-10-19
+
+The default profile is `qwen3.8-27b`, and its default endpoint is Alibaba Cloud
+Model Studio's international deployment. Open weights served by the people
+who made them give the author one model to use day to day and give anyone else
+the same model on their own hardware: Apache-2.0 weights at `Qwen/Qwen3.8-27B`
+(checked on Hugging Face, 2026-10-19), dense, and within tier B once quantised.
+One profile covers both: the endpoint varies, the model name sent does not, and a
+self-hosted server is asked to serve under that name.
+
+This adds a hosted provider to a document that argues for owned hardware, and
+the tension is stated rather than hidden. Model Studio is the default because
+it is the cheapest way to run this model without a GPU, not because the
+project depends on it. Nothing in the catalogue, the adapter or the corpus may
+assume Model Studio in a way a self-hosted endpoint could not satisfy. Where the
+two differ in behaviour, which is already likely for the thinking control, that
+is a (profile, stack) difference under section 6, and `gyr probe` reports it.
+
+Qwen3.8-Max is not the default, because it has no published weights and so
+nobody else could self-host it. It is a candidate baseline alongside Claude.
+
 ## 2. Why now
 
 Three things have changed since RFC-0001 put three providers side by side.
@@ -310,8 +331,12 @@ not argued.
 
 1. Demote the five Qwen profiles and `terra` to `development`, so the
    catalogue stops claiming what nothing has measured. **Done 2026-10-19.**
-2. `gyr probe`, against a vLLM endpoint serving `qwen3-coder-30b-a3b`. Early,
-   because every later step depends on knowing the endpoint is what it claims.
+2. `gyr probe`, against Model Studio serving `qwen3.8-27b` (section 1.1), then
+   against vLLM serving the same weights. Early, because every later step
+   depends on knowing the endpoint is what it claims.
+   The default profile and its hosted endpoint are **done 2026-10-19**, ahead of
+   the probe; the first request was refused because the model was not
+   activated on the account, so nothing about the model is measured yet.
 3. Served-context budget (§4.2 item 3).
 4. Harness support for repeated trials with Wilson intervals, and a per-case
    wall-time limit (§8.3). Without both, a ten-trial run on tier B hardware is

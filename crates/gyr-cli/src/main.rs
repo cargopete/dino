@@ -523,7 +523,11 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         (
             "model",
             show(
-                resolved.model.0.clone().unwrap_or_else(|| "unset".into()),
+                resolved
+                    .model
+                    .0
+                    .clone()
+                    .unwrap_or_else(|| gyr_model::DEFAULT_PROFILE.into()),
                 resolved.model.1,
             ),
         ),
@@ -552,11 +556,12 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         (
             "api base",
             show(
-                resolved
-                    .api_base
-                    .0
-                    .clone()
-                    .unwrap_or_else(|| "unset".into()),
+                resolved.api_base.0.clone().unwrap_or_else(|| {
+                    config::resolve_profile(resolved.model.0.as_deref())
+                        .ok()
+                        .and_then(|profile| profile.hosted_api_base)
+                        .unwrap_or_else(|| "unset".into())
+                }),
                 resolved.api_base.1,
             ),
         ),

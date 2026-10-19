@@ -185,6 +185,13 @@ pub enum ModelError {
     Configuration(String),
 }
 
+/// The model used when none is selected: open weights, so the same profile
+/// serves someone using a provider and someone serving it themselves.
+pub const DEFAULT_PROFILE: &str = "qwen3.8-27b";
+
+/// Alibaba Cloud Model Studio, international deployment (Singapore).
+const MODEL_STUDIO_INTL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+
 /// The MVP coding targets, without development-only entries.
 #[must_use]
 pub fn supported_profiles() -> Vec<ModelProfile> {
@@ -205,6 +212,7 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         qwen_coder_30b(),
         qwen_3_6_27b(),
         qwen_3_6_35b_a3b(),
+        qwen_3_8_27b(),
         qwen3_8b(),
     ]
 }
@@ -238,6 +246,7 @@ fn terra() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
+        hosted_api_base: None,
     }
 }
 
@@ -262,6 +271,7 @@ fn claude_opus() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
+        hosted_api_base: None,
     }
 }
 
@@ -291,6 +301,7 @@ fn claude_sonnet() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
+        hosted_api_base: None,
     }
 }
 
@@ -362,6 +373,7 @@ fn qwen_coder(
         tool_call_parser: Some("qwen3_coder".into()),
         reasoning_parser: None,
         sampling,
+        hosted_api_base: None,
     }
 }
 
@@ -371,6 +383,29 @@ fn qwen_3_6_27b() -> ModelProfile {
 
 fn qwen_3_6_35b_a3b() -> ModelProfile {
     qwen_3_6("qwen3.6-35b-a3b", "Qwen/Qwen3.6-35B-A3B", "Qwen3.6 35B-A3B")
+}
+
+/// **Not measured.** Apache-2.0 weights at `Qwen/Qwen3.8-27B`, checked on Hugging
+/// Face 2026-10-19; context and multimodality are from Qwen's announcement. The
+/// vLLM tool and reasoning parsers, thinking control on Model Studio, and
+/// sampling are left unset until `gyr probe` has seen a live endpoint.
+fn qwen_3_8_27b() -> ModelProfile {
+    ModelProfile {
+        key: "qwen3.8-27b".into(),
+        provider_model: "qwen3.8-27b".into(),
+        display_name: "Qwen3.8 27B".into(),
+        provider: ProviderKind::Qwen,
+        status: ProfileStatus::Development,
+        context_window_tokens: Some(262_144),
+        max_output_tokens: None,
+        reasoning: ReasoningSupport::None,
+        parallel_tool_calls: true,
+        image_input: true,
+        tool_call_parser: None,
+        reasoning_parser: None,
+        sampling: None,
+        hosted_api_base: Some(MODEL_STUDIO_INTL.into()),
+    }
 }
 
 /// A small local model, present as a development target rather than a coding
@@ -408,6 +443,7 @@ fn qwen3_8b() -> ModelProfile {
             presence_penalty: Some(0.0),
             repetition_penalty: Some(1.0),
         }),
+        hosted_api_base: None,
     }
 }
 
@@ -433,6 +469,7 @@ fn qwen_3_6(key: &str, provider_model: &str, display_name: &str) -> ModelProfile
             presence_penalty: Some(0.0),
             repetition_penalty: Some(1.0),
         }),
+        hosted_api_base: None,
     }
 }
 
@@ -458,7 +495,8 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
+        assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 
     #[test]
@@ -466,7 +504,10 @@ mod tests {
         let profiles = builtin_profiles();
         let qwen = profiles
             .iter()
-            .filter(|profile| profile.provider == ProviderKind::Qwen && profile.key != "qwen3-8b")
+            .filter(|profile| {
+                profile.provider == ProviderKind::Qwen
+                    && !matches!(profile.key.as_str(), "qwen3-8b" | "qwen3.8-27b")
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(qwen.len(), 5);
