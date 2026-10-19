@@ -2,18 +2,19 @@
 
 Gyrfalcon is an open-source terminal coding agent written in Rust and designed
 for Rust work. It is built around open-weight models: by default Qwen3.8 27B,
-called through Alibaba Cloud Model Studio, whose Apache-2.0 weights anyone can
-serve on their own hardware instead. Hosted Claude models are kept as the
-baseline the open model is measured against. The catalogue is deliberately
+whose Apache-2.0 weights you serve yourself, on your own GPU or one rented by
+the hour. Hosted Claude models are kept as the baseline the open model is
+measured against. The catalogue is deliberately
 bounded, rather than assuming that every model behaves like one API wearing a
 false moustache.
 
-**The default has not yet completed a single turn.** Every measurement in this
-README is of Claude. Requests to Qwen3.8 27B on Model Studio on 2026-10-19
-reached Alibaba and were refused (`403 AccessDenied.Unpurchased`): the author's
-new account was held by Alibaba's risk control, so the model had no chance to
-answer. Until it has passed the eval corpus, treat the default
-as a stated intention, not as a recommendation. RFC-0017 is the plan.
+**The default has passed the corpus once.** On 2026-10-19, Qwen3.8 27B on vLLM,
+on one rented A100, passed nine of nine cases in 50 turns and about ten minutes,
+for roughly $0.31 of GPU time. That is one run, on a corpus that Claude also
+passes in full, so it shows that the open model can do this work through this
+harness, not that it does it as well. RFC-0017 asks for ten trials per case
+and a corpus of twenty before any such claim. Everything else measured in this
+README is of Claude.
 
 It is also a serious educational implementation of the machinery behind tools
 such as Claude Code and Codex, published with its design record, its failures
@@ -40,8 +41,8 @@ CI and evals.
   real socket and asserts the same normalised events from each: three wires, one
   semantics. Only Anthropic has been driven against a live endpoint, so what the
   suite proves is that the adapters agree, not that a provider accepts what they
-  send. In particular, nobody yet knows whether Model Studio honours the
-  thinking control, which the Qwen adapter sends in vLLM's form.
+  send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
+  see below.
 - **Six tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals. `list` shows what is
   in the workspace through the same ignore rules, with `all` to see what those
@@ -190,13 +191,11 @@ substring. An adapter may expose less than a model can do and never more.
 true of the two Claude profiles and nothing else. The rest have passed the wire
 conformance suite and no live run; RFC-0017 says what promotes them.
 
-`qwen3.8-27b` is the default because it has open weights and a hosted endpoint,
-and a single profile serves both. With no endpoint configured it calls Model
-Studio's international (Singapore) endpoint with `QWEN_API_KEY`. With
-`--api-base`, `QWEN_API_BASE` or `api_base` in the user config file, it calls
-that endpoint instead and sends the same model name, so a self-hosted server must
-serve the weights under the name `qwen3.8-27b`. Its parsers, sampling and thinking
-behaviour are left unset in the catalogue until something has been measured.
+`qwen3.8-27b` is the default because its weights are open: anyone can serve
+exactly the model the corpus measured. It has no endpoint of its own. Give it
+one with `--api-base`, `QWEN_API_BASE` or `api_base` in the user config file,
+and serve the weights under the name `qwen3.8-27b`. Its sampling and thinking
+control are left unset in the catalogue until something has measured them.
 
 Qwen's reference serving stacks are vLLM and SGLang. Ollama and other local
 runtimes may follow once they pass the same conformance suite. `qwen3-8b` is
@@ -220,24 +219,28 @@ gyr models
 gyr prompt --model claude-sonnet
 ```
 
-The default needs a Model Studio API key from the Singapore region, on an
-account that can call Qwen3.8 27B. It has no free quota and is billed per
-token. A key that cannot call it gets `403 AccessDenied.Unpurchased` on the
-first turn, whatever the reason the account cannot.
+The default needs a server for Qwen3.8 27B. This is the configuration that has
+actually run, on 2026-10-19: vLLM 0.32.0 (the CUDA 13 image; the `-cu129` image
+fails to start on a missing `libnvrtc.so.13`) on one 80 GB A100 rented from
+Runpod at $1.81 an hour. The weights take 51 GiB, and a 64K context leaves room
+for about four full-length requests at once. The first start downloads the
+weights and took about seven minutes. A 48 GB card does not fit the weights
+unquantised, and nothing smaller has been tried.
 
 ```console
-export QWEN_API_KEY=...
+vllm serve Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b \
+  --max-model-len 65536 --api-key "$VLLM_KEY" \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+```
+
+```console
+export QWEN_API_BASE=https://<pod>-8000.proxy.runpod.net/v1
+export QWEN_API_KEY="$VLLM_KEY"
 gyr
 ```
 
-To serve the same model yourself, give the server the name Gyrfalcon sends and
-point `gyr` at it. **Not yet tried:** this is the documented vLLM flag, not a
-tested quickstart, and RFC-0017 owes one per hardware tier.
-
-```console
-vllm serve Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b
-gyr --api-base http://localhost:8000/v1
-```
+A rented server is public, which is what `--api-key` is for. This is one
+tested configuration, not yet the per-tier quickstart RFC-0017 owes.
 
 The other profiles need their provider's credential: `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, or `QWEN_API_BASE` for the Qwen profiles without a hosted

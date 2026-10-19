@@ -29,24 +29,22 @@ has not measured. Nothing in this RFC relaxes RFC-0001 §8. Safety is still code
 
 ### 1.1 The default, decided 2026-10-19
 
-The default profile is `qwen3.8-27b`, and its default endpoint is Alibaba Cloud
-Model Studio's international deployment. Open weights served by the people
-who made them give the author one model to use day to day and give anyone else
-the same model on their own hardware: Apache-2.0 weights at `Qwen/Qwen3.8-27B`
+The default profile is `qwen3.8-27b`: Apache-2.0 weights at `Qwen/Qwen3.8-27B`
 (checked on Hugging Face, 2026-10-19), dense, and within tier B once quantised.
-One profile covers both: the endpoint varies, the model name sent does not, and a
-self-hosted server is asked to serve under that name.
+The profile has no endpoint of its own. A server serves the weights under the
+name `qwen3.8-27b`, and the user says where it is.
 
-This adds a hosted provider to a document that argues for owned hardware, and
-the tension is stated rather than hidden. Model Studio is the default because
-it is the cheapest way to run this model without a GPU, not because the
-project depends on it. Nothing in the catalogue, the adapter or the corpus may
-assume Model Studio in a way a self-hosted endpoint could not satisfy. Where the
-two differ in behaviour, which is already likely for the thinking control, that
-is a (profile, stack) difference under section 6, and `gyr probe` reports it.
+The first intention was to call it through Alibaba Cloud Model Studio, so the
+author could use the model's makers as a host and anyone else could serve the
+same weights. That was abandoned the same day: the new account was held by
+Alibaba's risk control, every request was refused with `403
+AccessDenied.Unpurchased` on both the shared and the workspace endpoint, and
+nothing about the model was learned from it. The reference host is now a
+rented GPU running vLLM, which is the route a hobbyist without hardware would
+take anyway, and which tests self-hosting rather than assuming it.
 
 Qwen3.8-Max is not the default, because it has no published weights and so
-nobody else could self-host it. It is a candidate baseline alongside Claude.
+nobody else could serve it. It is a candidate baseline alongside Claude.
 
 ## 2. Why now
 
@@ -308,6 +306,41 @@ served window of 32k to 64k tokens, given that both break prefix caching and
 summarising also adds a request. This is measured before §4.3 item 5 is built,
 not argued.
 
+### 8.5 The first live run, 2026-10-19
+
+**Measured.** `qwen3.8-27b` on vLLM 0.32.0, one A100 SXM 80GB on Runpod
+($1.81/hour), 64K context, the recipe's `qwen3_coder` and `qwen3` parsers,
+thinking left at the server's default, sampling at the server's default. Nine
+cases, one trial each, `gyr eval` with the workspace sandbox.
+
+| case | result | turns | wall time |
+|---|---|---:|---:|
+| add-a-field | pass | 5 | 62 s |
+| add-a-function | pass | 4 | 20 s |
+| count-without-editing | pass | 4 | 17 s |
+| fix-failing-test | pass | 8 | 59 s |
+| fix-type-errors | pass | 5 | 20 s |
+| fix-warnings-at-the-cause | pass | 7 | 60 s |
+| rename-across-files | pass | 5 | 117 s |
+| thread-a-result | pass | 5 | 85 s |
+| wide-cascade | pass | 7 | 166 s |
+| **total** | **9/9** | **50** | **607 s** |
+
+186,451 input and 16,269 output tokens. vLLM reports no cached-token count, so
+the input figure cannot be split the way RFC-0012's Claude figures are. Cost is
+the GPU hire for the run's ten minutes, about $0.31, excluding a seven-minute
+first start that downloaded 51 GiB of weights.
+
+On `wide-cascade`, the case where reading everything is expensive, Qwen read
+thirty files, as Opus 5 did in RFC-0012 §9.12 and Sonnet 5 did not.
+
+**What this does not say.** One trial, so no interval. The corpus is the one
+RFC-0012 §9.12 already found too easy to separate Opus from Sonnet. The serving
+stack was a rented datacentre GPU, which is tier A hardware serving a tier B
+model; tier B and C hardware were not tried. Before this run, the profile had
+already been checked by hand with one direct tool-call request and one
+read-only `gyr run` question, both correct.
+
 ## 9. Amendments
 
 - **RFC-0001 §1.** The second paragraph's "three provider families" are kept.
@@ -331,14 +364,10 @@ not argued.
 
 1. Demote the five Qwen profiles and `terra` to `development`, so the
    catalogue stops claiming what nothing has measured. **Done 2026-10-19.**
-2. `gyr probe`, against Model Studio serving `qwen3.8-27b` (section 1.1), then
-   against vLLM serving the same weights. Early, because every later step
-   depends on knowing the endpoint is what it claims.
-   The default profile and its hosted endpoint are **done 2026-10-19**, ahead of
-   the probe. Every request so far was refused with `AccessDenied.Unpurchased`,
-   on the shared and the workspace endpoint alike, because the account was held
-   by Alibaba's risk control (`RISK.RISK_CONTROL_REJECTION` in the console).
-   Nothing about the model is measured yet.
+2. `gyr probe`, against vLLM serving `qwen3.8-27b` (section 1.1). Early,
+   because every later step depends on knowing the endpoint is what it claims.
+   The default profile is **done 2026-10-19**, ahead of the probe, and has been
+   driven live on vLLM 0.32.0; section 8.5 records the first run.
 3. Served-context budget (§4.2 item 3).
 4. Harness support for repeated trials with Wilson intervals, and a per-case
    wall-time limit (§8.3). Without both, a ten-trial run on tier B hardware is

@@ -185,12 +185,8 @@ pub enum ModelError {
     Configuration(String),
 }
 
-/// The model used when none is selected: open weights, so the same profile
-/// serves someone using a provider and someone serving it themselves.
+/// The model used when none is selected. Open weights, so anyone can serve it.
 pub const DEFAULT_PROFILE: &str = "qwen3.8-27b";
-
-/// Alibaba Cloud Model Studio, international deployment (Singapore).
-const MODEL_STUDIO_INTL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 
 /// The MVP coding targets, without development-only entries.
 #[must_use]
@@ -246,7 +242,6 @@ fn terra() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
-        hosted_api_base: None,
     }
 }
 
@@ -271,7 +266,6 @@ fn claude_opus() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
-        hosted_api_base: None,
     }
 }
 
@@ -301,7 +295,6 @@ fn claude_sonnet() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
-        hosted_api_base: None,
     }
 }
 
@@ -373,7 +366,6 @@ fn qwen_coder(
         tool_call_parser: Some("qwen3_coder".into()),
         reasoning_parser: None,
         sampling,
-        hosted_api_base: None,
     }
 }
 
@@ -385,10 +377,10 @@ fn qwen_3_6_35b_a3b() -> ModelProfile {
     qwen_3_6("qwen3.6-35b-a3b", "Qwen/Qwen3.6-35B-A3B", "Qwen3.6 35B-A3B")
 }
 
-/// **Not measured.** Apache-2.0 weights at `Qwen/Qwen3.8-27B`, checked on Hugging
-/// Face 2026-10-19; context and multimodality are from Qwen's announcement. The
-/// vLLM tool and reasoning parsers, thinking control on Model Studio, and
-/// sampling are left unset until `gyr probe` has seen a live endpoint.
+/// Apache-2.0 weights at `Qwen/Qwen3.8-27B`. The server must serve them under
+/// the name `qwen3.8-27b`. **Observed 2026-10-19** on vLLM 0.32.0 with the
+/// recipe's parsers: tool calls arrive structured and reasoning separately.
+/// Thinking control and sampling are not yet measured, so are left unset.
 fn qwen_3_8_27b() -> ModelProfile {
     ModelProfile {
         key: "qwen3.8-27b".into(),
@@ -401,10 +393,9 @@ fn qwen_3_8_27b() -> ModelProfile {
         reasoning: ReasoningSupport::None,
         parallel_tool_calls: true,
         image_input: true,
-        tool_call_parser: None,
-        reasoning_parser: None,
+        tool_call_parser: Some("qwen3_coder".into()),
+        reasoning_parser: Some("qwen3".into()),
         sampling: None,
-        hosted_api_base: Some(MODEL_STUDIO_INTL.into()),
     }
 }
 
@@ -443,7 +434,6 @@ fn qwen3_8b() -> ModelProfile {
             presence_penalty: Some(0.0),
             repetition_penalty: Some(1.0),
         }),
-        hosted_api_base: None,
     }
 }
 
@@ -469,7 +459,6 @@ fn qwen_3_6(key: &str, provider_model: &str, display_name: &str) -> ModelProfile
             presence_penalty: Some(0.0),
             repetition_penalty: Some(1.0),
         }),
-        hosted_api_base: None,
     }
 }
 
@@ -497,6 +486,19 @@ mod tests {
         assert_eq!(unique_keys.len(), all.len());
         assert_eq!(all.len(), 10);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
+    }
+
+    #[test]
+    fn only_self_served_profiles_name_server_parsers() {
+        for profile in builtin_profiles() {
+            let served = profile.provider == ProviderKind::Qwen;
+            assert_eq!(
+                profile.tool_call_parser.is_some(),
+                served,
+                "{}",
+                profile.key
+            );
+        }
     }
 
     #[test]
