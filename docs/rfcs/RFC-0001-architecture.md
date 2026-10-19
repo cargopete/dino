@@ -209,6 +209,8 @@ chosen that retention mode.
 10. Interactive terminal interface. **Done** in RFC-0007: line-based, so the
     transcript stays in the terminal's scrollback.
 11. ChatGPT OAuth, after the transport is independently sound.
+    **Moved 2026-10-19** behind RFC-0017 §4.2, which makes an open-weight
+    model the primary target and the hosted profiles its baselines.
 
 Each stage must produce a working vertical slice. A directory full of interfaces
 whose behaviour is promised for later is not progress, although it can look
