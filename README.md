@@ -12,7 +12,10 @@ false moustache.
 on one rented A100, passed nine of nine cases in 50 turns and about ten minutes,
 for roughly $0.31 of GPU time. That is one run, on a corpus that Claude also
 passes in full, so it shows that the open model can do this work through this
-harness, not that it does it as well. RFC-0017 asks for ten trials per case
+harness, not that it does it as well. The same day, Sonnet 5.5 and Opus 5.5 in
+Claude Code also passed nine of nine, in 136 and 183 seconds, so on this
+corpus the open model is as correct and three to four and a half times slower
+(RFC-0017 §8.5). RFC-0017 asks for ten trials per case
 and a corpus of twenty before any such claim. Everything else measured in this
 README is of Claude.
 

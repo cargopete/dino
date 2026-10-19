@@ -341,6 +341,30 @@ model; tier B and C hardware were not tried. Before this run, the profile had
 already been checked by hand with one direct tool-call request and one
 read-only `gyr run` question, both correct.
 
+**Against Claude 5.5, same day, a different harness.** The same nine cases were
+given to headless Claude Code (2.1.303) on `claude-sonnet-5-5` and
+`claude-opus-5-5`, through a subscription rather than the API, and judged by a
+script applying the corpus's own assertions. Gyrfalcon has no 5.5 profiles and
+does not use subscription credentials (section 5), so this compares model and
+harness together, which is the comparison a person choosing between the two
+tools would make.
+
+| | Qwen3.8 27B in `gyr` | Sonnet 5.5 in Claude Code | Opus 5.5 in Claude Code |
+|---|---:|---:|---:|
+| passed | 9/9 | 9/9 | 9/9 |
+| wall time | 607 s | 136 s | 183 s |
+| output tokens | 16,269 | 11,706 | 13,236 |
+| cost | ~$0.31 GPU hire | $0.49 list | $1.02 list |
+
+Turns and input tokens are left out because the two harnesses count them
+differently: Claude Code sends a far larger system prompt, mostly from cache.
+The costs for Claude are what the CLI reports at list price, not what the
+subscription billed.
+
+The assertions separate none of the three, which is section 8.2's point made
+again. Speed separates them by three to four and a half times, and for a person
+waiting at a terminal that may matter more than anything this corpus asserts.
+
 ## 9. Amendments
 
 - **RFC-0001 §1.** The second paragraph's "three provider families" are kept.
