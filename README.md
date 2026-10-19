@@ -9,9 +9,10 @@ bounded, rather than assuming that every model behaves like one API wearing a
 false moustache.
 
 **The default has not yet completed a single turn.** Every measurement in this
-README is of Claude. The one request sent to Qwen3.8 27B on Model Studio, on
-2026-10-19, reached Alibaba and was refused because the model had not been
-activated on the account. Until it has passed the eval corpus, treat the default
+README is of Claude. Requests to Qwen3.8 27B on Model Studio on 2026-10-19
+reached Alibaba and were refused (`403 AccessDenied.Unpurchased`): the author's
+new account was held by Alibaba's risk control, so the model had no chance to
+answer. Until it has passed the eval corpus, treat the default
 as a stated intention, not as a recommendation. RFC-0017 is the plan.
 
 It is also a serious educational implementation of the machinery behind tools
@@ -219,9 +220,10 @@ gyr models
 gyr prompt --model claude-sonnet
 ```
 
-The default needs a Model Studio API key from the Singapore region, with
-Qwen3.8 27B activated on that account. A key without the activation gets
-`403 AccessDenied.Unpurchased` on the first turn.
+The default needs a Model Studio API key from the Singapore region, on an
+account that can call Qwen3.8 27B. It has no free quota and is billed per
+token. A key that cannot call it gets `403 AccessDenied.Unpurchased` on the
+first turn, whatever the reason the account cannot.
 
 ```console
 export QWEN_API_KEY=...

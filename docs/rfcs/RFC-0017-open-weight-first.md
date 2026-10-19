@@ -335,8 +335,10 @@ not argued.
    against vLLM serving the same weights. Early, because every later step
    depends on knowing the endpoint is what it claims.
    The default profile and its hosted endpoint are **done 2026-10-19**, ahead of
-   the probe; the first request was refused because the model was not
-   activated on the account, so nothing about the model is measured yet.
+   the probe. Every request so far was refused with `AccessDenied.Unpurchased`,
+   on the shared and the workspace endpoint alike, because the account was held
+   by Alibaba's risk control (`RISK.RISK_CONTROL_REJECTION` in the console).
+   Nothing about the model is measured yet.
 3. Served-context budget (§4.2 item 3).
 4. Harness support for repeated trials with Wilson intervals, and a per-case
    wall-time limit (§8.3). Without both, a ten-trial run on tier B hardware is
