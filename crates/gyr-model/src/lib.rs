@@ -222,7 +222,7 @@ fn terra() -> ModelProfile {
         provider_model: "gpt-5.6-terra".into(),
         display_name: "GPT-5.6 Terra".into(),
         provider: ProviderKind::OpenAi,
-        status: ProfileStatus::Supported,
+        status: ProfileStatus::Development,
         context_window_tokens: Some(1_050_000),
         max_output_tokens: Some(128_000),
         reasoning: ReasoningSupport::Effort(vec![
@@ -353,7 +353,7 @@ fn qwen_coder(
         provider_model: provider_model.into(),
         display_name: display_name.into(),
         provider: ProviderKind::Qwen,
-        status: ProfileStatus::Supported,
+        status: ProfileStatus::Development,
         context_window_tokens: Some(262_144),
         max_output_tokens: None,
         reasoning: ReasoningSupport::None,
@@ -417,7 +417,7 @@ fn qwen_3_6(key: &str, provider_model: &str, display_name: &str) -> ModelProfile
         provider_model: provider_model.into(),
         display_name: display_name.into(),
         provider: ProviderKind::Qwen,
-        status: ProfileStatus::Supported,
+        status: ProfileStatus::Development,
         context_window_tokens: Some(262_144),
         max_output_tokens: None,
         reasoning: ReasoningSupport::Toggle,
@@ -445,26 +445,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_contains_exactly_the_mvp_models() {
-        let profiles = supported_profiles();
-        let models = profiles
-            .iter()
-            .map(|profile| profile.provider_model.as_str())
+    fn only_profiles_measured_live_are_supported() {
+        let supported = supported_profiles()
+            .into_iter()
+            .map(|profile| profile.provider_model)
             .collect::<Vec<_>>();
-
-        assert_eq!(
-            models,
-            vec![
-                "gpt-5.6-terra",
-                "claude-opus-5",
-                "claude-sonnet-5",
-                "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-                "Qwen/Qwen3-Coder-Next",
-                "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-                "Qwen/Qwen3.6-27B",
-                "Qwen/Qwen3.6-35B-A3B",
-            ]
-        );
+        assert_eq!(supported, vec!["claude-opus-5", "claude-sonnet-5"]);
 
         let all = builtin_profiles();
         let unique_keys = all
@@ -472,26 +458,15 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-    }
-
-    #[test]
-    fn the_only_development_target_is_the_small_local_model() {
-        let development: Vec<String> = builtin_profiles()
-            .into_iter()
-            .filter(|profile| profile.status == ProfileStatus::Development)
-            .map(|profile| profile.key)
-            .collect();
-
-        assert_eq!(development, vec!["qwen3-8b".to_owned()]);
-        assert_eq!(builtin_profiles().len(), supported_profiles().len() + 1);
+        assert_eq!(all.len(), 9);
     }
 
     #[test]
     fn qwen_profiles_declare_parser_and_reasoning_differences() {
-        let profiles = supported_profiles();
+        let profiles = builtin_profiles();
         let qwen = profiles
             .iter()
-            .filter(|profile| profile.provider == ProviderKind::Qwen)
+            .filter(|profile| profile.provider == ProviderKind::Qwen && profile.key != "qwen3-8b")
             .collect::<Vec<_>>();
 
         assert_eq!(qwen.len(), 5);

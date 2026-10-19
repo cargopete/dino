@@ -39,9 +39,9 @@ Three things have changed since RFC-0001 put three providers side by side.
    cases pass on `claude-sonnet-5` and `claude-opus-5`. The Qwen adapter has
    passed the cross-provider conformance suite (RFC-0003 §7.1), which proves the
    wire and not the model: it has **never been driven against a live endpoint**.
-   Even so, five Qwen profiles are marked `supported` in the catalogue
-   (observed in source, `gyr-model/src/lib.rs`, 2026-10-19), which RFC-0003 §3.1
-   says requires a completed behavioural eval. The profile the project describes
+   Even so, five Qwen profiles, and the OpenAI profile `terra`, are marked
+   `supported` in the catalogue (observed in source, `gyr-model/src/lib.rs`,
+   2026-10-19), which RFC-0003 §3.1 says requires a completed behavioural eval. The profile the project describes
    as its widest behavioural range is the one with the least evidence, and the
    catalogue currently claims otherwise.
 3. **Honeyguide measured the failure modes.** The sibling project ran a
@@ -299,15 +299,17 @@ not argued.
 - **RFC-0003 §3.1.** `ProfileStatus` is keyed on (profile, serving stack).
   Every Qwen profile is `development` until it meets section 6's condition on
   some stack. This corrects the catalogue as it stands, which marks five of
-  them `supported` without a live run.
+  them `supported` without a live run. `terra` had the same defect for a
+  different reason (RFC-0003 §7.1: no credential to verify it) and is demoted
+  with them; it returns when a live corpus run passes.
 - **RFC-0012 §10.** The questions about a per-case timeout, a corpus that
   discriminates on assertions, and whether `search` and `list` earn their place
   on a large workspace are taken up by section 8 of this document.
 
 ## 10. Build order
 
-1. Demote the five Qwen profiles to `development`, so the catalogue stops
-   claiming what nothing has measured.
+1. Demote the five Qwen profiles and `terra` to `development`, so the
+   catalogue stops claiming what nothing has measured. **Done 2026-10-19.**
 2. `gyr probe`, against a vLLM endpoint serving `qwen3-coder-30b-a3b`. Early,
    because every later step depends on knowing the endpoint is what it claims.
 3. Served-context budget (§4.2 item 3).

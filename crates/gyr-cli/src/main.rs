@@ -206,7 +206,7 @@ fn list_models(json: bool) -> Result<()> {
     for profile in builtin_profiles() {
         let note = match profile.status {
             ProfileStatus::Supported => "",
-            ProfileStatus::Development => "  (development only)",
+            ProfileStatus::Development => "  (development)",
         };
         println!(
             "{:<24} {:<12} {}{note}",

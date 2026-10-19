@@ -55,10 +55,10 @@ pub struct SamplingDefaults {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileStatus {
-    /// An MVP coding target.
+    /// A coding target that has completed the behavioural evals against a live
+    /// endpoint.
     Supported,
-    /// Present to exercise the loop against real inference. Not a coding target
-    /// and not through any conformance suite.
+    /// Not yet measured live, or not a coding target at all.
     Development,
 }
 

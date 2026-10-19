@@ -161,23 +161,26 @@ unconfined is the worst combination here.
 The catalogue is explicit data rather than inference from a URL or a model-name
 substring. An adapter may expose less than a model can do and never more.
 
-| Key | Provider | Model |
-|---|---|---|
-| `terra` | OpenAI Responses | `gpt-5.6-terra` |
-| `claude-opus` | Anthropic Messages | `claude-opus-5` |
-| `claude-sonnet` | Anthropic Messages | `claude-sonnet-5` |
-| `qwen3-coder-480b-a35b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-480B-A35B-Instruct` |
-| `qwen3-coder-next` | Qwen Chat Completions | `Qwen/Qwen3-Coder-Next` |
-| `qwen3-coder-30b-a3b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
-| `qwen3.6-27b` | Qwen Chat Completions | `Qwen/Qwen3.6-27B` |
-| `qwen3.6-35b-a3b` | Qwen Chat Completions | `Qwen/Qwen3.6-35B-A3B` |
-| `qwen3-8b` | Qwen Chat Completions | `qwen3:8b` — development only |
+| Key | Provider | Model | Status |
+|---|---|---|---|
+| `terra` | OpenAI Responses | `gpt-5.6-terra` | development |
+| `claude-opus` | Anthropic Messages | `claude-opus-5` | supported |
+| `claude-sonnet` | Anthropic Messages | `claude-sonnet-5` | supported |
+| `qwen3-coder-480b-a35b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-480B-A35B-Instruct` | development |
+| `qwen3-coder-next` | Qwen Chat Completions | `Qwen/Qwen3-Coder-Next` | development |
+| `qwen3-coder-30b-a3b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | development |
+| `qwen3.6-27b` | Qwen Chat Completions | `Qwen/Qwen3.6-27B` | development |
+| `qwen3.6-35b-a3b` | Qwen Chat Completions | `Qwen/Qwen3.6-35B-A3B` | development |
+| `qwen3-8b` | Qwen Chat Completions | `qwen3:8b` | development, not a coding target |
+
+`supported` means the corpus has passed against a live endpoint, which so far is
+true of the two Claude profiles and nothing else. The rest have passed the wire
+conformance suite and no live run; RFC-0017 says what promotes them.
 
 Qwen's reference serving stacks are vLLM and SGLang. Ollama and other local
 runtimes may follow once they pass the same conformance suite. `qwen3-8b` is
 present so the loop can be driven by real inference on a laptop; it is not a
-coding target, has been through no conformance suite, and `gyr models` says so
-beside it.
+coding target and never will be.
 
 ## Using it
 
