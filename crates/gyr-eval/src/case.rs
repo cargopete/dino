@@ -48,6 +48,11 @@ pub struct Expectations {
     /// can only ask for edits will only ever learn about editing.
     #[serde(default)]
     pub answer_contains: Vec<String>,
+    /// After the run, copy the case's `hidden/` tree over the workspace and
+    /// require `cargo test` to pass. The model never sees these tests, so a
+    /// case can check behaviour rather than only that the code compiles.
+    #[serde(default)]
+    pub hidden_tests: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -83,6 +88,12 @@ impl Case {
         if !directory.join("workspace").is_dir() {
             return Err(EvalError::Case(format!(
                 "case {} has no workspace/ directory to copy",
+                case.name
+            )));
+        }
+        if case.expect.hidden_tests && !directory.join("hidden").is_dir() {
+            return Err(EvalError::Case(format!(
+                "case {} asks for hidden tests and has no hidden/ directory",
                 case.name
             )));
         }
@@ -130,6 +141,15 @@ impl Case {
         copy_tree(&self.directory.join("workspace"), &workspace)?;
         Ok(workspace)
     }
+}
+
+/// Lays the case's hidden tests over a finished workspace.
+///
+/// # Errors
+///
+/// Returns [`EvalError`] when the copy fails.
+pub fn overlay_hidden(case: &Case, workspace: &Path) -> Result<(), EvalError> {
+    copy_tree(&case.directory.join("hidden"), workspace)
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), EvalError> {

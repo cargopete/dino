@@ -178,9 +178,16 @@ pub async fn run_case(
 
     check(case, &workspace, &files_changed, &answer, &mut failures);
     if let Some(expectation) = case.expect.cargo_check
-        && let Some(failure) = check_cargo(&workspace, sandbox, expectation).await?
+        && let Some(failure) = check_cargo(&workspace, Arc::clone(&sandbox), expectation).await?
     {
         failures.push(failure);
+    }
+    // Last, because the overlay changes the workspace every check above reads.
+    if case.expect.hidden_tests {
+        crate::case::overlay_hidden(case, &workspace)?;
+        if let Some(failure) = check_hidden_tests(&workspace, sandbox).await? {
+            failures.push(failure);
+        }
     }
 
     Ok(Outcome {
@@ -305,6 +312,24 @@ fn check(
 
 fn read(workspace: &Path, relative: &str) -> Option<String> {
     std::fs::read_to_string(workspace.join(relative)).ok()
+}
+
+/// Runs `cargo test` over a workspace with the hidden tests laid in.
+///
+/// # Errors
+///
+/// Returns [`EvalError`] when Cargo cannot be run at all.
+async fn check_hidden_tests(
+    workspace: &Path,
+    sandbox: Arc<dyn Sandbox>,
+) -> Result<Option<String>, EvalError> {
+    let cargo = CargoTool::new(workspace, CargoLimits::default(), sandbox)
+        .map_err(|error| EvalError::Setup(error.to_string()))?;
+    let run = cargo
+        .run_tests()
+        .await
+        .map_err(|error| EvalError::Setup(error.to_string()))?;
+    Ok((!run.passed).then(|| format!("hidden tests failed: {}", run.summary)))
 }
 
 /// Runs `cargo check` over a finished case and reports whether it matched.

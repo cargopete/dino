@@ -59,6 +59,14 @@ pub struct CargoTool {
     sandbox: Arc<dyn Sandbox>,
 }
 
+/// The outcome of [`CargoTool::run_tests`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestRun {
+    pub passed: bool,
+    /// Result lines and the first panics or errors, for a failure message.
+    pub summary: String,
+}
+
 impl CargoTool {
     /// Creates the tool for one workspace root.
     ///
@@ -218,6 +226,49 @@ impl CargoTool {
             )));
         }
         Ok(parsed)
+    }
+
+    /// Runs `cargo test` over the whole workspace, for a harness rather than a
+    /// model: the result is a verdict and the tail of the output, not a tool
+    /// result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] when the child cannot be run.
+    pub async fn run_tests(&self) -> Result<TestRun, ToolError> {
+        let arguments = self.arguments(&CargoRequest {
+            command: CargoCommand::Test,
+            package: None,
+            filter: None,
+        });
+        let execution = process::run(
+            &Self::program(),
+            &arguments,
+            &self.root,
+            self.sandbox.as_ref(),
+            self.limits.max_captured_bytes,
+            self.limits.timeout,
+        )
+        .await?;
+        if execution.timed_out {
+            return Ok(TestRun {
+                passed: false,
+                summary: format!("killed after {} seconds", self.limits.timeout.as_secs()),
+            });
+        }
+        let passed = execution.exit_code == Some(0);
+        let output = format!("{}\n{}", execution.stdout, execution.stderr);
+        let summary = output
+            .lines()
+            .filter(|line| {
+                line.starts_with("test result:")
+                    || line.contains("panicked at")
+                    || line.starts_with("error")
+            })
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        Ok(TestRun { passed, summary })
     }
 
     /// The Cargo invocation the gate will make, for the approval subject.

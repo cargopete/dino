@@ -8,6 +8,13 @@ Assertions in `case.toml` decide pass or fail and are about the outcome. What a
 model did on the way is a metric, and metrics decide nothing. RFC-0012 section 2
 explains why that line matters.
 
+A case may also set `hidden_tests = true` and ship a `hidden/` tree. After the
+run, and after every other assertion has been checked, the harness copies it over
+the workspace and requires `cargo test` to pass. The model never sees those
+tests, which is what lets a case check behaviour instead of only that the code
+compiles. A `reference/` tree beside them, never copied, holds a solution that
+proves the case can be passed.
+
 Two rules the harness applies to every case, whether or not the case remembers:
 
 - A case where nothing in the workspace changed fails, even if the code already

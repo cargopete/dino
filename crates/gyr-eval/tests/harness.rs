@@ -350,3 +350,84 @@ fn a_case_without_a_workspace_is_refused() {
 
     assert!(error.to_string().contains("workspace/"), "said: {error}");
 }
+
+fn hidden_test_case(scratch: &Scratch) -> Case {
+    let directory = scratch.path.join("case-with-hidden-tests");
+    fs::create_dir_all(directory.join("workspace/src")).unwrap();
+    fs::create_dir_all(directory.join("hidden/tests")).unwrap();
+    fs::write(
+        directory.join("case.toml"),
+        "name = \"hidden\"\nprompt = \"make two return 2\"\nmax_turns = 4\n\n\
+         [expect]\ncargo_check = \"clean\"\nhidden_tests = true\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("workspace/Cargo.toml"),
+        "[workspace]\n[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("workspace/src/lib.rs"),
+        "pub fn two() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("hidden/tests/two.rs"),
+        "#[test]\nfn two_is_two() {\n    assert_eq!(fixture::two(), 2);\n}\n",
+    )
+    .unwrap();
+    Case::load(&directory).unwrap()
+}
+
+async fn answer_two_with(case: &Case, scratch: &Scratch, value: &str) -> gyr_eval::Outcome {
+    let workspace = scratch.path.join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let source = case.directory.join("workspace/src/lib.rs");
+    let sha = digest(&fs::read(source).unwrap());
+    run(
+        case,
+        &Scratch {
+            path: workspace.clone(),
+        },
+        vec![
+            tool_turn(
+                "c1",
+                "apply_patch",
+                patch("src/lib.rs", &sha, "    1\n", &format!("    {value}\n")),
+            ),
+            text_turn("Done."),
+        ],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn hidden_tests_decide_a_case_the_compiler_cannot() {
+    let scratch = Scratch::new();
+    let case = hidden_test_case(&scratch);
+
+    let right = answer_two_with(&case, &scratch, "2").await;
+    assert!(right.passed, "failures: {:?}", right.failures);
+
+    let wrong = answer_two_with(&case, &scratch, "3").await;
+    assert!(!wrong.passed);
+    assert!(
+        wrong
+            .failures
+            .iter()
+            .any(|failure| failure.starts_with("hidden tests failed")),
+        "failures: {:?}",
+        wrong.failures
+    );
+}
+
+#[test]
+fn a_case_asking_for_hidden_tests_must_have_them() {
+    let scratch = Scratch::new();
+    let case = hidden_test_case(&scratch);
+    fs::remove_dir_all(case.directory.join("hidden")).unwrap();
+
+    let error = Case::load(&case.directory).unwrap_err();
+
+    assert!(error.to_string().contains("hidden/"), "said: {error}");
+}
