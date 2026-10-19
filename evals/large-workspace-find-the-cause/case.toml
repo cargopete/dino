@@ -1,0 +1,33 @@
+name = "large-workspace-find-the-cause"
+prompt = """
+Users report that the summary gets durations wrong once a project passes an \
+hour. A project with 90 minutes logged shows `30m` instead of `1h 30m`, and one \
+with two hours and five minutes shows `5m`. Anything under an hour is right.
+
+Find the cause and fix it where it is, with the smallest change that does it. \
+Do not work around it in the code that calls the faulty function, do not change \
+code that is not at fault, and do not edit the tests. Every other report that \
+shows these durations should come out right too, and nothing else may change \
+behaviour. `cargo check` must be clean and `cargo test` must pass.
+"""
+max_turns = 40
+
+# Fifty files. The summary reaches the fault through a plugin chosen at run
+# time, a duration style and a formatting helper, in that order. Three other
+# functions format durations and look more likely: one in legacy/ is unused and
+# visibly drops the hours, the other two are correct.
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = [
+  "Cargo.toml",
+  "tests/app.rs",
+  "src/legacy/fmt_v1.rs",
+  "src/legacy/report_v1.rs",
+  "src/util/time.rs",
+  "src/fmt/duration.rs",
+  "src/fmt/units.rs",
+  "src/plugins/json.rs",
+  "src/plugins/plain.rs",
+  "src/report/summary.rs",
+]

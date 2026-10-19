@@ -1,0 +1,94 @@
+name = "make-it-thread-safe"
+prompt = """
+This crate is single-threaded: `Registry`, `Scheduler` and `Tally` are built on \
+`Rc`, `RefCell` and `Cell`. Make it safe to share across threads. When you are done:
+
+- `Registry`, `Scheduler`, `Tally`, `Job`, `Event` and `Stats` are all `Send + Sync`, \
+and `Registry` is still `Clone` with clones sharing one registry.
+- `Registry::subscribe` takes `F: Fn(&Event) + Send + Sync + 'static`. Every other \
+public signature stays exactly as it is, including:
+
+  pub fn submit(&self, name: &str, steps: u32) -> JobId
+  pub fn get(&self, id: JobId) -> Option<Job>
+  pub fn advance(&self, id: JobId) -> Option<JobState>
+  pub fn cancel(&self, id: JobId) -> bool
+  pub fn running(&self) -> Vec<JobId>
+  pub fn unsubscribe(&self, id: SubscriptionId) -> bool
+  pub fn stats(&self) -> Stats
+  pub fn tick(&self) -> usize                       (on Scheduler)
+  pub fn attach(registry: &Registry) -> Self        (on Tally)
+
+- Any number of threads may call any of these at once. No job may be lost, no id \
+reused, no job advanced past its total, and `stats()` and `Tally` must count every \
+event exactly once. `Scheduler::tick` returns the number of jobs it actually moved, \
+so ticks racing on several threads sum to the total number of steps taken.
+- A subscriber callback may call any `Registry` method, including `subscribe`, and \
+`unsubscribe` on its own id, without deadlocking or panicking. Once `unsubscribe` \
+has returned, events published afterwards are not delivered to that subscriber. \
+A subscriber added while an event is being delivered may or may not receive that event.
+
+No `unsafe` (keep `#![forbid(unsafe_code)]`), no `static mut`, no new dependencies, \
+and do not change the tests in tests/. `cargo check` must be clean.
+"""
+max_turns = 40
+
+# Translating RefCell to Mutex or RwLock compiles and passes the visible tests,
+# then deadlocks the first time a callback unsubscribes or calls back in, because
+# the RefCell version leaned on shared borrows nesting. The hidden tests run that
+# on a thread with a deadline, so a deadlock fails instead of hanging.
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "tests/basic.rs"]
+
+[[expect.contains]]
+file = "src/lib.rs"
+text = "#![forbid(unsafe_code)]"
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "unsafe impl"
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "static mut"
+
+[[expect.not_contains]]
+file = "src/bus.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/bus.rs"
+text = "static mut"
+
+[[expect.not_contains]]
+file = "src/registry.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/registry.rs"
+text = "static mut"
+
+[[expect.not_contains]]
+file = "src/job.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/job.rs"
+text = "static mut"
+
+[[expect.not_contains]]
+file = "src/scheduler.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/scheduler.rs"
+text = "static mut"
+
+[[expect.not_contains]]
+file = "src/tally.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/tally.rs"
+text = "static mut"
