@@ -212,6 +212,21 @@ impl EventSink for Renderer {
                     &format!("  told the model it has {turns_left} turn(s) left\n"),
                 ))
             }
+            AgentEvent::TurnCutOff {
+                input_tokens,
+                output_tokens,
+                window_tokens,
+                ..
+            } => {
+                self.break_stream()?;
+                write_out(&style::paint(
+                    WARN,
+                    &format!(
+                        "  the window filled mid-turn ({input_tokens} in, {output_tokens} out, \
+                         of {window_tokens}); continuing after elision\n"
+                    ),
+                ))
+            }
             AgentEvent::TurnRetried { attempt, error, .. } => {
                 self.break_stream()?;
                 write_out(&style::paint(

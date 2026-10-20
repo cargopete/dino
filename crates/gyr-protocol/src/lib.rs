@@ -325,4 +325,12 @@ pub enum AgentEvent {
         model_turn: u32,
         turns_left: u32,
     },
+    /// The turn stopped for length because the prompt and its output filled
+    /// the window, so history was reduced and the run went on.
+    TurnCutOff {
+        model_turn: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+        window_tokens: u32,
+    },
 }

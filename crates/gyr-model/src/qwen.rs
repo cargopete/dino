@@ -680,12 +680,17 @@ impl QwenStreamParser {
                     name: accumulator.name.clone(),
                 });
             }
-            let arguments = serde_json::from_str(&accumulator.arguments).map_err(|error| {
-                ModelError::Protocol(format!(
-                    "Qwen returned invalid arguments for {}: {error}",
-                    accumulator.name
-                ))
-            })?;
+            let arguments = match serde_json::from_str(&accumulator.arguments) {
+                Ok(arguments) => arguments,
+                // The output allowance ran out mid-call; the call was never made.
+                Err(_) if reason == StopReason::MaxTokens => continue,
+                Err(error) => {
+                    return Err(ModelError::Protocol(format!(
+                        "Qwen returned invalid arguments for {}: {error}",
+                        accumulator.name
+                    )));
+                }
+            };
             events.push(ModelEvent::ToolCallCompleted {
                 call: ToolCall {
                     id: accumulator.id.clone(),
@@ -987,6 +992,30 @@ mod tests {
             .unwrap();
 
         assert!(matches!(parser.finish(), Err(ModelError::Protocol(_))));
+    }
+
+    #[test]
+    fn a_call_cut_off_by_the_length_limit_is_dropped() {
+        let mut parser = QwenStreamParser::default();
+        parser
+            .consume(
+                r#"{"id":"chat-1","choices":[{"index":0,"delta":{"content":"Writing it.","tool_calls":[{"index":0,"id":"call-1","function":{"name":"write_file","arguments":"{\"path\": \"src/li"}}]},"finish_reason":"length"}]}"#,
+            )
+            .unwrap();
+
+        let (events, assistant) = parser.finish().unwrap();
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ModelEvent::ToolCallCompleted { .. })),
+            "{events:?}"
+        );
+        assert!(events.contains(&ModelEvent::Finished {
+            reason: StopReason::MaxTokens
+        }));
+        assert!(assistant.tool_calls.is_empty());
+        assert_eq!(assistant.content.as_deref(), Some("Writing it."));
     }
 
     #[test]

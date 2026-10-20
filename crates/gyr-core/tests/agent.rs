@@ -569,6 +569,177 @@ async fn a_model_with_no_documented_window_is_left_alone() {
     assert!(agent.session().elide_requests.is_empty());
 }
 
+/// A turn that reports its usage and stops for the given reason.
+fn measured_turn(input: u64, output: u64, mut events: Vec<ModelEvent>, reason: StopReason) -> Turn {
+    events.push(ModelEvent::Usage {
+        usage: gyr_protocol::TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            ..gyr_protocol::TokenUsage::default()
+        },
+    });
+    events.push(ModelEvent::Finished { reason });
+    Turn::Events(events)
+}
+
+fn cut_offs(result: &gyr_core::RunResult) -> Vec<u32> {
+    result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnCutOff { model_turn, .. } => Some(*model_turn),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_turn_cut_off_by_a_full_window_elides_and_continues() {
+    // A self-hosted server shrinks the output allowance to what the window has
+    // left, so a long prompt ends the turn with a length stop.
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            measured_turn(
+                900,
+                100,
+                vec![ModelEvent::TextDelta {
+                    text: "half a tho".into(),
+                }],
+                StopReason::MaxTokens,
+            ),
+            usage_turn(300, "done"),
+        ])
+        .with_window(Some(WINDOW))
+        .eliding(3, 4_096),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("a long task").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(result.model_turns, 2);
+    assert_eq!(cut_offs(&result), vec![1]);
+    assert!(!elisions(&result).is_empty());
+    let TurnInput::User { content } = &agent.session().inputs[1] else {
+        panic!(
+            "expected a note to the model, got {:?}",
+            agent.session().inputs[1]
+        );
+    };
+    assert!(content.contains("cut off"), "{content}");
+}
+
+#[tokio::test]
+async fn calls_completed_before_the_window_filled_are_answered() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            measured_turn(
+                900,
+                100,
+                vec![ModelEvent::ToolCallCompleted {
+                    call: tool_call("call-1", "read", "src/lib.rs"),
+                }],
+                StopReason::MaxTokens,
+            ),
+            usage_turn(300, "done"),
+        ])
+        .with_window(Some(WINDOW))
+        .eliding(3, 4_096),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("a long task").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(agent.tools().executed_names(), vec!["read".to_owned()]);
+    let TurnInput::ToolResults { results } = &agent.session().inputs[1] else {
+        panic!("expected tool results, got {:?}", agent.session().inputs[1]);
+    };
+    assert!(results[0].output.content.contains("cut off"));
+}
+
+#[tokio::test]
+async fn a_turn_cut_off_with_nothing_to_elide_ends_the_run() {
+    let mut agent = budgeted(vec![measured_turn(
+        900,
+        100,
+        Vec::new(),
+        StopReason::MaxTokens,
+    )]);
+
+    let result = agent.run("a long task").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::MaxTokens);
+    assert_eq!(result.model_turns, 1);
+}
+
+#[tokio::test]
+async fn a_length_stop_with_room_left_is_the_model_s_own_limit() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![measured_turn(
+            100,
+            100,
+            Vec::new(),
+            StopReason::MaxTokens,
+        )])
+        .with_window(Some(WINDOW))
+        .eliding(3, 4_096),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("a short task").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::MaxTokens);
+    assert!(cut_offs(&result).is_empty());
+    assert!(elisions(&result).is_empty());
+}
+
+#[tokio::test]
+async fn history_is_reduced_while_the_next_turn_still_fits() {
+    // 600 of 1000 is under the 85% mark, but a model that has written 250 in
+    // one turn needs room for that again, twice: once replayed, once new.
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            measured_turn(
+                400,
+                250,
+                vec![ModelEvent::ToolCallCompleted {
+                    call: tool_call("call-1", "read", "a.rs"),
+                }],
+                StopReason::ToolUse,
+            ),
+            measured_turn(
+                600,
+                50,
+                vec![ModelEvent::ToolCallCompleted {
+                    call: tool_call("call-2", "read", "b.rs"),
+                }],
+                StopReason::ToolUse,
+            ),
+            usage_turn(300, "done"),
+        ])
+        .with_window(Some(WINDOW))
+        .eliding(3, 4_096),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("a long task").await.unwrap();
+
+    let elided_at: Vec<u32> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Elided { model_turn, .. } => Some(*model_turn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(elided_at, vec![2]);
+}
+
 /// Keeps the outcome a run reports, which is what the session log and eval read.
 struct OutcomeSink(std::sync::Arc<std::sync::Mutex<Option<gyr_core::session::RunOutcome>>>);
 
