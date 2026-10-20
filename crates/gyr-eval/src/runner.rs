@@ -173,6 +173,14 @@ pub async fn run_case(
         }
     };
 
+    let blocked =
+        matches!(&run, Ok(result) if result.stop_reason == gyr_protocol::StopReason::Blocked);
+    match (blocked, case.expect.blocked) {
+        (true, false) => failures.push(format!("the model reported a blocker: {answer}")),
+        (false, true) => failures.push("the model did not report the blocker".to_owned()),
+        _ => {}
+    }
+
     let after = fingerprint_tree(&workspace)?;
     let files_changed = changed_files(&before, &after);
     let metrics = metrics::from_log(&log_path)?;
@@ -219,6 +227,7 @@ pub fn session_tools(workspace: &Path, sandbox: Arc<dyn Sandbox>) -> Result<Tool
     let setup = |error: gyr_core::ToolError| EvalError::Setup(error.to_string());
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         Box::new(WorkspaceTools::new(workspace, ToolLimits::default()).map_err(setup)?),
+        Box::new(gyr_core::blocker::BlockerTool),
         Box::new(
             ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
         ),

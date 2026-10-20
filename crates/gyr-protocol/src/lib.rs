@@ -140,6 +140,8 @@ pub enum StopReason {
     MaxTokens,
     Refusal,
     Cancelled,
+    /// The model reported that the task cannot be done as asked.
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

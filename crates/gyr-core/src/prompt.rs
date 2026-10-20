@@ -60,6 +60,9 @@ Tool discipline:
 - `exec` runs one program with one argument vector. There is no shell: no pipes,
   no redirection, no globbing, no `&&`. Use a program's own flags instead of a
   pipeline, and prefer `read` and `search` over `cat` and `grep`.
+- If the task cannot be done as asked, because the request contradicts itself
+  or the tests and code it must keep, call `report_blocker` with the evidence.
+  Do not change a test or the spec to make the two agree.
 - Processes may be confined. Where they are, they cannot write outside the
   workspace or reach the network, so anything needing either will fail for that
   reason rather than because you did it wrong. Say so plainly instead of trying

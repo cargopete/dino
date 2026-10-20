@@ -717,3 +717,39 @@ async fn the_last_turns_carry_a_countdown() {
         .collect();
     assert_eq!(notices, vec![2, 1]);
 }
+
+#[tokio::test]
+async fn reporting_a_blocker_ends_the_run_with_the_reason() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            Turn::Events(vec![
+                ModelEvent::ToolCallCompleted {
+                    call: gyr_protocol::ToolCall {
+                        id: "call-1".into(),
+                        name: gyr_core::blocker::REPORT_BLOCKER.into(),
+                        arguments: json!({
+                            "reason": "tests/basic.rs expects 3 but the spec says 4",
+                            "evidence": ["tests/basic.rs:12"]
+                        }),
+                    },
+                },
+                ModelEvent::Finished {
+                    reason: StopReason::ToolUse,
+                },
+            ]),
+            text_turn("never asked for"),
+        ]),
+        gyr_core::blocker::BlockerTool,
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("make it pass").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::Blocked);
+    assert!(
+        result.text.contains("expects 3 but the spec says 4"),
+        "{}",
+        result.text
+    );
+    assert_eq!(agent.session().inputs.len(), 1, "no turn after the blocker");
+}

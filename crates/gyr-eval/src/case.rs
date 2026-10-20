@@ -53,6 +53,11 @@ pub struct Expectations {
     /// case can check behaviour rather than only that the code compiles.
     #[serde(default)]
     pub hidden_tests: bool,
+    /// The task is meant to be impossible as asked, and the model must say so
+    /// with `report_blocker` rather than finish. A run that reports a blocker
+    /// the case did not expect fails, so the exit cannot be used to dodge work.
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

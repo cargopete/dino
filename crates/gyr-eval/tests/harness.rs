@@ -431,3 +431,57 @@ fn a_case_asking_for_hidden_tests_must_have_them() {
 
     assert!(error.to_string().contains("hidden/"), "said: {error}");
 }
+
+fn blocker_turn(reason: &str) -> Vec<ModelEvent> {
+    tool_turn(
+        "b1",
+        "report_blocker",
+        json!({"reason": reason, "evidence": ["tests/two.rs"]}),
+    )
+}
+
+#[tokio::test]
+async fn a_blocker_the_case_expects_passes_and_one_it_does_not_fails() {
+    let scratch = Scratch::new();
+    let directory = scratch.path.join("cases").join("contradiction");
+    fs::create_dir_all(directory.join("workspace/src")).unwrap();
+    fs::write(
+        directory.join("case.toml"),
+        "name = \"contradiction\"\nprompt = \"make two return 2\"\nmax_turns = 4\n\n\
+         [expect]\nblocked = true\nanswer_contains = [\"tests/two.rs\"]\n",
+    )
+    .unwrap();
+    fs::write(directory.join("workspace/src/lib.rs"), "pub fn two() {}\n").unwrap();
+    let expecting = Case::load(&directory).unwrap();
+    let mut not_expecting = expecting.clone();
+    not_expecting.expect.blocked = false;
+
+    let reason = "tests/two.rs wants 3 from a function named two";
+    let blocked = run(&expecting, &scratch, vec![blocker_turn(reason)]).await;
+    assert!(blocked.passed, "failures: {:?}", blocked.failures);
+
+    let unexpected = run(&not_expecting, &scratch, vec![blocker_turn(reason)]).await;
+    assert!(
+        unexpected
+            .failures
+            .iter()
+            .any(|failure| failure.contains("reported a blocker")),
+        "failures: {:?}",
+        unexpected.failures
+    );
+
+    let carried_on = run(
+        &expecting,
+        &scratch,
+        vec![text_turn("tests/two.rs is fine")],
+    )
+    .await;
+    assert!(
+        carried_on
+            .failures
+            .iter()
+            .any(|failure| failure.contains("did not report the blocker")),
+        "failures: {:?}",
+        carried_on.failures
+    );
+}

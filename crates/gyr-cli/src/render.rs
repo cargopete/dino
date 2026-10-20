@@ -366,6 +366,7 @@ fn stop_reason_label(reason: StopReason) -> &'static str {
         StopReason::ToolUse => "waiting on tools",
         StopReason::MaxTokens => "hit the output limit",
         StopReason::Refusal => "refused",
+        StopReason::Blocked => "blocked",
         StopReason::Cancelled => "cancelled",
     }
 }
