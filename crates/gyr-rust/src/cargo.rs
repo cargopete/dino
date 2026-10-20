@@ -307,6 +307,7 @@ impl CargoTool {
                     self.limits.timeout.as_secs()
                 ),
                 truncated: execution.truncated,
+                restored_protected_paths: execution.restored,
             });
         }
 
@@ -320,6 +321,7 @@ impl CargoTool {
             packages: None,
             output: String::new(),
             truncated: execution.truncated,
+            restored_protected_paths: execution.restored,
         };
 
         match request.command {
@@ -495,6 +497,9 @@ struct CargoOutput {
     packages: Option<Vec<PackageSummary>>,
     output: String,
     truncated: bool,
+    /// Protected paths this command changed, which have been put back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    restored_protected_paths: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

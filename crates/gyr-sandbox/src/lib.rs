@@ -11,6 +11,7 @@
 //! rejected rather than attempted badly.
 
 mod landlock;
+mod restore;
 mod seatbelt;
 
 use std::fmt::Debug;
@@ -19,6 +20,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use crate::landlock::Landlock;
+pub use crate::restore::Snapshot;
 pub use crate::seatbelt::Seatbelt;
 
 #[derive(Debug, Error)]
@@ -51,6 +53,16 @@ pub trait Sandbox: Send + Sync + Debug {
     /// not only to the file tools.
     fn protects_paths(&self) -> bool {
         false
+    }
+
+    /// The protected paths as they are now, for a sandbox that puts them back
+    /// after a process rather than stopping the write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Profile`] when a protected path cannot be read.
+    fn snapshot(&self) -> Result<Option<Snapshot>, SandboxError> {
+        Ok(None)
     }
 
     /// A temporary directory the child may write to, inside the confined set.
@@ -116,8 +128,8 @@ pub fn detect(workspace: &Path) -> Result<Box<dyn Sandbox>, SandboxError> {
 /// paths where the platform can.
 ///
 /// Landlock cannot: it only grants, and a grant on the workspace covers
-/// everything beneath it. On Linux the paths are protected by the file tools
-/// alone, and a process can still write them.
+/// everything beneath it. On Linux the paths are put back after each process
+/// instead.
 ///
 /// # Errors
 ///
@@ -130,7 +142,7 @@ pub fn detect_protecting(
         return Ok(Box::new(Seatbelt::protecting(workspace, protected)?));
     }
     if cfg!(target_os = "linux") {
-        return Ok(Box::new(Landlock::new(workspace)?));
+        return Ok(Box::new(Landlock::protecting(workspace, protected)?));
     }
     Err(SandboxError::Unavailable(format!(
         "{} has no Gyrfalcon sandbox yet; see RFC-0009 section 5",
