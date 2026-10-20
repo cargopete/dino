@@ -99,7 +99,7 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         // each case gets its own. An unattended run is exactly when the
         // containment has to be real.
         let workspace = case.materialise(&scratch)?;
-        let sandbox = config::build_sandbox(args.sandbox, &workspace)?;
+        let sandbox = config::build_sandbox(args.sandbox, &workspace, &case.protected)?;
 
         let settings = eval_settings(&args, &profile, &workspace);
         let build = |prompt: String, tools: Vec<gyr_protocol::ToolDefinition>| {
@@ -159,6 +159,7 @@ fn eval_settings(
         max_turns: std::num::NonZeroU32::new(1).expect("1 is non-zero"),
         mode: crate::config::ApprovalMode::AllowAll,
         sandbox: args.sandbox,
+        protected: Vec::new(),
         show_reasoning: false,
         api_base: args.api_base.clone(),
         disable_thinking: args.no_thinking,

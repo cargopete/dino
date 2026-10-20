@@ -63,6 +63,9 @@ pub struct WorkspaceTools {
     /// or through its own write. A file that still has it has not changed
     /// behind the model's back, whatever hash the model copies into a patch.
     seen: Mutex<HashMap<PathBuf, String>>,
+    /// Workspace-relative paths no tool may write, such as the tests a task is
+    /// judged by. A model under pressure edits those to pass.
+    protected: Vec<PathBuf>,
 }
 
 impl WorkspaceTools {
@@ -77,7 +80,36 @@ impl WorkspaceTools {
             root: WorkspaceRoot::new(root)?,
             limits,
             seen: Mutex::new(HashMap::new()),
+            protected: Vec::new(),
         })
+    }
+
+    /// Refuses writes beneath these workspace-relative paths.
+    #[must_use]
+    pub fn protecting(mut self, paths: Vec<PathBuf>) -> Self {
+        self.protected = paths;
+        self
+    }
+
+    /// Resolves a path for writing, refusing one that is protected.
+    fn writable(&self, path: &str, existing: bool) -> Result<PathBuf, ToolError> {
+        let resolved = if existing {
+            self.root.resolve_file(path)?
+        } else {
+            self.root.resolve_writable(path)?
+        };
+        let relative = PathBuf::from(self.root.relative(&resolved)?);
+        if self
+            .protected
+            .iter()
+            .any(|protected| relative.starts_with(protected))
+        {
+            return Err(ToolError::new(format!(
+                "{path} is protected and cannot be changed. If the task cannot be done \
+                 without changing it, call report_blocker and say why."
+            )));
+        }
+        Ok(resolved)
     }
 
     #[must_use]
@@ -196,12 +228,12 @@ impl WorkspaceTools {
             }
             "apply_patch" => {
                 let arguments: PatchArguments = parse_arguments(&call.arguments, "apply_patch")?;
-                let resolved = self.root.resolve_file(&arguments.path)?;
+                let resolved = self.writable(&arguments.path, true)?;
                 Ok(ToolAction::mutating(self.root.relative(&resolved)?))
             }
             "write_file" => {
                 let arguments: WriteArguments = parse_arguments(&call.arguments, "write_file")?;
-                let resolved = self.root.resolve_writable(&arguments.path)?;
+                let resolved = self.writable(&arguments.path, false)?;
                 Ok(ToolAction::mutating(self.root.relative(&resolved)?))
             }
             name => Err(ToolError::new(format!("unknown tool {name:?}"))),
@@ -428,7 +460,7 @@ impl WorkspaceTools {
         if arguments.old_text == arguments.new_text {
             return Err(ToolError::new("patch would not change the file"));
         }
-        let path = self.root.resolve_file(&arguments.path)?;
+        let path = self.writable(&arguments.path, true)?;
         let bytes = fs::read(&path).map_err(|error| file_error("read", &path, &error))?;
         let before_sha256 = fingerprint(&bytes);
         self.check_current(
@@ -501,7 +533,7 @@ impl WorkspaceTools {
     }
 
     fn write_file(&self, arguments: WriteArguments) -> Result<ToolOutput, ToolError> {
-        let path = self.root.resolve_writable(&arguments.path)?;
+        let path = self.writable(&arguments.path, false)?;
         let created = match fs::read(&path) {
             Ok(bytes) => {
                 let found = fingerprint(&bytes);
@@ -1384,5 +1416,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(action, ToolAction::mutating("src/new.rs"));
+    }
+
+    #[test]
+    fn a_protected_path_cannot_be_patched_or_written() {
+        let workspace = TestWorkspace::new();
+        workspace.write("tests/rounding.rs", "#[test]\nfn t() {}\n");
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        let tools = workspace.tools().protecting(vec!["tests".into()]);
+        let sha = fingerprint(b"#[test]\nfn t() {}\n");
+
+        for call_ in [
+            call(
+                "apply_patch",
+                json!({"path": "tests/rounding.rs", "expected_sha256": sha, "old_text": "t()", "new_text": "u()"}),
+            ),
+            call(
+                "write_file",
+                json!({"path": "tests/new.rs", "content": "", }),
+            ),
+            call(
+                "write_file",
+                json!({"path": "./tests/../tests/rounding.rs", "content": ""}),
+            ),
+        ] {
+            let error = tools.classify_sync(&call_).unwrap_err();
+            assert!(
+                error.to_string().contains("protected") || error.to_string().contains("workspace"),
+                "{error}"
+            );
+            assert!(tools.execute_sync(&call_).is_err());
+        }
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("tests/rounding.rs")).unwrap(),
+            "#[test]\nfn t() {}\n"
+        );
+        assert!(!workspace.path.join("tests/new.rs").exists());
+
+        // Everything else is as writable as before, including a name that only
+        // begins like a protected one.
+        tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "tests_scratch.rs", "content": ""}),
+            ))
+            .unwrap();
     }
 }

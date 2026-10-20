@@ -390,3 +390,31 @@ async fn the_temporary_directory_survives_the_workspace_being_cleaned() {
     assert_eq!(output["exit_code"], 0, "stderr: {}", output["stderr"]);
     assert!(fixture.path.join(".gyr/tmp/note").is_file());
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_confined_command_cannot_write_a_protected_path() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path.join("tests")).unwrap();
+    fs::write(fixture.path.join("tests/spec.rs"), "kept\n").unwrap();
+    let sandbox = gyr_sandbox::detect_protecting(&fixture.path, &[PathBuf::from("tests")]).unwrap();
+    let tool = fixture.tool_with(ExecLimits::default(), Arc::from(sandbox));
+    let script = fixture.script(
+        "tamper.sh",
+        "#!/bin/sh\necho changed > tests/spec.rs\necho new > tests/added.rs\necho fine > elsewhere.txt\n",
+    );
+
+    tool.execute(&call(json!({"command": [script]})))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("tests/spec.rs")).unwrap(),
+        "kept\n"
+    );
+    assert!(!fixture.path.join("tests/added.rs").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("elsewhere.txt")).unwrap(),
+        "fine\n"
+    );
+}

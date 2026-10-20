@@ -70,6 +70,8 @@ pub struct RunSettings {
     pub mode: ApprovalMode,
     pub show_reasoning: bool,
     pub sandbox: SandboxMode,
+    /// Workspace-relative paths no tool or process may write.
+    pub protected: Vec<PathBuf>,
     /// Overrides the endpoint for a self-served model.
     pub api_base: Option<String>,
     /// Asks a toggling model not to think. Absent leaves the server's default.
@@ -191,10 +193,14 @@ fn require_env(
 /// A platform without an implementation does not quietly fall through to
 /// running unconfined. The person has to ask for that by name, and the log
 /// records that they did.
-pub fn build_sandbox(mode: SandboxMode, workspace: &Path) -> Result<Arc<dyn Sandbox>> {
+pub fn build_sandbox(
+    mode: SandboxMode,
+    workspace: &Path,
+    protected: &[PathBuf],
+) -> Result<Arc<dyn Sandbox>> {
     match mode {
         SandboxMode::None => Ok(Arc::new(Unconfined)),
-        SandboxMode::Workspace => match gyr_sandbox::detect(workspace) {
+        SandboxMode::Workspace => match gyr_sandbox::detect_protecting(workspace, protected) {
             Ok(sandbox) => Ok(Arc::from(sandbox)),
             Err(error) => bail!(
                 "{error}. Pass --sandbox none to run without containment, \
@@ -230,6 +236,7 @@ mod tests {
             max_turns: NonZeroU32::new(4).unwrap(),
             mode: ApprovalMode::ReadOnly,
             sandbox: SandboxMode::Workspace,
+            protected: Vec::new(),
             show_reasoning: false,
             api_base: None,
             disable_thinking: false,

@@ -339,3 +339,19 @@ directly rather than through Gyrfalcon:
   the escape tests.
 - Whether reads should be narrowed once there is an eval corpus to tell us what
   a Rust build actually touches, rather than what we assume it does.
+
+**Amendment, 2026-10-20: protected paths (issue #14).** A session or an eval
+case can name workspace paths that nothing may write, such as the tests a task
+is judged by. Published work on test tampering found that models editing tests
+to pass stop almost entirely when the tests are read-only, and that prompting
+does far less. Two layers enforce it:
+- The file tools refuse a protected path when they classify the call, before
+  any approval is asked for.
+- On macOS, Seatbelt adds a `deny file-write*` rule for each path after the
+  workspace allow, since the last matching rule wins. Writing, creating,
+  renaming in or out and deleting were all checked by hand, and a test runs a
+  script under the sandbox to confirm it.
+
+Landlock cannot express this: it only grants, and a grant on the workspace
+covers everything beneath it. On Linux the paths are protected from the tools
+alone, and `gyr` says so when a session starts.

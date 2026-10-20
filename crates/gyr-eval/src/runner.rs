@@ -115,7 +115,7 @@ pub async fn run_case(
     let before = fingerprint_tree(&workspace)?;
 
     let tools = Without {
-        inner: session_tools(&workspace, Arc::clone(&sandbox))?,
+        inner: session_tools(&workspace, Arc::clone(&sandbox), &case.protected)?,
         hidden: without.iter().cloned().collect(),
     };
     let definitions = tools.definitions();
@@ -223,10 +223,18 @@ pub async fn run_case(
 /// # Errors
 ///
 /// Returns [`EvalError::Setup`] when a tool cannot be built for this workspace.
-pub fn session_tools(workspace: &Path, sandbox: Arc<dyn Sandbox>) -> Result<ToolSet, EvalError> {
+pub fn session_tools(
+    workspace: &Path,
+    sandbox: Arc<dyn Sandbox>,
+    protected: &[std::path::PathBuf],
+) -> Result<ToolSet, EvalError> {
     let setup = |error: gyr_core::ToolError| EvalError::Setup(error.to_string());
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
-        Box::new(WorkspaceTools::new(workspace, ToolLimits::default()).map_err(setup)?),
+        Box::new(
+            WorkspaceTools::new(workspace, ToolLimits::default())
+                .map_err(setup)?
+                .protecting(protected.to_vec()),
+        ),
         Box::new(gyr_core::blocker::BlockerTool),
         Box::new(
             ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,

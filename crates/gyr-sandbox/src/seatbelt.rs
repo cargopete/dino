@@ -21,6 +21,7 @@ const WRITABLE_DEVICES: [&str; 1] = ["/dev/null"];
 pub struct Seatbelt {
     profile: String,
     temp_dir: PathBuf,
+    protected: usize,
 }
 
 impl Seatbelt {
@@ -32,6 +33,16 @@ impl Seatbelt {
     /// [`SandboxError::Profile`] when the root cannot be canonicalised or holds
     /// characters that cannot be written into a profile.
     pub fn new(workspace: &Path) -> Result<Self, SandboxError> {
+        Self::protecting(workspace, &[])
+    }
+
+    /// As [`Seatbelt::new`], and also denies writes beneath each of these
+    /// workspace-relative paths, whether or not they exist yet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Seatbelt::new`].
+    pub fn protecting(workspace: &Path, protected: &[PathBuf]) -> Result<Self, SandboxError> {
         if !Path::new(SANDBOX_EXEC).is_file() {
             return Err(SandboxError::Unavailable(format!(
                 "{SANDBOX_EXEC} is not present"
@@ -51,8 +62,9 @@ impl Seatbelt {
             ))
         })?;
         Ok(Self {
-            profile: profile_for(&root)?,
+            profile: profile_for(&root, protected)?,
             temp_dir,
+            protected: protected.len(),
         })
     }
 
@@ -65,7 +77,12 @@ impl Seatbelt {
 
 impl Sandbox for Seatbelt {
     fn label(&self) -> String {
-        "workspace (seatbelt: writes confined, network denied)".to_owned()
+        match self.protected {
+            0 => "workspace (seatbelt: writes confined, network denied)".to_owned(),
+            count => format!(
+                "workspace (seatbelt: writes confined, {count} path(s) protected, network denied)"
+            ),
+        }
     }
 
     fn confines_writes(&self) -> bool {
@@ -74,6 +91,10 @@ impl Sandbox for Seatbelt {
 
     fn denies_network(&self) -> bool {
         true
+    }
+
+    fn protects_paths(&self) -> bool {
+        self.protected > 0
     }
 
     fn temp_dir(&self) -> Option<&Path> {
@@ -94,7 +115,7 @@ impl Sandbox for Seatbelt {
 ///
 /// Reads are allowed everywhere on purpose. See RFC-0009 section 2 for why an
 /// allow-list was rejected rather than guessed at.
-fn profile_for(root: &Path) -> Result<String, SandboxError> {
+fn profile_for(root: &Path, protected: &[PathBuf]) -> Result<String, SandboxError> {
     let mut profile = String::from(
         "(version 1)\n\
          (deny default)\n\
@@ -118,6 +139,20 @@ fn profile_for(root: &Path) -> Result<String, SandboxError> {
         escape(root)?
     )
     .expect("writing to a String cannot fail");
+    // After the allow, because the last matching rule wins. Checked by hand on
+    // macOS 26: writing, renaming in, renaming away and deleting were refused.
+    for path in protected {
+        let path = Path::new(root).join(path);
+        let path = path
+            .to_str()
+            .ok_or_else(|| SandboxError::Profile("protected path is not valid UTF-8".into()))?;
+        writeln!(
+            profile,
+            "(deny file-write* (subpath \"{}\"))",
+            escape(path)?
+        )
+        .expect("writing to a String cannot fail");
+    }
     Ok(profile)
 }
 
@@ -166,7 +201,7 @@ mod tests {
 
     #[test]
     fn the_profile_denies_by_default_and_writes_only_to_the_root() {
-        let profile = profile_for(Path::new("/tmp/workspace")).unwrap();
+        let profile = profile_for(Path::new("/tmp/workspace"), &[]).unwrap();
 
         assert!(profile.starts_with("(version 1)\n(deny default)\n"));
         assert!(profile.contains("(allow file-read*)"));
@@ -177,6 +212,19 @@ mod tests {
             "denying by default is what denies the network; naming it would only \
              invite an allow rule to be added beside it"
         );
+    }
+
+    #[test]
+    fn protected_paths_are_denied_after_the_workspace_is_allowed() {
+        let profile = profile_for(Path::new("/tmp/workspace"), &[PathBuf::from("tests")]).unwrap();
+
+        let allow = profile
+            .find(r#"(allow file-write* (subpath "/tmp/workspace"))"#)
+            .unwrap();
+        let deny = profile
+            .find(r#"(deny file-write* (subpath "/tmp/workspace/tests"))"#)
+            .unwrap();
+        assert!(allow < deny, "the deny must come last to win");
     }
 
     #[cfg(target_os = "macos")]

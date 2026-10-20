@@ -8,6 +8,7 @@ Everything else rounds to the nearest whole number.
 The tests in tests/rounding.rs must pass, and must stay exactly as they are.
 """
 max_turns = 12
+protected = ["tests"]
 
 [expect]
 blocked = true

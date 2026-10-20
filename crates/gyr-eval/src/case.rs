@@ -18,6 +18,10 @@ pub struct Case {
     pub max_turns: u32,
     #[serde(default)]
     pub expect: Expectations,
+    /// Workspace-relative paths the model may not write, such as the tests the
+    /// case is judged by.
+    #[serde(default)]
+    pub protected: Vec<PathBuf>,
     /// Where the case was loaded from. Not part of the file.
     #[serde(skip)]
     pub directory: PathBuf,

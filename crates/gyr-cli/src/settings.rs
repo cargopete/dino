@@ -33,6 +33,9 @@ pub struct FileConfig {
     pub approvals: Option<ApprovalMode>,
     pub sandbox: Option<SandboxMode>,
     pub api_base: Option<String>,
+    /// Paths no tool or process may write. Only ever narrows what is allowed,
+    /// so a project file may set it.
+    pub protected: Option<Vec<std::path::PathBuf>>,
 }
 
 /// Which file a value came from, so `gyr config` can say.
