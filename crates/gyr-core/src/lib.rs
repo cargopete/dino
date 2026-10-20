@@ -182,6 +182,9 @@ pub struct Agent<S, T> {
     policy: Box<dyn ApprovalPolicy>,
     sink: Box<dyn EventSink>,
     config: AgentConfig,
+    // Kept outside `drive` so a run that ends in an error still reports what it
+    // spent.
+    turns_started: u32,
 }
 
 impl<S, T> Agent<S, T>
@@ -200,6 +203,7 @@ where
             policy: Box::new(approval::ReadOnly),
             sink: Box::new(NullSink),
             config,
+            turns_started: 0,
         }
     }
 
@@ -246,6 +250,7 @@ where
         user_message: impl Into<String>,
         cancel: &CancellationToken,
     ) -> Result<RunResult, AgentError> {
+        self.turns_started = 0;
         let outcome = self.drive(user_message.into(), cancel).await;
         let record = match &outcome {
             Ok(result) => RunOutcome {
@@ -255,7 +260,7 @@ where
             },
             Err(error) => RunOutcome {
                 stop_reason: None,
-                model_turns: 0,
+                model_turns: self.turns_started,
                 error: Some(error.to_string()),
             },
         };
@@ -295,6 +300,7 @@ where
             if cancel.is_cancelled() {
                 return Ok(cancelled(events, text, model_turn.saturating_sub(1)));
             }
+            self.turns_started = model_turn;
 
             let mut stream = match cancel.run_until_cancelled(self.session.next(input)).await {
                 Some(stream) => stream?,

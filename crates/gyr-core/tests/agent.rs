@@ -555,3 +555,44 @@ async fn a_model_with_no_documented_window_is_left_alone() {
     assert!(elisions(&result).is_empty());
     assert!(agent.session().elide_requests.is_empty());
 }
+
+/// Keeps the outcome a run reports, which is what the session log and eval read.
+struct OutcomeSink(std::sync::Arc<std::sync::Mutex<Option<gyr_core::session::RunOutcome>>>);
+
+impl gyr_core::session::EventSink for OutcomeSink {
+    fn emit(&mut self, _event: &AgentEvent) -> Result<(), gyr_core::session::SinkError> {
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        outcome: &gyr_core::session::RunOutcome,
+    ) -> Result<(), gyr_core::session::SinkError> {
+        *self.0.lock().unwrap() = Some(outcome.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_run_cut_off_by_the_turn_limit_reports_the_turns_it_spent() {
+    let outcome = std::sync::Arc::default();
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            tool_turn(tool_call("call-3", "read", "c.rs")),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(2).unwrap(),
+            ..AgentConfig::default()
+        },
+    )
+    .with_sink(OutcomeSink(std::sync::Arc::clone(&outcome)));
+
+    let error = agent.run("read everything").await.unwrap_err();
+
+    assert_eq!(error.to_string(), "model-turn limit reached after 2 turns");
+    let outcome = outcome.lock().unwrap().clone().unwrap();
+    assert_eq!(outcome.model_turns, 2);
+}
