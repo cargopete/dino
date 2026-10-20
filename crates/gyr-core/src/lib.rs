@@ -290,6 +290,9 @@ where
         };
         let mut text = String::new();
         let mut seen_call_ids = HashSet::new();
+        // Asked for before the window is read, because a self-hosted server
+        // often serves far less than the model's native window.
+        self.session.discover_limits().await?;
         // A window has one documented size or none. Without one, none of this
         // runs: guessing a window and cutting history against the guess would
         // be worse than an honest refusal later.

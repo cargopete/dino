@@ -496,6 +496,19 @@ async fn a_filling_window_is_reported_once_and_not_on_every_turn() {
 }
 
 #[tokio::test]
+async fn the_window_the_server_reports_is_the_one_measured_against() {
+    // The profile claims ten times the room; the server says otherwise.
+    let mut session =
+        ScriptedSession::new(vec![usage_turn(750, "done")]).with_window(Some(WINDOW * 10));
+    session.served_window = Some(WINDOW);
+    let mut agent = Agent::new(session, ScriptedTools::default(), AgentConfig::default());
+
+    let result = agent.run("keep going").await.unwrap();
+
+    assert_eq!(warnings(&result), vec![(750, WINDOW)]);
+}
+
+#[tokio::test]
 async fn a_window_below_the_mark_says_nothing() {
     let mut agent = budgeted(vec![usage_turn(500, "plenty of room")]);
 

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_stream::try_stream;
 use futures_util::StreamExt;
@@ -73,6 +74,7 @@ pub struct QwenSession {
     endpoint: Url,
     config: QwenConfig,
     history: Arc<Mutex<Vec<ChatMessage>>>,
+    limits_discovered: bool,
 }
 
 impl QwenSession {
@@ -100,6 +102,7 @@ impl QwenSession {
             endpoint,
             config,
             history: Arc::new(Mutex::new(Vec::new())),
+            limits_discovered: false,
         })
     }
 
@@ -295,6 +298,37 @@ impl ModelSession for QwenSession {
             message.content = Some(replacement);
         }
         Ok(elision)
+    }
+
+    fn discover_limits(&mut self) -> ModelFuture<'_, ()> {
+        Box::pin(async move {
+            if std::mem::replace(&mut self.limits_discovered, true) {
+                return Ok(());
+            }
+            // The profile records the model's native window, but a server is
+            // often started with less, and only the server knows how much.
+            let url = format!("{}/models", self.config.api_base.trim_end_matches('/'));
+            let mut request = self.client.get(url).timeout(Duration::from_secs(10));
+            if let Some(api_key) = &self.config.api_key {
+                request = request.bearer_auth(api_key);
+            }
+            let Ok(response) = request.send().await else {
+                return Ok(());
+            };
+            let Ok(models) = response.json::<ModelList>().await else {
+                return Ok(());
+            };
+            let served = models
+                .data
+                .into_iter()
+                .find(|model| model.id == self.config.profile.provider_model)
+                .and_then(|model| model.max_model_len);
+            if let Some(served) = served {
+                let window = &mut self.config.profile.context_window_tokens;
+                *window = Some(window.map_or(served, |native| native.min(served)));
+            }
+            Ok(())
+        })
     }
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
@@ -640,6 +674,17 @@ struct ChatCompletionChunk {
     #[serde(default)]
     choices: Vec<Choice>,
     usage: Option<Usage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelList {
+    data: Vec<ServedModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServedModel {
+    id: String,
+    max_model_len: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1051,6 +1096,60 @@ mod tests {
                 reason: StopReason::EndTurn
             })
         );
+    }
+
+    /// Answers one request with `body` as JSON, and returns the request line.
+    async fn serve_json_once(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2_048];
+            while find_bytes(&request, b"\r\n\r\n").is_none() {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request)
+                .lines()
+                .next()
+                .unwrap()
+                .to_owned()
+        });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn the_window_shrinks_to_what_the_server_serves() {
+        let (base, server) = serve_json_once(
+            r#"{"object":"list","data":[{"id":"other","max_model_len":8192},{"id":"qwen3.8-27b","max_model_len":65536}]}"#,
+        )
+        .await;
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut session = QwenSession::new(QwenConfig::new(base, profile)).unwrap();
+
+        session.discover_limits().await.unwrap();
+
+        assert_eq!(session.profile().context_window_tokens, Some(65_536));
+        assert_eq!(server.await.unwrap(), "GET /v1/models HTTP/1.1");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_reports_no_limit_leaves_the_profile_alone() {
+        let (base, _server) =
+            serve_json_once(r#"{"object":"list","data":[{"id":"qwen3.8-27b"}]}"#).await;
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut session = QwenSession::new(QwenConfig::new(base, profile)).unwrap();
+
+        session.discover_limits().await.unwrap();
+
+        assert_eq!(session.profile().context_window_tokens, Some(262_144));
     }
 
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

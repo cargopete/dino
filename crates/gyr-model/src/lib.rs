@@ -37,6 +37,17 @@ pub trait ModelSession: Send {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream>;
 
+    /// Replaces what the profile can only assume with what the server reports,
+    /// such as the context length a self-hosted model was started with. Best
+    /// effort: a server that says nothing leaves the profile as it was.
+    ///
+    /// # Errors
+    ///
+    /// None of the built-in adapters fail here; the signature leaves room.
+    fn discover_limits(&mut self) -> ModelFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Hollows out the oldest tool results, keeping the most recent intact.
     ///
     /// The adapter owns its native history, so the adapter does the work; the
@@ -160,6 +171,10 @@ impl ModelSession for Box<dyn ModelSession> {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         (**self).next(input)
+    }
+
+    fn discover_limits(&mut self) -> ModelFuture<'_, ()> {
+        (**self).discover_limits()
     }
 
     fn elide_tool_results(&mut self, keep_recent: usize) -> Result<Elision, ModelError> {
