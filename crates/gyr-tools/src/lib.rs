@@ -247,16 +247,16 @@ impl WorkspaceTools {
 
     fn execute_sync(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         match call.name.as_str() {
-            "read" => self.read(parse_arguments(&call.arguments, "read")?),
+            "read" => self.read(&parse_arguments(&call.arguments, "read")?),
             "search" => self.search(parse_arguments(&call.arguments, "search")?),
             "list" => self.list(&parse_arguments(&call.arguments, "list")?),
-            "apply_patch" => self.apply_patch(parse_arguments(&call.arguments, "apply_patch")?),
-            "write_file" => self.write_file(parse_arguments(&call.arguments, "write_file")?),
+            "apply_patch" => self.apply_patch(&parse_arguments(&call.arguments, "apply_patch")?),
+            "write_file" => self.write_file(&parse_arguments(&call.arguments, "write_file")?),
             name => Err(ToolError::new(format!("unknown tool {name:?}"))),
         }
     }
 
-    fn read(&self, arguments: ReadArguments) -> Result<ToolOutput, ToolError> {
+    fn read(&self, arguments: &ReadArguments) -> Result<ToolOutput, ToolError> {
         let path = self.root.resolve_file(&arguments.path)?;
         let bytes = fs::read(&path).map_err(|error| file_error("read", &path, &error))?;
         let text = String::from_utf8(bytes.clone())
@@ -298,7 +298,7 @@ impl WorkspaceTools {
         let sha256 = fingerprint(&bytes);
         self.remember(&path, &sha256);
         let output = ReadOutput {
-            path: arguments.path,
+            path: self.root.relative(&path)?,
             start_line,
             end_line,
             total_lines,
@@ -458,7 +458,7 @@ impl WorkspaceTools {
         })
     }
 
-    fn apply_patch(&self, arguments: PatchArguments) -> Result<ToolOutput, ToolError> {
+    fn apply_patch(&self, arguments: &PatchArguments) -> Result<ToolOutput, ToolError> {
         if arguments.old_text.is_empty() {
             return Err(ToolError::new("old_text must not be empty"));
         }
@@ -488,7 +488,7 @@ impl WorkspaceTools {
         let note = self.revisit_note(&path, &after_sha256, &arguments.path);
         self.remember(&path, &after_sha256);
         let output = PatchOutput {
-            path: arguments.path,
+            path: self.root.relative(&path)?,
             before_sha256,
             after_sha256,
             bytes_written: updated.len(),
@@ -557,7 +557,7 @@ impl WorkspaceTools {
         }
     }
 
-    fn write_file(&self, arguments: WriteArguments) -> Result<ToolOutput, ToolError> {
+    fn write_file(&self, arguments: &WriteArguments) -> Result<ToolOutput, ToolError> {
         let path = self.writable(&arguments.path, false)?;
         let created = match fs::read(&path) {
             Ok(bytes) => {
@@ -600,7 +600,7 @@ impl WorkspaceTools {
         self.remember(&path, &sha256);
         json_output(&WriteOutput {
             note,
-            path: arguments.path,
+            path: self.root.relative(&path)?,
             created,
             sha256,
             bytes_written: arguments.content.len(),
@@ -1431,6 +1431,47 @@ mod tests {
             );
         }
         assert!(!outside.path.join("planted.rs").exists());
+    }
+
+    #[test]
+    fn an_absolute_path_inside_the_workspace_is_read_as_relative() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\n");
+        let tools = workspace.tools();
+        let canonical = fs::canonicalize(&workspace.path).unwrap();
+
+        for root in [&workspace.path, &canonical] {
+            let file = root.join("src/lib.rs").display().to_string();
+            let read = output_json(
+                &tools
+                    .execute_sync(&call("read", json!({"path": file})))
+                    .unwrap(),
+            );
+            assert_eq!(read["path"], "src/lib.rs", "{file}");
+
+            let listed = tools
+                .execute_sync(&call("list", json!({"path": root.display().to_string()})))
+                .unwrap();
+            assert!(listed.content.contains("lib.rs"), "{}", listed.content);
+        }
+    }
+
+    #[test]
+    fn an_absolute_path_that_only_shares_the_root_prefix_is_refused() {
+        let workspace = TestWorkspace::new();
+        let tools = workspace.tools();
+        let sibling = format!("{}-sibling/x.rs", workspace.path.display());
+        let climbing = workspace.path.join("../x.rs").display().to_string();
+
+        for path in [sibling, climbing] {
+            let error = tools
+                .classify_sync(&call("write_file", json!({"path": path, "content": "x"})))
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("workspace"),
+                "{path} said: {error}"
+            );
+        }
     }
 
     #[test]
