@@ -232,18 +232,37 @@ fn a_command_sent_as_an_encoded_array_is_read_as_that_array() {
 }
 
 #[test]
-fn a_command_sent_as_a_shell_line_is_refused_with_the_expected_shape() {
+fn a_plain_command_line_is_split_on_whitespace() {
     let fixture = Fixture::new();
 
-    let error = fixture
+    let action = fixture
         .tool()
-        .classify(&call(json!({"command": "git log -1"})))
-        .unwrap_err();
+        .classify(&call(json!({"command": "rm  tests/scratch.rs"})))
+        .unwrap();
 
-    assert!(
-        error.to_string().contains(r#"["git", "log", "-1"]"#),
-        "said: {error}"
-    );
+    assert_eq!(action.subject.as_deref(), Some("rm tests/scratch.rs"));
+}
+
+#[test]
+fn a_line_a_shell_would_read_differently_is_refused_with_the_expected_shape() {
+    let fixture = Fixture::new();
+
+    for (line, shape) in [
+        ("cargo test | head", r#"["cargo", "test", "|", "head"]"#),
+        ("rm tests/*.rs", r#"["rm", "tests/*.rs"]"#),
+        ("echo 'a b'", r#"["echo", "'a", "b'"]"#),
+        (
+            "RUST_LOG=debug cargo run",
+            r#"["RUST_LOG=debug", "cargo", "run"]"#,
+        ),
+        ("ls $HOME", r#"["ls", "$HOME"]"#),
+    ] {
+        let error = fixture
+            .tool()
+            .classify(&call(json!({"command": line})))
+            .unwrap_err();
+        assert!(error.to_string().contains(shape), "{line} said: {error}");
+    }
 }
 
 #[test]
