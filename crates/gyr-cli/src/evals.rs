@@ -46,6 +46,9 @@ pub struct EvalArgs {
     /// tool, in place of the default, to measure what a small model can use.
     #[arg(long)]
     pub max_diagnostics: Option<usize>,
+    /// Cap the model's reasoning per turn, where the server honours a budget.
+    #[arg(long)]
+    pub thinking_budget: Option<u32>,
     /// Emit the whole record, metrics included, as JSON.
     #[arg(long)]
     pub json: bool,
@@ -115,6 +118,7 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         let variant = gyr_eval::Variant {
             without: args.without.clone(),
             max_diagnostics: args.max_diagnostics,
+            thinking_budget: args.thinking_budget,
         };
         let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?;
         if !args.json {
@@ -169,6 +173,7 @@ fn eval_settings(
         sandbox: args.sandbox,
         protected: Vec::new(),
         max_diagnostics: args.max_diagnostics,
+        thinking_budget: args.thinking_budget,
         show_reasoning: false,
         api_base: args.api_base.clone(),
         disable_thinking: args.no_thinking,

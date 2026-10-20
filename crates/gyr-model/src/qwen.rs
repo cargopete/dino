@@ -51,6 +51,11 @@ pub struct QwenConfig {
     pub enable_thinking: Option<bool>,
     pub preserve_thinking: bool,
     pub retry: RetryPolicy,
+    /// Most reasoning tokens per turn, through vLLM's `thinking_token_budget`.
+    /// Measured on vLLM 0.32 with Qwen3.8 27B: reasoning stops one token short
+    /// of the budget and the model still answers. Servers that do not know the
+    /// field ignore it.
+    pub thinking_budget: Option<u32>,
 }
 
 /// How often a request that never reached the model is tried again.
@@ -88,6 +93,7 @@ impl QwenConfig {
             enable_thinking: None,
             preserve_thinking: true,
             retry: RetryPolicy::default(),
+            thinking_budget: None,
         }
     }
 }
@@ -222,6 +228,9 @@ impl QwenSession {
 
         if let Some(max_tokens) = self.config.max_output_tokens {
             body.insert("max_tokens".into(), json!(max_tokens));
+        }
+        if let Some(budget) = self.config.thinking_budget {
+            body.insert("thinking_token_budget".into(), json!(budget));
         }
         let profile_sampling = if matches!(self.config.profile.reasoning, ReasoningSupport::Toggle)
             && self.config.enable_thinking == Some(false)
@@ -999,6 +1008,26 @@ mod tests {
         assert_eq!(
             body["chat_template_kwargs"],
             json!({"enable_thinking": true, "preserve_thinking": true})
+        );
+    }
+
+    #[test]
+    fn a_thinking_budget_is_sent_only_when_set() {
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut config = QwenConfig::new("http://127.0.0.1:8000/v1", profile);
+        let unset = QwenSession::new(config.clone()).unwrap();
+        assert!(
+            !unset
+                .request_body(&[])
+                .unwrap()
+                .contains_key("thinking_token_budget")
+        );
+
+        config.thinking_budget = Some(4_096);
+        let set = QwenSession::new(config).unwrap();
+        assert_eq!(
+            set.request_body(&[]).unwrap()["thinking_token_budget"],
+            4_096
         );
     }
 

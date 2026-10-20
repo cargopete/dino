@@ -56,6 +56,9 @@ pub struct Outcome {
     /// The diagnostic cap the run was given, when it was not the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_diagnostics: Option<usize>,
+    /// The reasoning budget the run was given, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
 }
 
 /// How a run differs from the harness as shipped, for ablations.
@@ -65,6 +68,9 @@ pub struct Variant {
     pub without: Vec<String>,
     /// How many Cargo diagnostics the model is shown, in place of the default.
     pub max_diagnostics: Option<usize>,
+    /// The reasoning budget the session was built with. Recorded here; the
+    /// session itself is the caller's to build.
+    pub thinking_budget: Option<u32>,
 }
 
 /// What shapes the tools a session gets.
@@ -237,6 +243,7 @@ pub async fn run_case(
         log_path: log_path.display().to_string(),
         without: variant.without.clone(),
         max_diagnostics: variant.max_diagnostics,
+        thinking_budget: variant.thinking_budget,
     })
 }
 

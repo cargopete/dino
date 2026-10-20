@@ -470,6 +470,7 @@ struct Resolved {
     plain: (bool, Source),
     protected: (Vec<PathBuf>, Source),
     max_diagnostics: (Option<usize>, Source),
+    thinking_budget: (Option<u32>, Source),
     layers: Layers,
 }
 
@@ -547,6 +548,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
             .unwrap_or((Vec::new(), Source::Default)),
         max_diagnostics: layers
             .pick(|file| file.max_diagnostics.map(Some))
+            .unwrap_or((None, Source::Default)),
+        thinking_budget: layers
+            .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
         layers,
     })
@@ -682,6 +686,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         sandbox: resolved.sandbox.0,
         protected: resolved.protected.0,
         max_diagnostics: resolved.max_diagnostics.0,
+        thinking_budget: resolved.thinking_budget.0,
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,
