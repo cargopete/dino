@@ -53,6 +53,27 @@ pub struct Outcome {
     /// mistake an ablation for a behaviour change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub without: Vec<String>,
+    /// The diagnostic cap the run was given, when it was not the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_diagnostics: Option<usize>,
+}
+
+/// How a run differs from the harness as shipped, for ablations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Variant {
+    /// Tools withheld.
+    pub without: Vec<String>,
+    /// How many Cargo diagnostics the model is shown, in place of the default.
+    pub max_diagnostics: Option<usize>,
+}
+
+/// What shapes the tools a session gets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolOptions {
+    /// Workspace-relative paths no tool may write.
+    pub protected: Vec<std::path::PathBuf>,
+    /// How many Cargo diagnostics the model is shown, in place of the default.
+    pub max_diagnostics: Option<usize>,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -108,15 +129,22 @@ pub async fn run_case(
     case: &Case,
     scratch: &Path,
     sandbox: Arc<dyn Sandbox>,
-    without: &[String],
+    variant: &Variant,
     build_session: BuildSession<'_>,
 ) -> Result<Outcome, EvalError> {
     let workspace = case.materialise(scratch)?;
     let before = fingerprint_tree(&workspace)?;
 
     let tools = Without {
-        inner: session_tools(&workspace, Arc::clone(&sandbox), &case.protected)?,
-        hidden: without.iter().cloned().collect(),
+        inner: session_tools(
+            &workspace,
+            Arc::clone(&sandbox),
+            &ToolOptions {
+                protected: case.protected.clone(),
+                max_diagnostics: variant.max_diagnostics,
+            },
+        )?,
+        hidden: variant.without.iter().cloned().collect(),
     };
     let definitions = tools.definitions();
     let context = PromptContext {
@@ -207,7 +235,8 @@ pub async fn run_case(
         metrics,
         duration_ms,
         log_path: log_path.display().to_string(),
-        without: without.to_vec(),
+        without: variant.without.clone(),
+        max_diagnostics: variant.max_diagnostics,
     })
 }
 
@@ -226,14 +255,14 @@ pub async fn run_case(
 pub fn session_tools(
     workspace: &Path,
     sandbox: Arc<dyn Sandbox>,
-    protected: &[std::path::PathBuf],
+    options: &ToolOptions,
 ) -> Result<ToolSet, EvalError> {
     let setup = |error: gyr_core::ToolError| EvalError::Setup(error.to_string());
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         Box::new(
             WorkspaceTools::new(workspace, ToolLimits::default())
                 .map_err(setup)?
-                .protecting(protected.to_vec()),
+                .protecting(options.protected.clone()),
         ),
         Box::new(gyr_core::blocker::BlockerTool),
         Box::new(
@@ -243,7 +272,17 @@ pub fn session_tools(
     if workspace.join("Cargo.toml").is_file() {
         // The gate is deliberately absent. RFC-0011 section 13.
         runtimes.push(Box::new(
-            CargoTool::new(workspace, CargoLimits::default(), sandbox).map_err(setup)?,
+            CargoTool::new(
+                workspace,
+                CargoLimits {
+                    max_diagnostics: options
+                        .max_diagnostics
+                        .unwrap_or(CargoLimits::default().max_diagnostics),
+                    ..CargoLimits::default()
+                },
+                sandbox,
+            )
+            .map_err(setup)?,
         ));
     }
     ToolSet::new(runtimes).map_err(setup)

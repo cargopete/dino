@@ -36,6 +36,8 @@ pub struct FileConfig {
     /// Paths no tool or process may write. Only ever narrows what is allowed,
     /// so a project file may set it.
     pub protected: Option<Vec<std::path::PathBuf>>,
+    /// Cargo diagnostics shown to the model per run of the cargo tool.
+    pub max_diagnostics: Option<usize>,
 }
 
 /// Which file a value came from, so `gyr config` can say.

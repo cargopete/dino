@@ -42,6 +42,10 @@ pub struct EvalArgs {
     /// Withhold a tool from every case, for ablation. Repeatable.
     #[arg(long = "without")]
     pub without: Vec<String>,
+    /// Show the model at most this many Cargo diagnostics per run of the cargo
+    /// tool, in place of the default, to measure what a small model can use.
+    #[arg(long)]
+    pub max_diagnostics: Option<usize>,
     /// Emit the whole record, metrics included, as JSON.
     #[arg(long)]
     pub json: bool,
@@ -108,7 +112,11 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
                 .map(|session| session as Box<dyn ModelSession>)
         };
 
-        let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &args.without, &build).await?;
+        let variant = gyr_eval::Variant {
+            without: args.without.clone(),
+            max_diagnostics: args.max_diagnostics,
+        };
+        let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?;
         if !args.json {
             print_case(&outcome);
         }
@@ -160,6 +168,7 @@ fn eval_settings(
         mode: crate::config::ApprovalMode::AllowAll,
         sandbox: args.sandbox,
         protected: Vec::new(),
+        max_diagnostics: args.max_diagnostics,
         show_reasoning: false,
         api_base: args.api_base.clone(),
         disable_thinking: args.no_thinking,

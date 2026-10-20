@@ -140,9 +140,15 @@ async fn run(case: &Case, scratch: &Scratch, turns: Vec<Vec<ModelEvent>>) -> gyr
             turns: VecDeque::from(turns.clone()),
         }) as Box<dyn ModelSession>)
     };
-    run_case(case, &scratch.path, Arc::new(Unconfined), &[], &build)
-        .await
-        .unwrap()
+    run_case(
+        case,
+        &scratch.path,
+        Arc::new(Unconfined),
+        &gyr_eval::Variant::default(),
+        &build,
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

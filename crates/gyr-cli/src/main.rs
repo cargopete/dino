@@ -222,7 +222,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let profile = config::resolve_profile(args.model.as_deref())?;
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let sandbox = config::build_sandbox(args.sandbox, &workspace, &[])?;
-    let tools = tool_set(&workspace, sandbox, &[])?;
+    let tools = tool_set(&workspace, sandbox, &gyr_eval::ToolOptions::default())?;
     let context = prompt_context(
         &workspace,
         ApprovalMode::Interactive,
@@ -243,9 +243,12 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
 ///
 /// Deferred to `gyr-eval` so the corpus and the executable cannot drift. They
 /// did drift once, for exactly one commit, and the eval run said so.
-fn tool_set(workspace: &Path, sandbox: Arc<dyn Sandbox>, protected: &[PathBuf]) -> Result<ToolSet> {
-    gyr_eval::session_tools(workspace, sandbox, protected)
-        .map_err(|error| anyhow::anyhow!("{error}"))
+fn tool_set(
+    workspace: &Path,
+    sandbox: Arc<dyn Sandbox>,
+    options: &gyr_eval::ToolOptions,
+) -> Result<ToolSet> {
+    gyr_eval::session_tools(workspace, sandbox, options).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 fn prompt_context(
@@ -298,7 +301,10 @@ fn prepare(common: &CommonArgs) -> Result<Prepared> {
     let tools = tool_set(
         &settings.workspace,
         Arc::clone(&sandbox),
-        &settings.protected,
+        &gyr_eval::ToolOptions {
+            protected: settings.protected.clone(),
+            max_diagnostics: settings.max_diagnostics,
+        },
     )?;
     let definitions = tools.definitions();
     let context = prompt_context(
@@ -463,6 +469,7 @@ struct Resolved {
     no_thinking: (bool, Source),
     plain: (bool, Source),
     protected: (Vec<PathBuf>, Source),
+    max_diagnostics: (Option<usize>, Source),
     layers: Layers,
 }
 
@@ -538,6 +545,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         protected: layers
             .pick(|file| file.protected.clone())
             .unwrap_or((Vec::new(), Source::Default)),
+        max_diagnostics: layers
+            .pick(|file| file.max_diagnostics.map(Some))
+            .unwrap_or((None, Source::Default)),
         layers,
     })
 }
@@ -671,6 +681,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         mode,
         sandbox: resolved.sandbox.0,
         protected: resolved.protected.0,
+        max_diagnostics: resolved.max_diagnostics.0,
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,

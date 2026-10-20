@@ -72,6 +72,8 @@ pub struct RunSettings {
     pub sandbox: SandboxMode,
     /// Workspace-relative paths no tool or process may write.
     pub protected: Vec<PathBuf>,
+    /// Cargo diagnostics shown to the model per run, when not the default.
+    pub max_diagnostics: Option<usize>,
     /// Overrides the endpoint for a self-served model.
     pub api_base: Option<String>,
     /// Asks a toggling model not to think. Absent leaves the server's default.
@@ -237,6 +239,7 @@ mod tests {
             mode: ApprovalMode::ReadOnly,
             sandbox: SandboxMode::Workspace,
             protected: Vec::new(),
+            max_diagnostics: None,
             show_reasoning: false,
             api_base: None,
             disable_thinking: false,
