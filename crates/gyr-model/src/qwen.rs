@@ -182,7 +182,12 @@ impl QwenSession {
                     );
                     (message, retryable)
                 }
-                Err(error) => (error.to_string(), error.is_connect() || error.is_timeout()),
+                // A connection dropped before the response is `is_request`, not
+                // `is_connect`; nothing streamed, so sending again is safe.
+                Err(error) => (
+                    error.to_string(),
+                    error.is_connect() || error.is_timeout() || error.is_request(),
+                ),
             };
             if !retryable || attempt >= self.config.retry.attempts {
                 return Err(ModelError::Transport(error));
@@ -1259,6 +1264,27 @@ mod tests {
             text: "hello".into()
         }));
         assert_eq!(server.await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_connection_dropped_before_any_response_is_retried() {
+        let (base, server) = serve_in_turn(vec![String::new(), SSE_HELLO.into()]).await;
+        let mut session = quick_retries(base);
+
+        let events: Vec<_> = session
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert!(events.contains(&ModelEvent::TextDelta {
+            text: "hello".into()
+        }));
+        assert_eq!(server.await.unwrap(), 2);
     }
 
     #[tokio::test]
