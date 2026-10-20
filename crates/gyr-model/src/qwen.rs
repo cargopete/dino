@@ -50,6 +50,28 @@ pub struct QwenConfig {
     pub sampling: Option<SamplingDefaults>,
     pub enable_thinking: Option<bool>,
     pub preserve_thinking: bool,
+    pub retry: RetryPolicy,
+}
+
+/// How often a request that never reached the model is tried again.
+///
+/// Only before anything has streamed: a request that failed there produced
+/// nothing, so sending it again cannot duplicate a turn.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Total attempts, the first included.
+    pub attempts: u32,
+    /// Doubled after each failure.
+    pub first_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: 5,
+            first_delay: Duration::from_secs(2),
+        }
+    }
 }
 
 impl QwenConfig {
@@ -65,6 +87,7 @@ impl QwenConfig {
             sampling: None,
             enable_thinking: None,
             preserve_thinking: true,
+            retry: RetryPolicy::default(),
         }
     }
 }
@@ -120,6 +143,47 @@ impl QwenSession {
                     ChatMessage::tool(result.call_id, content)
                 })
                 .collect(),
+        }
+    }
+
+    async fn send_with_retry(
+        &self,
+        body: &serde_json::Map<String, Value>,
+    ) -> Result<reqwest::Response, ModelError> {
+        let mut delay = self.config.retry.first_delay;
+        let mut attempt = 1;
+        loop {
+            let mut request = self.client.post(self.endpoint.clone()).json(body);
+            if let Some(api_key) = &self.config.api_key {
+                request = request.bearer_auth(api_key);
+            }
+            let (error, retryable) = match request.send().await {
+                Ok(response) if response.status().is_success() => return Ok(response),
+                Ok(response) => {
+                    let status = response.status();
+                    let response_body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|error| format!("could not read response body: {error}"));
+                    // A proxy in front of the server answers 404 with nothing
+                    // while the server is away; the server's own 404, for a
+                    // model it does not have, says so and will not change.
+                    let retryable = matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+                        || (status.as_u16() == 404 && response_body.trim().is_empty());
+                    let message = format!(
+                        "Qwen endpoint returned {status}: {}",
+                        truncate_for_error(&response_body)
+                    );
+                    (message, retryable)
+                }
+                Err(error) => (error.to_string(), error.is_connect() || error.is_timeout()),
+            };
+            if !retryable || attempt >= self.config.retry.attempts {
+                return Err(ModelError::Transport(error));
+            }
+            tokio::time::sleep(delay).await;
+            delay = delay.saturating_mul(2);
+            attempt += 1;
         }
     }
 
@@ -335,26 +399,7 @@ impl ModelSession for QwenSession {
         Box::pin(async move {
             let pending = Self::pending_messages(input);
             let body = self.request_body(&pending)?;
-            let mut request = self.client.post(self.endpoint.clone()).json(&body);
-            if let Some(api_key) = &self.config.api_key {
-                request = request.bearer_auth(api_key);
-            }
-
-            let response = request
-                .send()
-                .await
-                .map_err(|error| ModelError::Transport(error.to_string()))?;
-            let status = response.status();
-            if !status.is_success() {
-                let response_body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|error| format!("could not read response body: {error}"));
-                let response_body = truncate_for_error(&response_body);
-                return Err(ModelError::Transport(format!(
-                    "Qwen endpoint returned {status}: {response_body}"
-                )));
-            }
+            let response = self.send_with_retry(&body).await?;
 
             let history = Arc::clone(&self.history);
             let stream = try_stream! {
@@ -1123,6 +1168,91 @@ mod tests {
                 .to_owned()
         });
         (base, server)
+    }
+
+    const SSE_HELLO: &str = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    /// Answers one connection per response, in order, and counts the requests.
+    async fn serve_in_turn(responses: Vec<String>) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut served = 0;
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4_096];
+                while find_bytes(&request, b"\r\n\r\n").is_none() {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+                served += 1;
+            }
+            served
+        });
+        (base, server)
+    }
+
+    fn quick_retries(base: String) -> QwenSession {
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut config = QwenConfig::new(base, profile);
+        config.retry = RetryPolicy {
+            attempts: 3,
+            first_delay: Duration::from_millis(1),
+        };
+        QwenSession::new(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_proxy_that_briefly_loses_the_server_is_retried() {
+        let (base, server) = serve_in_turn(vec![
+            "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                .into(),
+            SSE_HELLO.into(),
+        ])
+        .await;
+        let mut session = quick_retries(base);
+
+        let events: Vec<_> = session
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert!(events.contains(&ModelEvent::TextDelta {
+            text: "hello".into()
+        }));
+        assert_eq!(server.await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_server_saying_the_model_does_not_exist_is_not_retried() {
+        let body =
+            r#"{"object":"error","message":"The model `qwen-typo` does not exist.","code":404}"#;
+        let (base, server) = serve_in_turn(vec![format!(
+            "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )])
+        .await;
+        let mut session = quick_retries(base);
+
+        let error = session
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains("does not exist"), "{error}");
+        assert_eq!(server.await.unwrap(), 1);
     }
 
     #[tokio::test]
