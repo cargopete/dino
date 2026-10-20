@@ -46,6 +46,9 @@ pub struct Metrics {
     /// Whether the run was told it was running out of turns.
     #[serde(default)]
     pub told_turns_left: bool,
+    /// Turns stopped for length by a full window, after which the run went on.
+    #[serde(default)]
+    pub turns_cut_off: usize,
     pub tokens: TokenUsage,
     pub stop_reason: Option<StopReason>,
 }
@@ -141,6 +144,7 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &Ag
         AgentEvent::ContextWarning { .. } => metrics.context_warned = true,
         AgentEvent::TurnRetried { .. } => metrics.turns_retried += 1,
         AgentEvent::TurnsRunningOut { .. } => metrics.told_turns_left = true,
+        AgentEvent::TurnCutOff { .. } => metrics.turns_cut_off += 1,
         // Counted by nothing: a submission is the unit a metric is per, not a
         // metric itself.
         AgentEvent::Submitted { .. }

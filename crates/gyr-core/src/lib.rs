@@ -25,6 +25,7 @@ use gyr_protocol::AgentEvent;
 use gyr_protocol::ApprovalDecision;
 use gyr_protocol::ModelEvent;
 use gyr_protocol::StopReason;
+use gyr_protocol::TokenUsage;
 use gyr_protocol::ToolAction;
 use gyr_protocol::ToolCall;
 use gyr_protocol::ToolDefinition;
@@ -205,6 +206,10 @@ fn turns_left_note(turns_left: u32) -> String {
          response. Finish the change, check it once, and say what is done and what is not.]"
     )
 }
+
+const CUT_OFF_NOTE: &str = "[gyrfalcon: your last response was cut off because the context \
+     window filled. Older tool results have been elided to make room. Carry on from where you \
+     stopped, and keep each response short.]";
 
 /// Which turn is being attempted, and how many times so far.
 struct Turn<'a> {
@@ -390,30 +395,26 @@ where
                 Streamed::Cancelled { turns } => return Ok(cancelled(events, text, turns)),
             };
 
-            if let Some(window) = window {
-                self.mind_the_budget(model_turn, window, &mut warned, &mut events)?;
-            }
+            let elided = match window {
+                Some(window) => {
+                    self.mind_the_budget(model_turn, window, &mut warned, &mut events)?
+                }
+                None => false,
+            };
 
             let stop_reason = stop_reason.ok_or(AgentError::StreamEndedWithoutFinish)?;
-            match stop_reason {
-                StopReason::ToolUse => {
-                    if calls.is_empty() {
-                        return Err(AgentError::ToolStopWithoutCalls);
-                    }
-
-                    let mut results = match self
-                        .settle_all(model_turn, calls, &mut events, cancel)
-                        .await?
-                    {
-                        Settled::Results(results) => results,
-                        Settled::Blocked(reason) => {
-                            return Ok(blocked(events, text, &reason, model_turn));
-                        }
-                        Settled::Cancelled => return Ok(cancelled(events, text, model_turn)),
-                    };
-                    self.count_down(model_turn, &mut results, &mut events)?;
-                    input = TurnInput::ToolResults { results };
+            let cut_off = self.recover_from_a_full_window(
+                model_turn,
+                window.filter(|_| stop_reason == StopReason::MaxTokens),
+                elided,
+                &mut events,
+            )?;
+            let note = match stop_reason {
+                StopReason::ToolUse if calls.is_empty() => {
+                    return Err(AgentError::ToolStopWithoutCalls);
                 }
+                StopReason::ToolUse => None,
+                StopReason::MaxTokens if cut_off => Some(CUT_OFF_NOTE),
                 StopReason::EndTurn => {
                     if !calls.is_empty() {
                         return Err(AgentError::UnresolvedToolCalls(calls.len()));
@@ -436,6 +437,13 @@ where
                         model_turns: model_turn,
                     });
                 }
+            };
+            match self
+                .answer(model_turn, calls, note, &text, &mut events, cancel)
+                .await?
+            {
+                Ok(next) => input = next,
+                Err(ended) => return Ok(ended),
             }
         }
 
@@ -471,6 +479,72 @@ where
             Some(reason) => Settled::Blocked(reason),
             None => Settled::Results(results),
         })
+    }
+
+    /// Whether a length stop came from a full window and history was reduced
+    /// to make room, in which case the run goes on. `window` is given only for
+    /// a length stop.
+    fn recover_from_a_full_window(
+        &mut self,
+        model_turn: u32,
+        window: Option<u32>,
+        elided: bool,
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<bool, AgentError> {
+        let Some((window, usage)) =
+            window.and_then(|window| filled_window(events, window).map(|usage| (window, usage)))
+        else {
+            return Ok(false);
+        };
+        if !elided && !self.elide(model_turn, events)? {
+            return Ok(false);
+        }
+        self.emit(
+            AgentEvent::TurnCutOff {
+                model_turn,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                window_tokens: window,
+            },
+            events,
+        )?;
+        Ok(true)
+    }
+
+    /// Settles a turn's calls into the next turn's input, or the run's end when
+    /// the model reported a blocker or the run was cancelled. A note with no
+    /// calls to carry it goes to the model as a message of its own.
+    async fn answer(
+        &mut self,
+        model_turn: u32,
+        calls: Vec<ToolCall>,
+        note: Option<&str>,
+        text: &str,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Result<TurnInput, RunResult>, AgentError> {
+        if calls.is_empty() {
+            return Ok(Ok(TurnInput::User {
+                content: note.unwrap_or_default().to_owned(),
+            }));
+        }
+        let mut results = match self.settle_all(model_turn, calls, events, cancel).await? {
+            Settled::Results(results) => results,
+            Settled::Blocked(reason) => {
+                let events = std::mem::take(events);
+                return Ok(Err(blocked(events, text.to_owned(), &reason, model_turn)));
+            }
+            Settled::Cancelled => {
+                let events = std::mem::take(events);
+                return Ok(Err(cancelled(events, text.to_owned(), model_turn)));
+            }
+        };
+        if let (Some(note), Some(last)) = (note, results.last_mut()) {
+            last.output.content.push_str("\n\n");
+            last.output.content.push_str(note);
+        }
+        self.count_down(model_turn, &mut results, events)?;
+        Ok(Ok(TurnInput::ToolResults { results }))
     }
 
     /// Tells the model, with its tool results, how few turns remain.
@@ -607,7 +681,9 @@ where
         Ok(Attempt::Finished { calls, stop_reason })
     }
 
-    /// Warns once as the window fills, and reduces history past a higher mark.
+    /// Warns once as the window fills, and reduces history past a higher mark
+    /// or once the next turn might not fit. Returns whether anything was
+    /// reduced.
     ///
     /// The measure is the input tokens the provider reported for the request
     /// just made, which describes the history that produced it. It lags by one
@@ -620,8 +696,8 @@ where
         window: u32,
         warned: &mut bool,
         events: &mut Vec<AgentEvent>,
-    ) -> Result<(), AgentError> {
-        let used = last_input_tokens(events);
+    ) -> Result<bool, AgentError> {
+        let used = last_usage(events).map_or(0, |usage| usage.input_tokens);
         let filled = |percent: u8| u64::from(window) * u64::from(percent.min(100)) / 100;
 
         if !*warned && used >= filled(self.config.warn_at_percent) {
@@ -636,25 +712,36 @@ where
             )?;
         }
 
-        if used < filled(self.config.elide_at_percent) {
-            return Ok(());
+        // The next turn replays this one's output and writes about as much
+        // again, so on a small window a percentage alone leaves too little.
+        let next_turn = 2 * peak_output_tokens(events);
+        if used < filled(self.config.elide_at_percent) && used + next_turn < u64::from(window) {
+            return Ok(false);
         }
+        self.elide(model_turn, events)
+    }
+
+    /// Reduces history once, and says whether that reclaimed anything.
+    fn elide(&mut self, model_turn: u32, events: &mut Vec<AgentEvent>) -> Result<bool, AgentError> {
         match self
             .session
             .elide_tool_results(self.config.keep_recent_results)
         {
-            Ok(elision) if elision.results_elided > 0 => self.emit(
-                AgentEvent::Elided {
-                    model_turn,
-                    results_elided: elision.results_elided,
-                    bytes_reclaimed: elision.bytes_reclaimed,
-                },
-                events,
-            ),
+            Ok(elision) if elision.results_elided > 0 => {
+                self.emit(
+                    AgentEvent::Elided {
+                        model_turn,
+                        results_elided: elision.results_elided,
+                        bytes_reclaimed: elision.bytes_reclaimed,
+                    },
+                    events,
+                )?;
+                Ok(true)
+            }
             // Nothing to reduce, or a provider that cannot. Neither fails the
             // run: the warning has already been given, and the wall, if it
             // comes, arrives in the provider's own words.
-            Ok(_) | Err(_) => Ok(()),
+            Ok(_) | Err(_) => Ok(false),
         }
     }
 
@@ -765,18 +852,36 @@ where
     }
 }
 
-/// The most recent usage the provider reported, or zero if it has reported none.
-fn last_input_tokens(events: &[AgentEvent]) -> u64 {
-    events
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            AgentEvent::Model {
-                event: ModelEvent::Usage { usage },
-                ..
-            } => Some(usage.input_tokens),
-            _ => None,
-        })
+fn usages(events: &[AgentEvent]) -> impl DoubleEndedIterator<Item = &TokenUsage> {
+    events.iter().filter_map(|event| match event {
+        AgentEvent::Model {
+            event: ModelEvent::Usage { usage },
+            ..
+        } => Some(usage),
+        _ => None,
+    })
+}
+
+/// The usage of a turn whose prompt and output filled the window.
+///
+/// A self-hosted server shrinks a turn's output allowance to whatever the
+/// window has left, so a length stop there says nothing about the model.
+fn filled_window(events: &[AgentEvent], window: u32) -> Option<TokenUsage> {
+    let usage = last_usage(events)?;
+    let filled = usage.input_tokens + usage.output_tokens;
+    (filled >= u64::from(window) - u64::from(window / 100)).then_some(usage)
+}
+
+/// The most recent usage the provider reported.
+fn last_usage(events: &[AgentEvent]) -> Option<TokenUsage> {
+    usages(events).next_back().copied()
+}
+
+/// The most any one turn of this run has written.
+fn peak_output_tokens(events: &[AgentEvent]) -> u64 {
+    usages(events)
+        .map(|usage| usage.output_tokens)
+        .max()
         .unwrap_or(0)
 }
 
