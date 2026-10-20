@@ -66,6 +66,10 @@ pub struct WorkspaceTools {
     /// Workspace-relative paths no tool may write, such as the tests a task is
     /// judged by. A model under pressure edits those to pass.
     protected: Vec<PathBuf>,
+    /// Every fingerprint each file has had in this session, oldest first. An
+    /// edit that lands on one of them has undone work, which a model going in
+    /// circles does not notice on its own.
+    versions: Mutex<HashMap<PathBuf, Vec<String>>>,
 }
 
 impl WorkspaceTools {
@@ -81,6 +85,7 @@ impl WorkspaceTools {
             limits,
             seen: Mutex::new(HashMap::new()),
             protected: Vec::new(),
+            versions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -480,12 +485,14 @@ impl WorkspaceTools {
         let updated = text.replacen(&arguments.old_text, &arguments.new_text, 1);
         write_atomic(&path, updated.as_bytes())?;
         let after_sha256 = fingerprint(updated.as_bytes());
+        let note = self.revisit_note(&path, &after_sha256, &arguments.path);
         self.remember(&path, &after_sha256);
         let output = PatchOutput {
             path: arguments.path,
             before_sha256,
             after_sha256,
             bytes_written: updated.len(),
+            note,
         };
         json_output(&output)
     }
@@ -494,6 +501,24 @@ impl WorkspaceTools {
         if let Ok(mut seen) = self.seen.lock() {
             seen.insert(path.to_path_buf(), sha256.to_owned());
         }
+        if let Ok(mut versions) = self.versions.lock() {
+            let known = versions.entry(path.to_path_buf()).or_default();
+            if !known.iter().any(|version| version == sha256) {
+                known.push(sha256.to_owned());
+            }
+        }
+    }
+
+    /// Says so when a write puts a file back to a version it had before.
+    fn revisit_note(&self, path: &Path, sha256: &str, shown: &str) -> Option<String> {
+        let versions = self.versions.lock().ok()?;
+        let known = versions.get(path)?;
+        known.iter().any(|version| version == sha256).then(|| {
+            format!(
+                "this edit returns {shown} to a version it had earlier in this session; \
+                 if that was not the intent, the last changes are going round in circles"
+            )
+        })
     }
 
     /// Refuses to change a file the model has not seen as it now is.
@@ -571,8 +596,10 @@ impl WorkspaceTools {
         };
         write_atomic(&path, arguments.content.as_bytes())?;
         let sha256 = fingerprint(arguments.content.as_bytes());
+        let note = self.revisit_note(&path, &sha256, &arguments.path);
         self.remember(&path, &sha256);
         json_output(&WriteOutput {
+            note,
             path: arguments.path,
             created,
             sha256,
@@ -789,6 +816,8 @@ struct WriteOutput {
     created: bool,
     sha256: String,
     bytes_written: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -797,6 +826,8 @@ struct PatchOutput {
     before_sha256: String,
     after_sha256: String,
     bytes_written: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[cfg(test)]
@@ -1461,5 +1492,30 @@ mod tests {
                 json!({"path": "tests_scratch.rs", "content": ""}),
             ))
             .unwrap();
+    }
+
+    #[test]
+    fn an_edit_that_returns_a_file_to_an_earlier_version_says_so() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+        let patch = |old: &str, new: &str| {
+            output_json(
+                &tools
+                    .execute_sync(&call(
+                        "apply_patch",
+                        json!({"path": "src/lib.rs", "old_text": old, "new_text": new}),
+                    ))
+                    .unwrap(),
+            )
+        };
+
+        let forward = patch("a()", "b()");
+        assert!(forward.get("note").is_none(), "{forward}");
+        let back = patch("b()", "a()");
+        assert!(back["note"].as_str().unwrap().contains("earlier"), "{back}");
     }
 }
