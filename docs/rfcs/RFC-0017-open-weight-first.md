@@ -416,6 +416,30 @@ from cache.
 cannot say which change bought what. Three trials per case give no interval.
 The GPU hire for the second run was about $6.40.
 
+### 8.7 A reasoning budget, 2026-10-20
+
+The third bench repeated the four slowest cases with a 4,096-token reasoning
+budget (vLLM's `thinking_token_budget`), three trials each, against the second
+bench's runs of the same cases:
+
+| | no budget | 4,096 |
+|---|---|---|
+| Passed | 10/12 | 10/12 |
+| Final code passes hidden tests | 10/12 | 11/12 |
+| Wall time, all four cases | 461 min | 391 min |
+| `pratt-expression-parser` | 189 min | 157 min |
+
+No turn exceeded the budget, and the model still answered after reaching it.
+A fourth bench repeated `pratt-expression-parser` and `make-it-thread-safe` on
+a build that also has the window fix and two tool fixes. Pratt took 92 minutes
+and passed three of three. Thread-safe took 87 minutes against 63 in the third
+bench, with the same result: three passes, one of them out of turns. With
+three trials either swing could be chance.
+
+The budget is now the default for Qwen profiles. The window-recovery path
+added after the third bench (a length stop with a full window elides and goes
+on) did not fire in the fourth: no prompt passed 80% of the window.
+
 ## 9. Amendments
 
 - **RFC-0001 §1.** The second paragraph's "three provider families" are kept.

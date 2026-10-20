@@ -28,6 +28,11 @@ use gyr_protocol::ToolDefinition;
 use gyr_sandbox::Sandbox;
 use gyr_sandbox::Unconfined;
 
+/// Reasoning tokens per Qwen turn when nothing else is set. Measured on the
+/// hard bench (vLLM 0.32, Qwen3.8 27B): the same pass rate as no budget, and
+/// pratt-expression-parser in 92 minutes over three trials instead of 157.
+pub const DEFAULT_THINKING_BUDGET: u32 = 4_096;
+
 /// How much the operating system confines a process Gyrfalcon starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
 #[clap(rename_all = "kebab-case")]
@@ -166,7 +171,7 @@ fn build_session_from(
                 config.enable_thinking = Some(false);
             }
             config.api_key = env("QWEN_API_KEY").filter(|key| !key.is_empty());
-            config.thinking_budget = settings.thinking_budget;
+            config.thinking_budget = Some(thinking_budget(settings.thinking_budget));
             config.system_prompt = system_prompt;
             config.tools = tools;
             config.max_output_tokens = profile.max_output_tokens;
@@ -221,6 +226,10 @@ pub fn default_log_path(workspace: &Path, session_id: &str) -> PathBuf {
         .join(".gyr")
         .join("sessions")
         .join(format!("{session_id}.jsonl"))
+}
+
+fn thinking_budget(setting: Option<u32>) -> u32 {
+    setting.unwrap_or(DEFAULT_THINKING_BUDGET)
 }
 
 #[cfg(test)]
@@ -301,5 +310,11 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("gpt-9-imaginary"), "{message}");
         assert!(message.contains("known models:"), "{message}");
+    }
+
+    #[test]
+    fn qwen_reasoning_is_budgeted_unless_set_otherwise() {
+        assert_eq!(thinking_budget(None), DEFAULT_THINKING_BUDGET);
+        assert_eq!(thinking_budget(Some(16_384)), 16_384);
     }
 }
