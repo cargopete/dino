@@ -243,8 +243,14 @@ unquantised, and nothing smaller has been tried.
 ```console
 vllm serve Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b \
   --max-model-len 65536 --api-key "$VLLM_KEY" \
-  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
+  --enable-prompt-tokens-details
 ```
+
+The last flag makes vLLM report how much of each prompt it served from its
+prefix cache, which it does by default but does not otherwise say. Without it
+every session reports zero cached tokens. Measured 2026-10-20: a repeated
+3,056-token prefix came back with 2,352 tokens cached.
 
 ```console
 export QWEN_API_BASE=https://<pod>-8000.proxy.runpod.net/v1
