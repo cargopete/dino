@@ -45,6 +45,9 @@ Tool discipline:
 - `apply_patch` replaces one exact occurrence. If the text you intend to replace
   is not unique, include enough surrounding context to make it unique rather
   than guessing which occurrence the tool will choose. It will not guess either.
+- `write_file` creates a file, with any missing directories. Use it for new
+  files instead of writing them through `exec`. Replacing an existing file
+  whole needs its fingerprint, as `apply_patch` does.
 - `search` is literal, not a regular expression, and is bounded. An empty result
   is a fact about the search, not proof that nothing exists.
 - `list` shows what is in the workspace, respecting its ignore rules. Reach for

@@ -321,7 +321,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             }
         }),
         "list" => Some(argument_string(&call.arguments, "path").unwrap_or_else(|| ".".to_owned())),
-        "apply_patch" => argument_string(&call.arguments, "path"),
+        "apply_patch" | "write_file" => argument_string(&call.arguments, "path"),
         "exec" => call
             .arguments
             .get("command")

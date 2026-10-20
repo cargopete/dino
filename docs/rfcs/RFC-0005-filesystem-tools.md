@@ -189,3 +189,10 @@ Approvals arrived with RFC-0006. This slice still does not include OS
 sandboxing, process execution, structured Cargo diagnostics, cancellation of a
 long search, binary-file reads, new-file creation or a rendered diff. Those are
 missing features rather than properties delegated to the system prompt.
+
+**Amendment, 2026-10-20.** New-file creation arrived as `write_file` (issue #4).
+The hard bench showed why: Qwen3.8-27B wrote about twenty files through `exec`
+with `python3 -c` and shell heredocs, and once gave up and put its tests in
+`src/lib.rs`. The tool creates missing directories, refuses to overwrite a file
+without its current SHA-256, and resolves the path through its deepest existing
+ancestor, so a symbolic link cannot carry a write outside the workspace.

@@ -140,6 +140,24 @@ impl WorkspaceTools {
                     "additionalProperties": false
                 }),
             },
+            ToolDefinition {
+                name: "write_file".into(),
+                description: "Write a whole UTF-8 file in the workspace, creating it and any \
+                              missing directories. To replace a file that already exists, \
+                              pass the sha256 from reading it; for a small change to an \
+                              existing file, apply_patch is cheaper."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": false
+                }),
+            },
         ]
     }
 
@@ -168,6 +186,11 @@ impl WorkspaceTools {
                 let resolved = self.root.resolve_file(&arguments.path)?;
                 Ok(ToolAction::mutating(self.root.relative(&resolved)?))
             }
+            "write_file" => {
+                let arguments: WriteArguments = parse_arguments(&call.arguments, "write_file")?;
+                let resolved = self.root.resolve_writable(&arguments.path)?;
+                Ok(ToolAction::mutating(self.root.relative(&resolved)?))
+            }
             name => Err(ToolError::new(format!("unknown tool {name:?}"))),
         }
     }
@@ -178,6 +201,7 @@ impl WorkspaceTools {
             "search" => self.search(parse_arguments(&call.arguments, "search")?),
             "list" => self.list(&parse_arguments(&call.arguments, "list")?),
             "apply_patch" => self.apply_patch(parse_arguments(&call.arguments, "apply_patch")?),
+            "write_file" => self.write_file(parse_arguments(&call.arguments, "write_file")?),
             name => Err(ToolError::new(format!("unknown tool {name:?}"))),
         }
     }
@@ -417,6 +441,52 @@ impl WorkspaceTools {
         };
         json_output(&output)
     }
+
+    fn write_file(&self, arguments: WriteArguments) -> Result<ToolOutput, ToolError> {
+        let path = self.root.resolve_writable(&arguments.path)?;
+        let created = match fs::read(&path) {
+            Ok(bytes) => {
+                let found = fingerprint(&bytes);
+                match arguments.expected_sha256.as_deref() {
+                    None => {
+                        return Err(ToolError::new(format!(
+                            "{} already exists: read it and pass its sha256 to replace it, \
+                             or use apply_patch to change part of it",
+                            arguments.path
+                        )));
+                    }
+                    Some(expected) if expected != found => {
+                        return Err(ToolError::new(format!(
+                            "stale file: expected SHA-256 {expected}, found {found}"
+                        )));
+                    }
+                    Some(_) => false,
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if arguments.expected_sha256.is_some() {
+                    return Err(ToolError::new(format!(
+                        "{} does not exist, so there is no sha256 to match; leave \
+                         expected_sha256 out to create it",
+                        arguments.path
+                    )));
+                }
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|error| file_error("create the directory for", &path, &error))?;
+                }
+                true
+            }
+            Err(error) => return Err(file_error("read", &path, &error)),
+        };
+        write_atomic(&path, arguments.content.as_bytes())?;
+        json_output(&WriteOutput {
+            path: arguments.path,
+            created,
+            sha256: fingerprint(arguments.content.as_bytes()),
+            bytes_written: arguments.content.len(),
+        })
+    }
 }
 
 impl ToolRuntime for WorkspaceTools {
@@ -481,9 +551,12 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ToolError> {
     let parent = path.parent().ok_or_else(|| {
         ToolError::new(format!("file has no parent directory: {}", path.display()))
     })?;
-    let permissions = fs::metadata(path)
-        .map_err(|error| file_error("inspect", path, &error))?
-        .permissions();
+    // A new file keeps the permissions its creation gave it.
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(file_error("inspect", path, &error)),
+    };
     let mut last_error = None;
     for _ in 0..16 {
         let serial = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -495,7 +568,9 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ToolError> {
         {
             Ok(mut file) => {
                 let result = (|| {
-                    file.set_permissions(permissions.clone())?;
+                    if let Some(permissions) = &permissions {
+                        file.set_permissions(permissions.clone())?;
+                    }
                     file.write_all(contents)?;
                     file.sync_all()?;
                     drop(file);
@@ -606,6 +681,22 @@ struct PatchArguments {
     expected_sha256: String,
     old_text: String,
     new_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteArguments {
+    path: String,
+    content: String,
+    expected_sha256: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WriteOutput {
+    path: String,
+    created: bool,
+    sha256: String,
+    bytes_written: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1047,5 +1138,104 @@ mod tests {
             fs::read(workspace.path.join("src/lib.rs")).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn write_file_creates_a_file_and_the_directories_above_it() {
+        let workspace = TestWorkspace::new();
+        let tools = workspace.tools();
+
+        let output = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "tests/properties.rs", "content": "#[test]\nfn holds() {}\n"}),
+            ))
+            .unwrap();
+        let output = output_json(&output);
+
+        assert_eq!(output["created"], true);
+        assert_eq!(
+            output["sha256"],
+            fingerprint(b"#[test]\nfn holds() {}\n").as_str()
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("tests/properties.rs")).unwrap(),
+            "#[test]\nfn holds() {}\n"
+        );
+    }
+
+    #[test]
+    fn write_file_overwrites_only_with_the_current_fingerprint() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "old\n");
+        let tools = workspace.tools();
+
+        let unasked = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "new\n"}),
+            ))
+            .unwrap_err();
+        assert!(unasked.to_string().contains("already exists"), "{unasked}");
+
+        let stale = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "new\n", "expected_sha256": fingerprint(b"other")}),
+            ))
+            .unwrap_err();
+        assert!(stale.to_string().contains("stale file"), "{stale}");
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "old\n"
+        );
+
+        let output = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "new\n", "expected_sha256": fingerprint(b"old\n")}),
+            ))
+            .unwrap();
+        assert_eq!(output_json(&output)["created"], false);
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "new\n"
+        );
+    }
+
+    #[test]
+    fn write_file_cannot_leave_the_workspace() {
+        let workspace = TestWorkspace::new();
+        let outside = TestWorkspace::new();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside.path, workspace.path.join("escape")).unwrap();
+        let tools = workspace.tools();
+
+        for path in ["../sibling.rs", "/tmp/absolute.rs", "escape/planted.rs"] {
+            let error = tools
+                .classify_sync(&call("write_file", json!({"path": path, "content": "x"})))
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("workspace"),
+                "{path} said: {error}"
+            );
+        }
+        assert!(!outside.path.join("planted.rs").exists());
+    }
+
+    #[test]
+    fn write_file_is_classified_as_mutating_its_resolved_path() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "");
+        let tools = workspace.tools();
+
+        let action = tools
+            .classify_sync(&call(
+                "write_file",
+                json!({"path": "./src/new.rs", "content": ""}),
+            ))
+            .unwrap();
+
+        assert_eq!(action, ToolAction::mutating("src/new.rs"));
     }
 }
