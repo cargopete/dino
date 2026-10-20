@@ -217,9 +217,13 @@ impl ExecRequest {
     fn parse(arguments: &Value) -> Result<Self, ToolError> {
         let mut arguments = arguments.clone();
         if let Some(Value::String(line)) = arguments.get("command") {
-            // Models sometimes send the array JSON-encoded inside a string. That
-            // is unambiguous, so it is read; a shell line is not, so it is refused.
-            let Ok(command) = serde_json::from_str::<Vec<String>>(line) else {
+            // Models sometimes send the array JSON-encoded inside a string, or a
+            // plain line. Both are read when unambiguous; a line a shell would
+            // expand, quote or redirect is refused.
+            let command = serde_json::from_str::<Vec<String>>(line)
+                .ok()
+                .or_else(|| plain_words(line));
+            let Some(command) = command else {
                 let example = serde_json::to_string(&line.split_whitespace().collect::<Vec<_>>())
                     .unwrap_or_default()
                     .replace("\",\"", "\", \"");
@@ -237,6 +241,17 @@ impl ExecRequest {
         }
         Ok(request)
     }
+}
+
+/// Splits a line on whitespace when a shell would split it the same way.
+fn plain_words(line: &str) -> Option<Vec<String>> {
+    const SHELL: &[char] = &[
+        '\'', '"', '\\', '$', '`', '|', '&', ';', '<', '>', '*', '?', '(', ')', '[', ']', '{', '}',
+        '~', '#', '!',
+    ];
+    let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+    let assigns = words.first().is_some_and(|program| program.contains('='));
+    (!words.is_empty() && !assigns && !line.contains(SHELL)).then_some(words)
 }
 
 #[derive(Debug, Serialize)]
