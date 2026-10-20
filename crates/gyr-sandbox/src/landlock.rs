@@ -11,7 +11,9 @@ use std::path::PathBuf;
 
 use crate::Sandbox;
 use crate::SandboxError;
+use crate::Snapshot;
 use crate::WrappedCommand;
+use crate::restore;
 
 const HELPER: &str = "gyr-confine";
 
@@ -23,6 +25,7 @@ pub struct Landlock {
     helper: PathBuf,
     writable: PathBuf,
     temp_dir: PathBuf,
+    protected: Vec<PathBuf>,
 }
 
 impl Landlock {
@@ -34,6 +37,18 @@ impl Landlock {
     /// found, and [`SandboxError::Profile`] when the root cannot be
     /// canonicalised or its temporary directory cannot be created.
     pub fn new(workspace: &Path) -> Result<Self, SandboxError> {
+        Self::protecting(workspace, &[])
+    }
+
+    /// As [`Landlock::new`], and also puts these workspace-relative paths back
+    /// after each process.
+    ///
+    /// # Errors
+    ///
+    /// As [`Landlock::new`], and [`SandboxError::Profile`] for a protected
+    /// path that is absolute or climbs out with `..`.
+    pub fn protecting(workspace: &Path, protected: &[PathBuf]) -> Result<Self, SandboxError> {
+        let protected = restore::checked(protected)?;
         let helper = find_helper()?;
         let writable = std::fs::canonicalize(workspace).map_err(|error| {
             SandboxError::Profile(format!(
@@ -52,6 +67,7 @@ impl Landlock {
             helper,
             writable,
             temp_dir,
+            protected,
         })
     }
 }
@@ -64,7 +80,13 @@ impl Sandbox for Landlock {
     /// Seatbelt profile denies everything. Labelling both "network denied"
     /// would make the weaker one wear the stronger one's clothes.
     fn label(&self) -> String {
-        "workspace (landlock: writes confined, TCP denied)".to_owned()
+        match self.protected.len() {
+            0 => "workspace (landlock: writes confined, TCP denied)".to_owned(),
+            count => format!(
+                "workspace (landlock: writes confined, {count} path(s) restored after each \
+                 process, TCP denied)"
+            ),
+        }
     }
 
     fn confines_writes(&self) -> bool {
@@ -75,6 +97,19 @@ impl Sandbox for Landlock {
     /// because it fetches over TCP and will fail without it.
     fn denies_network(&self) -> bool {
         true
+    }
+
+    fn protects_paths(&self) -> bool {
+        !self.protected.is_empty()
+    }
+
+    fn snapshot(&self) -> Result<Option<Snapshot>, SandboxError> {
+        if self.protected.is_empty() {
+            return Ok(None);
+        }
+        Snapshot::take(&self.writable, &self.protected)
+            .map(Some)
+            .map_err(|error| SandboxError::Profile(format!("cannot copy protected paths: {error}")))
     }
 
     fn temp_dir(&self) -> Option<&Path> {

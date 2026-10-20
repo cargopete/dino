@@ -353,5 +353,10 @@ does far less. Two layers enforce it:
   script under the sandbox to confirm it.
 
 Landlock cannot express this: it only grants, and a grant on the workspace
-covers everything beneath it. On Linux the paths are protected from the tools
-alone, and `gyr` says so when a session starts.
+covers everything beneath it. On Linux the protected paths are copied before
+each process starts and put back once it has finished (#22). Anything created
+beneath them is removed, and the tool result names what was undone. This
+detects rather than prevents: within one command a process can change a test
+and run it before the restore. Granting write access per directory instead
+would have left no process able to create anything at the workspace root, so a
+fresh checkout's first `cargo build` would fail for want of `target/`.

@@ -410,7 +410,8 @@ async fn the_temporary_directory_survives_the_workspace_being_cleaned() {
     assert!(fixture.path.join(".gyr/tmp/note").is_file());
 }
 
-#[cfg(target_os = "macos")]
+// Seatbelt refuses the writes; Landlock cannot, so they are put back afterwards.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn a_confined_command_cannot_write_a_protected_path() {
     let fixture = Fixture::new();
@@ -423,7 +424,8 @@ async fn a_confined_command_cannot_write_a_protected_path() {
         "#!/bin/sh\necho changed > tests/spec.rs\necho new > tests/added.rs\necho fine > elsewhere.txt\n",
     );
 
-    tool.execute(&call(json!({"command": [script]})))
+    let output = tool
+        .execute(&call(json!({"command": [script]})))
         .await
         .unwrap();
 
@@ -431,6 +433,12 @@ async fn a_confined_command_cannot_write_a_protected_path() {
         fs::read_to_string(fixture.path.join("tests/spec.rs")).unwrap(),
         "kept\n"
     );
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            parse(&output)["restored_protected_paths"],
+            json!(["tests/added.rs", "tests/spec.rs"])
+        );
+    }
     assert!(!fixture.path.join("tests/added.rs").exists());
     assert_eq!(
         fs::read_to_string(fixture.path.join("elsewhere.txt")).unwrap(),

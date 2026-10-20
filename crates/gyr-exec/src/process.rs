@@ -22,6 +22,8 @@ pub struct Execution {
     pub stderr: String,
     pub truncated: bool,
     pub timed_out: bool,
+    /// Protected paths the process changed, which have been put back.
+    pub restored: Vec<String>,
 }
 
 /// The only environment variables a child is given.
@@ -82,6 +84,9 @@ pub async fn run(
             ))
         })?;
     }
+    let mut snapshot = sandbox
+        .snapshot()
+        .map_err(|error| ToolError::new(error.to_string()))?;
     let mut command = Command::new(&wrapped.program);
     command
         .args(&wrapped.arguments)
@@ -119,6 +124,17 @@ pub async fn run(
     })
     .await;
 
+    if collected.is_err() {
+        // Killed before restoring, or it could write again afterwards.
+        let _ = child.kill().await;
+    }
+    let restored = match snapshot.as_mut() {
+        Some(snapshot) => snapshot.restore().map_err(|error| {
+            ToolError::new(format!("cannot restore the protected paths: {error}"))
+        })?,
+        None => Vec::new(),
+    };
+
     match collected {
         Ok(Ok(((stdout, stdout_truncated), (stderr, stderr_truncated), status))) => Ok(Execution {
             exit_code: status.code(),
@@ -126,20 +142,19 @@ pub async fn run(
             stderr,
             truncated: stdout_truncated || stderr_truncated,
             timed_out: false,
+            restored,
         }),
         Ok(Err(error)) => Err(ToolError::new(format!(
             "cannot read output from {program}: {error}"
         ))),
-        Err(_elapsed) => {
-            // The child is killed when `command` and its handle drop.
-            Ok(Execution {
-                exit_code: None,
-                stdout: String::new(),
-                stderr: String::new(),
-                truncated: false,
-                timed_out: true,
-            })
-        }
+        Err(_elapsed) => Ok(Execution {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            truncated: false,
+            timed_out: true,
+            restored,
+        }),
     }
 }
 

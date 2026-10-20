@@ -124,6 +124,7 @@ impl ExecTool {
                     self.limits.timeout.as_secs()
                 ),
                 truncated: execution.truncated,
+                restored_protected_paths: execution.restored,
             });
         }
 
@@ -136,6 +137,7 @@ impl ExecTool {
             truncated: execution.truncated
                 || execution.stdout.len() > self.limits.max_output_bytes
                 || execution.stderr.len() > self.limits.max_output_bytes,
+            restored_protected_paths: execution.restored,
         })
     }
 }
@@ -265,6 +267,9 @@ struct ExecOutput {
     stdout: String,
     stderr: String,
     truncated: bool,
+    /// Protected paths this command changed, which have been put back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    restored_protected_paths: Vec<String>,
 }
 
 fn json_output<T: Serialize>(value: &T) -> Result<ToolOutput, ToolError> {
