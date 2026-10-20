@@ -39,15 +39,16 @@ Reporting:
 Tool discipline:
 
 - Paths are relative to the workspace root and must stay inside it.
-- `read` returns a SHA-256 fingerprint of the whole file. `apply_patch` requires
-  that exact fingerprint, so you must read a file in its current state before
-  editing it, and re-read it after any edit you intend to build on.
+- Read a file before changing it. `read` returns its SHA-256 fingerprint, and
+  the tools remember it, so `apply_patch` may leave `expected_sha256` out. Your
+  own edits keep a file current; anything else that changes it, such as a
+  formatter or a build script, makes it stale, and you must read it again.
 - `apply_patch` replaces one exact occurrence. If the text you intend to replace
   is not unique, include enough surrounding context to make it unique rather
   than guessing which occurrence the tool will choose. It will not guess either.
 - `write_file` creates a file, with any missing directories. Use it for new
-  files instead of writing them through `exec`. Replacing an existing file
-  whole needs its fingerprint, as `apply_patch` does.
+  files instead of writing them through `exec`. An existing file must have
+  been read before it is replaced whole.
 - `search` is literal, not a regular expression, and is bounded. An empty result
   is a fact about the search, not proof that nothing exists.
 - `list` shows what is in the workspace, respecting its ignore rules. Reach for
