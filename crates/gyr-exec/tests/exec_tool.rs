@@ -220,6 +220,33 @@ fn an_unknown_field_is_refused_rather_than_ignored() {
 }
 
 #[test]
+fn a_command_sent_as_an_encoded_array_is_read_as_that_array() {
+    let fixture = Fixture::new();
+
+    let action = fixture
+        .tool()
+        .classify(&call(json!({"command": "[\"git\", \"log\", \"-1\"]"})))
+        .unwrap();
+
+    assert_eq!(action.subject.as_deref(), Some("git log -1"));
+}
+
+#[test]
+fn a_command_sent_as_a_shell_line_is_refused_with_the_expected_shape() {
+    let fixture = Fixture::new();
+
+    let error = fixture
+        .tool()
+        .classify(&call(json!({"command": "git log -1"})))
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains(r#"["git", "log", "-1"]"#),
+        "said: {error}"
+    );
+}
+
+#[test]
 fn exec_is_a_process_and_its_subject_is_the_argument_vector() {
     let fixture = Fixture::new();
 

@@ -215,7 +215,22 @@ struct ExecRequest {
 
 impl ExecRequest {
     fn parse(arguments: &Value) -> Result<Self, ToolError> {
-        let request: Self = serde_json::from_value(arguments.clone())
+        let mut arguments = arguments.clone();
+        if let Some(Value::String(line)) = arguments.get("command") {
+            // Models sometimes send the array JSON-encoded inside a string. That
+            // is unambiguous, so it is read; a shell line is not, so it is refused.
+            let Ok(command) = serde_json::from_str::<Vec<String>>(line) else {
+                let example = serde_json::to_string(&line.split_whitespace().collect::<Vec<_>>())
+                    .unwrap_or_default()
+                    .replace("\",\"", "\", \"");
+                return Err(ToolError::new(format!(
+                    "invalid exec arguments: command must be an array with one string per \
+                     argument, such as {example}. No shell is involved."
+                )));
+            };
+            arguments["command"] = Value::from(command);
+        }
+        let request: Self = serde_json::from_value(arguments)
             .map_err(|error| ToolError::new(format!("invalid exec arguments: {error}")))?;
         if request.command.is_empty() {
             return Err(ToolError::new("command must hold at least a program"));
