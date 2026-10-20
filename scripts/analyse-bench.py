@@ -1,9 +1,9 @@
-"""Mine a bench's session logs for what gyr made hard, and re-score runs cut off by the turn limit.
+"""Mine a bench's session logs for what gyr made hard, and re-score runs that did not complete.
 
 usage: python3.12 -I scripts/analyse-bench.py <out_dir> [--rescore] [--context N]
 
 Reads what scripts/bench.sh wrote under <out_dir> and writes report.md and
-runs.json beside it. --rescore copies the workspace each turn-limited run left,
+runs.json beside it. --rescore copies the workspace each unfinished run left,
 overlays the case's hidden tests and runs them, because a run cut off while
 re-checking finished work is not the same as one that failed. --context is the
 served context length the peak prompt is measured against (default 65536).
@@ -150,8 +150,8 @@ def main():
         if os.path.exists(log):
             row["gyr"] = True
             row.update(mine(log))
-            turn_limited = any("turn limit" in x for x in row["fails"] or [])
-            if "--rescore" in sys.argv and turn_limited:
+            unfinished = any("did not complete" in x for x in row["fails"] or [])
+            if "--rescore" in sys.argv and unfinished:
                 row["rescore"] = rescore(case, os.path.join(B, "work", f"{model}-{trial}", case))
         else:
             row.update({"turns": d.get("turns"), "wall_s": d.get("wall_s"), "cost": d.get("cost_usd")})
