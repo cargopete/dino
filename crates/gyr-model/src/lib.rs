@@ -185,6 +185,9 @@ pub enum ModelError {
     Configuration(String),
 }
 
+/// The model used when none is selected. Open weights, so anyone can serve it.
+pub const DEFAULT_PROFILE: &str = "qwen3.8-27b";
+
 /// The MVP coding targets, without development-only entries.
 #[must_use]
 pub fn supported_profiles() -> Vec<ModelProfile> {
@@ -205,6 +208,7 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         qwen_coder_30b(),
         qwen_3_6_27b(),
         qwen_3_6_35b_a3b(),
+        qwen_3_8_27b(),
         qwen3_8b(),
     ]
 }
@@ -222,7 +226,7 @@ fn terra() -> ModelProfile {
         provider_model: "gpt-5.6-terra".into(),
         display_name: "GPT-5.6 Terra".into(),
         provider: ProviderKind::OpenAi,
-        status: ProfileStatus::Supported,
+        status: ProfileStatus::Development,
         context_window_tokens: Some(1_050_000),
         max_output_tokens: Some(128_000),
         reasoning: ReasoningSupport::Effort(vec![
@@ -353,7 +357,7 @@ fn qwen_coder(
         provider_model: provider_model.into(),
         display_name: display_name.into(),
         provider: ProviderKind::Qwen,
-        status: ProfileStatus::Supported,
+        status: ProfileStatus::Development,
         context_window_tokens: Some(262_144),
         max_output_tokens: None,
         reasoning: ReasoningSupport::None,
@@ -371,6 +375,28 @@ fn qwen_3_6_27b() -> ModelProfile {
 
 fn qwen_3_6_35b_a3b() -> ModelProfile {
     qwen_3_6("qwen3.6-35b-a3b", "Qwen/Qwen3.6-35B-A3B", "Qwen3.6 35B-A3B")
+}
+
+/// Apache-2.0 weights at `Qwen/Qwen3.8-27B`. The server must serve them under
+/// the name `qwen3.8-27b`. **Observed 2026-10-19** on vLLM 0.32.0 with the
+/// recipe's parsers: tool calls arrive structured and reasoning separately.
+/// Thinking control and sampling are not yet measured, so are left unset.
+fn qwen_3_8_27b() -> ModelProfile {
+    ModelProfile {
+        key: "qwen3.8-27b".into(),
+        provider_model: "qwen3.8-27b".into(),
+        display_name: "Qwen3.8 27B".into(),
+        provider: ProviderKind::Qwen,
+        status: ProfileStatus::Development,
+        context_window_tokens: Some(262_144),
+        max_output_tokens: None,
+        reasoning: ReasoningSupport::None,
+        parallel_tool_calls: true,
+        image_input: true,
+        tool_call_parser: Some("qwen3_coder".into()),
+        reasoning_parser: Some("qwen3".into()),
+        sampling: None,
+    }
 }
 
 /// A small local model, present as a development target rather than a coding
@@ -417,7 +443,7 @@ fn qwen_3_6(key: &str, provider_model: &str, display_name: &str) -> ModelProfile
         provider_model: provider_model.into(),
         display_name: display_name.into(),
         provider: ProviderKind::Qwen,
-        status: ProfileStatus::Supported,
+        status: ProfileStatus::Development,
         context_window_tokens: Some(262_144),
         max_output_tokens: None,
         reasoning: ReasoningSupport::Toggle,
@@ -445,26 +471,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_contains_exactly_the_mvp_models() {
-        let profiles = supported_profiles();
-        let models = profiles
-            .iter()
-            .map(|profile| profile.provider_model.as_str())
+    fn only_profiles_measured_live_are_supported() {
+        let supported = supported_profiles()
+            .into_iter()
+            .map(|profile| profile.provider_model)
             .collect::<Vec<_>>();
-
-        assert_eq!(
-            models,
-            vec![
-                "gpt-5.6-terra",
-                "claude-opus-5",
-                "claude-sonnet-5",
-                "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-                "Qwen/Qwen3-Coder-Next",
-                "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-                "Qwen/Qwen3.6-27B",
-                "Qwen/Qwen3.6-35B-A3B",
-            ]
-        );
+        assert_eq!(supported, vec!["claude-opus-5", "claude-sonnet-5"]);
 
         let all = builtin_profiles();
         let unique_keys = all
@@ -472,26 +484,32 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
+        assert_eq!(all.len(), 10);
+        assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 
     #[test]
-    fn the_only_development_target_is_the_small_local_model() {
-        let development: Vec<String> = builtin_profiles()
-            .into_iter()
-            .filter(|profile| profile.status == ProfileStatus::Development)
-            .map(|profile| profile.key)
-            .collect();
-
-        assert_eq!(development, vec!["qwen3-8b".to_owned()]);
-        assert_eq!(builtin_profiles().len(), supported_profiles().len() + 1);
+    fn only_self_served_profiles_name_server_parsers() {
+        for profile in builtin_profiles() {
+            let served = profile.provider == ProviderKind::Qwen;
+            assert_eq!(
+                profile.tool_call_parser.is_some(),
+                served,
+                "{}",
+                profile.key
+            );
+        }
     }
 
     #[test]
     fn qwen_profiles_declare_parser_and_reasoning_differences() {
-        let profiles = supported_profiles();
+        let profiles = builtin_profiles();
         let qwen = profiles
             .iter()
-            .filter(|profile| profile.provider == ProviderKind::Qwen)
+            .filter(|profile| {
+                profile.provider == ProviderKind::Qwen
+                    && !matches!(profile.key.as_str(), "qwen3-8b" | "qwen3.8-27b")
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(qwen.len(), 5);

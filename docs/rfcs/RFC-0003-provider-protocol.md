@@ -81,13 +81,18 @@ now a field rather than a sentence: every `ModelProfile` carries a
 returns only the former. The catalogue test above pins the supported set, so a
 development entry cannot quietly join it.
 
+**Amended 2026-10-19** by RFC-0017. The amendment above was applied to one
+profile and not to the rest: `terra` and the five Qwen coding profiles were
+marked `supported` without a live run. They are now `development`, and only the
+two Claude profiles, which have passed the corpus, are `supported`.
+
 | Model | Protocol | Reasoning | Native context | Status |
 |---|---|---:|---:|---|
 | `qwen3:8b` | Qwen Chat Completions | toggle | 32,768 | development |
 
 `qwen3:8b` exists so the loop, the tool round trip and the approval path can be
 driven by real inference on a laptop. It is not a coding target, it has not been
-through the conformance suite, and `gyr models` says "development only" beside
+through the conformance suite, and `gyr models` says "development" beside
 it.
 
 **Not measured.** The identifier is Ollama's tag format, and Ollama is not a

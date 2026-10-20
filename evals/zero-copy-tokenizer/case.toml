@@ -1,0 +1,126 @@
+name = "zero-copy-tokenizer"
+prompt = """
+The lexer in this crate copies every token's text into its own `String`. \
+Refactor it so that tokens borrow from the source instead, and thread the \
+borrow through every module that holds token text: the parser, the AST, the \
+queries and the summaries. Behaviour must stay exactly as it is now: the same \
+tokens with the same kinds, texts and spans, the same errors, and the same \
+results from every public function, on any input.
+
+When you are done these must hold exactly, lifetime names included:
+
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  pub struct Token<'a> { pub kind: TokenKind, pub text: &'a str, pub span: Span }
+  impl<'a> Token<'a> {
+      pub fn new(kind: TokenKind, text: &'a str, span: Span) -> Token<'a>
+      pub fn as_str(&self) -> &'a str
+      pub fn is(&self, kind: TokenKind) -> bool
+  }
+  pub struct Lexer<'a>
+  impl<'a> Lexer<'a> { pub fn new(src: &'a str) -> Lexer<'a> }
+  impl<'a> Iterator for Lexer<'a> { type Item = Result<Token<'a>, LexError>; }
+  pub fn tokenize(src: &str) -> Result<Vec<Token<'_>>, LexError>
+
+  pub enum Value<'a> { Ident(&'a str), Number(&'a str), Str(&'a str), List(Vec<Value<'a>>) }
+  impl<'a> Value<'a> { pub fn as_str(&self) -> Option<&'a str> }
+  pub struct Entry<'a> { pub key: &'a str, pub key_span: Span, pub value: Value<'a> }
+
+  pub enum ParseError<'a> {
+      Expected { expected: &'static str, found: Token<'a> },
+      UnexpectedEof { expected: &'static str },
+      DuplicateKey { key: &'a str, first: Span, second: Span },
+  }
+  pub enum Error<'a> { Lex(LexError), Parse(ParseError<'a>) }
+  pub fn parse<'a>(tokens: &[Token<'a>]) -> Result<Vec<Entry<'a>>, ParseError<'a>>
+  pub fn parse_str(src: &str) -> Result<Vec<Entry<'_>>, Error<'_>>
+
+  pub fn get<'e, 'a>(entries: &'e [Entry<'a>], key: &str) -> Option<&'e Value<'a>>
+  pub fn keys<'a>(entries: &[Entry<'a>]) -> Vec<&'a str>
+  pub fn get_str(entries: &[Entry<'_>], key: &str) -> Option<String>
+  pub fn unescape(raw: &str) -> String
+  pub fn count_kinds(tokens: &[Token<'_>]) -> Vec<(TokenKind, usize)>
+  pub fn longest_ident<'a>(tokens: &[Token<'a>]) -> Option<&'a str>
+
+Every piece of text these hand out, a token's `text`, a key, a value, an \
+error's token or key, must be a slice of the source string at the place it \
+occurs, not a copy of it. That includes the empty text of `""`. Keep the other \
+types and derives as they are, and do not use `unsafe` or leak memory.
+
+The tests in `tests/existing.rs` pass now and must still pass; do not change \
+them, `src/lib.rs` or `Cargo.toml`. More tests will be run against your \
+version afterwards. `cargo check` must be clean.
+"""
+max_turns = 40
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "src/lib.rs", "tests/existing.rs"]
+
+[[expect.contains]]
+file = "src/token.rs"
+text = "pub text: &'a str"
+
+[[expect.not_contains]]
+file = "src/token.rs"
+text = "String"
+
+[[expect.not_contains]]
+file = "src/token.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/token.rs"
+text = "leak"
+
+[[expect.not_contains]]
+file = "src/lexer.rs"
+text = "String::"
+
+[[expect.not_contains]]
+file = "src/lexer.rs"
+text = "to_string"
+
+[[expect.not_contains]]
+file = "src/lexer.rs"
+text = "to_owned"
+
+[[expect.not_contains]]
+file = "src/lexer.rs"
+text = "leak"
+
+[[expect.not_contains]]
+file = "src/lexer.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/ast.rs"
+text = "String"
+
+[[expect.not_contains]]
+file = "src/parser.rs"
+text = "String"
+
+[[expect.not_contains]]
+file = "src/parser.rs"
+text = "to_owned"
+
+[[expect.not_contains]]
+file = "src/parser.rs"
+text = "leak"
+
+[[expect.not_contains]]
+file = "src/parser.rs"
+text = "unsafe"
+
+[[expect.not_contains]]
+file = "src/summary.rs"
+text = "String"
+
+[[expect.not_contains]]
+file = "src/query.rs"
+text = "leak"
+
+[[expect.not_contains]]
+file = "src/query.rs"
+text = "unsafe"

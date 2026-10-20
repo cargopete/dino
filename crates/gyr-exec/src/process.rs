@@ -71,6 +71,17 @@ pub async fn run(
     let wrapped = sandbox
         .wrap(program, arguments)
         .map_err(|error| ToolError::new(error.to_string()))?;
+    // The sandbox creates this when it is built, but the workspace can be
+    // replaced or cleaned after that, and a TMPDIR that does not exist fails
+    // the child in ways that look nothing like a missing directory.
+    if let Some(temp_dir) = sandbox.temp_dir() {
+        std::fs::create_dir_all(temp_dir).map_err(|error| {
+            ToolError::new(format!(
+                "cannot create the temporary directory {}: {error}",
+                temp_dir.display()
+            ))
+        })?;
+    }
     let mut command = Command::new(&wrapped.program);
     command
         .args(&wrapped.arguments)

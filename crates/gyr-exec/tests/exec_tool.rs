@@ -343,3 +343,23 @@ async fn a_confined_command_may_still_write_inside_the_workspace() {
     assert_eq!(output["exit_code"], 0, "stderr: {}", output["stderr"]);
     assert!(fixture.path.join("made-by-exec").is_file());
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn the_temporary_directory_survives_the_workspace_being_cleaned() {
+    let fixture = Fixture::new();
+    let tool = fixture.sandboxed();
+    // An eval replaces the workspace after the sandbox is built, taking this
+    // directory with it. Everything that honours TMPDIR then failed.
+    fs::remove_dir_all(fixture.path.join(".gyr")).unwrap();
+    let script = fixture.script("temp.sh", "#!/bin/sh\necho scratch > \"$TMPDIR/note\"\n");
+
+    let output = tool
+        .execute(&call(json!({"command": [script]})))
+        .await
+        .unwrap();
+    let output = parse(&output);
+
+    assert_eq!(output["exit_code"], 0, "stderr: {}", output["stderr"]);
+    assert!(fixture.path.join(".gyr/tmp/note").is_file());
+}

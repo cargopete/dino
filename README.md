@@ -1,9 +1,23 @@
 # Gyrfalcon
 
 Gyrfalcon is an open-source terminal coding agent written in Rust and designed
-for Rust work. It runs against a deliberately bounded set of strong hosted and
-open-weight models rather than assuming that every model behaves like one API
-wearing a false moustache.
+for Rust work. It is built around open-weight models: by default Qwen3.8 27B,
+whose Apache-2.0 weights you serve yourself, on your own GPU or one rented by
+the hour. Hosted Claude models are kept as the baseline the open model is
+measured against. The catalogue is deliberately
+bounded, rather than assuming that every model behaves like one API wearing a
+false moustache.
+
+**The default has passed the corpus once.** On 2026-10-19, Qwen3.8 27B on vLLM,
+on one rented A100, passed nine of nine cases in 50 turns and about ten minutes,
+for roughly $0.31 of GPU time. That is one run, on a corpus that Claude also
+passes in full, so it shows that the open model can do this work through this
+harness, not that it does it as well. The same day, Sonnet 5.5 and Opus 5.5 in
+Claude Code also passed nine of nine, in 136 and 183 seconds, so on this
+corpus the open model is as correct and three to four and a half times slower
+(RFC-0017 §8.5). RFC-0017 asks for ten trials per case
+and a corpus of twenty before any such claim. Everything else measured in this
+README is of Claude.
 
 It is also a serious educational implementation of the machinery behind tools
 such as Claude Code and Codex, published with its design record, its failures
@@ -30,7 +44,8 @@ CI and evals.
   real socket and asserts the same normalised events from each: three wires, one
   semantics. Only Anthropic has been driven against a live endpoint, so what the
   suite proves is that the adapters agree, not that a provider accepts what they
-  send.
+  send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
+  see below.
 - **Six tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals. `list` shows what is
   in the workspace through the same ignore rules, with `all` to see what those
@@ -110,8 +125,9 @@ keeps no local history to reduce, and which wants a live credential to verify
 rather than merely to write. Summarising compaction. Rollback: the diagnostic
 gate refused rather than reverting, because a shadow copy of the workspace is a
 worse version of git. Resuming *from* a log as opposed to replaying one, which
-RFC-0014 section 2 argues cannot be done honestly. A conformance suite: RFC-0003
-lists twelve provider scenarios and none has run against a live endpoint.
+RFC-0014 section 2 argues cannot be done honestly. A conformance run against a live
+endpoint: the suite exists and has only ever seen recorded traffic. `gyr probe`,
+which would let you run it against your own endpoint, is RFC-0017's next step.
 
 These are missing features. None is delegated to the system prompt and none is
 claimed to be present.
@@ -161,23 +177,33 @@ unconfined is the worst combination here.
 The catalogue is explicit data rather than inference from a URL or a model-name
 substring. An adapter may expose less than a model can do and never more.
 
-| Key | Provider | Model |
-|---|---|---|
-| `terra` | OpenAI Responses | `gpt-5.6-terra` |
-| `claude-opus` | Anthropic Messages | `claude-opus-5` |
-| `claude-sonnet` | Anthropic Messages | `claude-sonnet-5` |
-| `qwen3-coder-480b-a35b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-480B-A35B-Instruct` |
-| `qwen3-coder-next` | Qwen Chat Completions | `Qwen/Qwen3-Coder-Next` |
-| `qwen3-coder-30b-a3b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
-| `qwen3.6-27b` | Qwen Chat Completions | `Qwen/Qwen3.6-27B` |
-| `qwen3.6-35b-a3b` | Qwen Chat Completions | `Qwen/Qwen3.6-35B-A3B` |
-| `qwen3-8b` | Qwen Chat Completions | `qwen3:8b` — development only |
+| Key | Provider | Model | Status |
+|---|---|---|---|
+| `qwen3.8-27b` | Qwen Chat Completions | `qwen3.8-27b` | **default**, development |
+| `terra` | OpenAI Responses | `gpt-5.6-terra` | development |
+| `claude-opus` | Anthropic Messages | `claude-opus-5` | supported |
+| `claude-sonnet` | Anthropic Messages | `claude-sonnet-5` | supported |
+| `qwen3-coder-480b-a35b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-480B-A35B-Instruct` | development |
+| `qwen3-coder-next` | Qwen Chat Completions | `Qwen/Qwen3-Coder-Next` | development |
+| `qwen3-coder-30b-a3b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | development |
+| `qwen3.6-27b` | Qwen Chat Completions | `Qwen/Qwen3.6-27B` | development |
+| `qwen3.6-35b-a3b` | Qwen Chat Completions | `Qwen/Qwen3.6-35B-A3B` | development |
+| `qwen3-8b` | Qwen Chat Completions | `qwen3:8b` | development, not a coding target |
+
+`supported` means the corpus has passed against a live endpoint, which so far is
+true of the two Claude profiles and nothing else. The rest have passed the wire
+conformance suite and no live run; RFC-0017 says what promotes them.
+
+`qwen3.8-27b` is the default because its weights are open: anyone can serve
+exactly the model the corpus measured. It has no endpoint of its own. Give it
+one with `--api-base`, `QWEN_API_BASE` or `api_base` in the user config file,
+and serve the weights under the name `qwen3.8-27b`. Its sampling and thinking
+control are left unset in the catalogue until something has measured them.
 
 Qwen's reference serving stacks are vLLM and SGLang. Ollama and other local
 runtimes may follow once they pass the same conformance suite. `qwen3-8b` is
 present so the loop can be driven by real inference on a laptop; it is not a
-coding target, has been through no conformance suite, and `gyr models` says so
-beside it.
+coding target and never will be.
 
 ## Using it
 
@@ -196,8 +222,31 @@ gyr models
 gyr prompt --model claude-sonnet
 ```
 
-Running against a model needs that provider's credential in the environment:
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `QWEN_API_BASE` for a self-hosted
+The default needs a server for Qwen3.8 27B. This is the configuration that has
+actually run, on 2026-10-19: vLLM 0.32.0 (the CUDA 13 image; the `-cu129` image
+fails to start on a missing `libnvrtc.so.13`) on one 80 GB A100 rented from
+Runpod at $1.81 an hour. The weights take 51 GiB, and a 64K context leaves room
+for about four full-length requests at once. The first start downloads the
+weights and took about seven minutes. A 48 GB card does not fit the weights
+unquantised, and nothing smaller has been tried.
+
+```console
+vllm serve Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b \
+  --max-model-len 65536 --api-key "$VLLM_KEY" \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+```
+
+```console
+export QWEN_API_BASE=https://<pod>-8000.proxy.runpod.net/v1
+export QWEN_API_KEY="$VLLM_KEY"
+gyr
+```
+
+A rented server is public, which is what `--api-key` is for. This is one
+tested configuration, not yet the per-tier quickstart RFC-0017 owes.
+
+The other profiles need their provider's credential: `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, or `QWEN_API_BASE` for the Qwen profiles without a hosted
 endpoint. A missing one fails before any request is sent, naming the variable.
 
 ```console
@@ -268,6 +317,7 @@ The command is `gyr`; Gyrfalcon is the project.
 - [RFC-0014: Resuming a session](docs/rfcs/RFC-0014-session-resumption.md)
 - [RFC-0015: Configuration files](docs/rfcs/RFC-0015-configuration.md)
 - [RFC-0016: Replaying a session](docs/rfcs/RFC-0016-replay.md)
+- [RFC-0017: Open-weight first](docs/rfcs/RFC-0017-open-weight-first.md)
 
 The RFCs are part of the project. Findings are labelled as measured, observed in
 source, documented by a provider, or inferred. Quantitative claims carry a date

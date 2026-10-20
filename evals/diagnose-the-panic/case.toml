@@ -1,0 +1,67 @@
+name = "diagnose-the-panic"
+prompt = """
+Bug report from a user of this crate:
+
+  "We started feeding it German, Russian and Japanese text and things went \
+wrong. Some inputs make it panic outright. Separately, and in plain English \
+too, `wrap` sometimes gives back a line one character wider than the width I \
+asked for. And tables with accented or non-Latin text come out ragged: the \
+columns don't line up, or they are wider than anything in them."
+
+Find the causes and fix them. This is how the crate is meant to behave, and \
+what the fix will be checked against:
+
+- Width means the number of `char`s (`str::chars().count()`, which is \
+`display_width`). Every rule below is in chars, never bytes.
+- `wrap(text, width)`: words are the runs of non-whitespace. Lines are words \
+joined by single spaces, filled greedily: a word joins the current line if the \
+line, including the joining space, stays within `width`, and otherwise starts \
+the next line. A word wider than `width` always starts a new line and is cut \
+into pieces of exactly `width` chars, the last possibly shorter; that last piece \
+is the current line, so following words may join it. `width == 0` or text with \
+no words gives no lines. No line is ever wider than `width`.
+- `truncate(text, max)`: text no wider than `max` comes back unchanged. \
+Otherwise the result is the first `max - 1` chars followed by `…` (U+2026, one \
+char), so exactly `max` wide, or empty when `max == 0`.
+- `pad(text, width, align)`: text already `width` or wider comes back \
+unchanged. Otherwise spaces bring it to exactly `width`: all on the right for \
+`Left`, all on the left for `Right`, and for `Center` half the padding, rounded \
+down, on the left and the rest on the right.
+- `render_table`: each column is as wide as its widest cell, header included, \
+capped at `max_width`. Every cell, header included, is truncated to the column \
+width and then padded to it with the column's alignment. Cells are joined by \
+` | `; the rule under the header is `-` repeated to each column's width, joined \
+by `-+-`; lines are joined by `\\n` with no trailing newline.
+
+The tests in `tests/layout.rs` pass and must stay exactly as they are. Do not \
+change any public signature, and do not paper over a panic by catching it: fix \
+what causes it. `cargo check` must be clean.
+"""
+max_turns = 40
+
+# Five faulty sites behind three symptoms. Two different functions panic, and the
+# ragged tables need both the padding and the column measure fixed.
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "tests/layout.rs"]
+
+[[expect.not_contains]]
+file = "src/wrap.rs"
+text = "catch_unwind"
+
+[[expect.not_contains]]
+file = "src/truncate.rs"
+text = "catch_unwind"
+
+[[expect.not_contains]]
+file = "src/align.rs"
+text = "catch_unwind"
+
+[[expect.not_contains]]
+file = "src/table.rs"
+text = "catch_unwind"
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "catch_unwind"

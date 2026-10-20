@@ -1,0 +1,64 @@
+name = "pratt-expression-parser"
+prompt = """
+Implement `eval` in `src/lib.rs`: parse and evaluate an integer arithmetic \
+expression. Keep the signature and the `EvalError` enum exactly as they are:
+
+  pub fn eval(src: &str) -> Result<i64, EvalError>
+
+This grammar is normative:
+
+  expr  := term (("+" | "-") term)*
+  term  := unary (("*" | "/" | "%") unary)*
+  unary := "-" unary | power
+  power := atom ("^" unary)?
+  atom  := integer | "(" expr ")"
+
+An integer is one or more ASCII digits; leading zeros are allowed. Space, tab, \
+`\\n` and `\\r` between tokens are ignored, and nothing else counts as \
+whitespace. There is no unary plus. So `^` is right-associative and binds \
+tighter than unary minus: `-2^2` is -4, `2^3^2` is 512, and `2^-1` is `2^(-1)`.
+
+Errors. Every offset is a byte offset into `src`.
+
+- Syntax first. If `src` is not a well-formed `expr`, return the syntax error \
+and nothing else, even if evaluating part of the input would also fail. The \
+error is at the first token where the input stops being a prefix of any \
+well-formed expression: `UnexpectedToken` with that token's offset (a \
+character that is not part of the language counts as a token there), or \
+`UnexpectedEnd` if the input runs out first, which includes empty and \
+all-whitespace input.
+- Evaluation is over `i64` with no wrapping. Evaluate the left operand, then \
+the right, then apply the operator, and return the first error met in that \
+order:
+  - An integer literal that does not fit in `i64` is `Overflow` at the \
+literal's offset. The literal is evaluated before any minus in front of it, \
+so `-9223372036854775808` is `Overflow { offset: 1 }`.
+  - `+`, `-`, `*` and unary minus give `Overflow` at the operator if the \
+result does not fit.
+  - `/` and `%` behave like Rust's `i64` `/` and `%` (truncating). A zero \
+divisor is `DivisionByZero` at the operator. `i64::MIN / -1` and \
+`i64::MIN % -1` are both `Overflow` at the operator.
+  - `a ^ b` with `b < 0` is `NegativeExponent` at the `^`. Otherwise it is the \
+exact value of `a` to the power `b`, or `Overflow` at the `^` if that does not \
+fit in `i64`. `x ^ 0` is 1 for every `x`, including 0. `b` can be any \
+non-negative `i64`: `(-1)^9999999999` is -1.
+
+Nesting a few hundred levels deep must work. The tests in `tests/basics.rs` \
+are a start, not a specification; more will be run against your \
+implementation afterwards. Do not change `tests/basics.rs` and do not add \
+dependencies. `cargo check` must be clean.
+"""
+max_turns = 40
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "tests/basics.rs"]
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "todo!"
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "unimplemented!"

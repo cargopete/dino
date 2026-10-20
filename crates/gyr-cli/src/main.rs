@@ -206,7 +206,7 @@ fn list_models(json: bool) -> Result<()> {
     for profile in builtin_profiles() {
         let note = match profile.status {
             ProfileStatus::Supported => "",
-            ProfileStatus::Development => "  (development only)",
+            ProfileStatus::Development => "  (development)",
         };
         println!(
             "{:<24} {:<12} {}{note}",
@@ -523,7 +523,11 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         (
             "model",
             show(
-                resolved.model.0.clone().unwrap_or_else(|| "unset".into()),
+                resolved
+                    .model
+                    .0
+                    .clone()
+                    .unwrap_or_else(|| gyr_model::DEFAULT_PROFILE.into()),
                 resolved.model.1,
             ),
         ),

@@ -1,0 +1,47 @@
+name = "interval-set"
+prompt = """
+Implement `IntervalSet` in `src/lib.rs`. It is a set of `u32` points stored as \
+half-open ranges `[start, end)`. Fill in every `todo!()`; the public API must stay \
+exactly as it is:
+
+  pub fn new() -> Self
+  pub fn insert(&mut self, range: Range<u32>)
+  pub fn remove(&mut self, range: Range<u32>)
+  pub fn contains(&self, point: u32) -> bool
+  pub fn iter(&self) -> impl Iterator<Item = Range<u32>> + '_
+  pub fn len(&self) -> u64
+  pub fn is_empty(&self) -> bool
+
+Behaviour:
+
+- `insert` adds every point in the range, `remove` takes every point in the range \
+out. Removing from the middle of a stored range leaves two ranges.
+- A range with `start >= end` is empty, and inserting or removing it changes nothing.
+- `iter` yields the canonical form, in ascending order: ranges that are non-empty, \
+disjoint and non-adjacent. Adjacent ranges merge, so inserting `1..3` and then \
+`3..5` yields the single range `1..5`. Two sets holding the same points must yield \
+exactly the same ranges, whatever order of operations built them.
+- `len` is the total number of points covered.
+- Ranges may reach `u32::MAX` as their end: `0..u32::MAX` is valid and holds \
+`u32::MAX` points, and the point `u32::MAX` itself can never be in a set. Nothing may overflow or panic anywhere in the `u32` domain.
+- `contains` must be O(log n) in the number of stored ranges. A `BTreeMap` or a \
+sorted `Vec` with binary search are both fine.
+
+The tests in `tests/basic.rs` are a start, not a specification; more will be run \
+against your implementation afterwards. Do not change `tests/basic.rs`. `cargo \
+check` must be clean.
+"""
+max_turns = 40
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "tests/basic.rs"]
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "todo!"
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "unimplemented!"

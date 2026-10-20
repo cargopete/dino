@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use gyr_model::DEFAULT_PROFILE;
 use gyr_model::ModelSession;
 use gyr_model::anthropic::AnthropicConfig;
 use gyr_model::anthropic::AnthropicSession;
@@ -82,12 +83,7 @@ pub struct RunSettings {
 pub fn resolve_profile(flag: Option<&str>) -> Result<ModelProfile> {
     let key = match flag {
         Some(key) => key.to_owned(),
-        None => std::env::var("GYR_MODEL").map_err(|_| {
-            anyhow::anyhow!(
-                "no model selected: pass --model or set GYR_MODEL ({})",
-                known_keys()
-            )
-        })?,
+        None => std::env::var("GYR_MODEL").unwrap_or_else(|_| DEFAULT_PROFILE.to_owned()),
     };
     builtin_profile(&key).with_context(|| format!("unknown model {key:?} ({})", known_keys()))
 }
@@ -260,6 +256,17 @@ mod tests {
                 "{key} should name {expected}, said: {error}"
             );
         }
+    }
+
+    #[test]
+    fn the_default_model_needs_an_endpoint() {
+        let settings = settings(builtin_profile(DEFAULT_PROFILE).expect("default profile"));
+
+        let Err(error) = build_session_from(&settings, String::new(), Vec::new(), &empty_env)
+        else {
+            panic!("the default has no endpoint of its own");
+        };
+        assert!(error.to_string().contains("QWEN_API_BASE"), "{error}");
     }
 
     #[test]
