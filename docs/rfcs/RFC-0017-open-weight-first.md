@@ -365,6 +365,57 @@ The assertions separate none of the three, which is section 8.2's point made
 again. Speed separates them by three to four and a half times, and for a person
 waiting at a terminal that may matter more than anything this corpus asserts.
 
+### 8.6 The hard bench, before and after the harness changes
+
+**Setup.** Six cases with hidden tests (`interval-set`, `diagnose-the-panic`,
+`make-it-thread-safe`, `large-workspace-find-the-cause`,
+`pratt-expression-parser`, `zero-copy-tokenizer`), three trials each, 40 model
+turns. Qwen ran in `gyr` on vLLM 0.32.0, one A100 80GB, 64K context, with the
+three trials sharing the GPU. `scripts/bench.sh` ran it and
+`scripts/analyse-bench.py --rescore` mined the logs. "Rescored" means a run that
+did not finish is judged by running the hidden tests against the code it left.
+
+The first run (2026-10-19) used `pete/open-weight-first`, and its binary still
+had the missing-TMPDIR bug. The second run (2026-10-20) used `c359355` on
+`pete/qwen-harness`. That commit added: reasoning read in vLLM's field, the
+window read from the server, retries, `write_file`, staleness judged by what
+the model last saw, the turn budget and countdown, and `report_blocker`.
+
+| Qwen3.8 27B in `gyr` | 2026-10-19 | 2026-10-20 |
+|---|---:|---:|
+| passed | 11/18 | 15/18 |
+| passed, rescored | 14/18 | 16/18 |
+| runs that hit the turn limit | 7 | 1 |
+| tool errors | 67 | 15 |
+| repeated identical calls | 76 | 35 |
+| median turns | 36 | 22.5 |
+| peak prompt | 59,416 | 51,166 |
+| output tokens, all runs | 954,044 | 813,969 |
+| wall time, all runs | 10.3 h | 8.7 h |
+
+In the 2026-10-19 run, Claude Code passed 18/18 on `claude-opus-5-5` (22.7
+minutes in all, $6.52 at list price) and 17/18 on `claude-sonnet-5-5` (13.9
+minutes, $2.64). Qwen still takes about thirty times as long as Opus.
+
+Three runs failed in the second bench:
+- One `diagnose-the-panic` run ended its turn believing it was done, with
+  non-Latin word wrapping still wrong.
+- One `pratt-expression-parser` run hit the turn limit after 43 patches. It had
+  been told its turns were running out, and it left code failing one hidden
+  test.
+- One `zero-copy-tokenizer` run lost its connection before any response
+  arrived. The adapter did not retry that kind of error. Its code passes the
+  hidden tests, and the fault is fixed.
+
+The new `contradictory-tests` case ran three times. Each time Qwen left the
+protected tests alone and called `report_blocker`, in 2 to 5 turns. vLLM now
+reports cached tokens: 6.63M of the run's 7.27M input tokens (91%) were served
+from cache.
+
+**What this does not say.** All the changes landed together, so the table
+cannot say which change bought what. Three trials per case give no interval.
+The GPU hire for the second run was about $6.40.
+
 ## 9. Amendments
 
 - **RFC-0001 §1.** The second paragraph's "three provider families" are kept.
