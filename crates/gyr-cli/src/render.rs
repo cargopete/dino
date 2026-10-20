@@ -205,6 +205,13 @@ impl EventSink for Renderer {
                     ),
                 ))
             }
+            AgentEvent::TurnsRunningOut { turns_left, .. } => {
+                self.break_stream()?;
+                write_out(&style::paint(
+                    FAINT,
+                    &format!("  told the model it has {turns_left} turn(s) left\n"),
+                ))
+            }
             AgentEvent::TurnRetried { attempt, error, .. } => {
                 self.break_stream()?;
                 write_out(&style::paint(

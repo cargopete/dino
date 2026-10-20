@@ -155,6 +155,8 @@ pub struct AgentConfig {
     pub keep_recent_results: usize,
     /// Times a turn whose stream breaks partway is sent, the first included.
     pub turn_attempts: u32,
+    /// From how many turns left the model is told the count.
+    pub turn_notice_at: u32,
 }
 
 impl Default for AgentConfig {
@@ -167,6 +169,7 @@ impl Default for AgentConfig {
             elide_at_percent: 85,
             keep_recent_results: 8,
             turn_attempts: 3,
+            turn_notice_at: 3,
         }
     }
 }
@@ -177,6 +180,16 @@ pub struct RunResult {
     pub text: String,
     pub stop_reason: StopReason,
     pub model_turns: u32,
+}
+
+/// Told to the model with its last tool result, because that is the one
+/// channel every provider carries into the next turn.
+fn turns_left_note(turns_left: u32) -> String {
+    let turns = if turns_left == 1 { "turn" } else { "turns" };
+    format!(
+        "\n\n[gyrfalcon: {turns_left} model {turns} left in this run, including your next \
+         response. Finish the change, check it once, and say what is done and what is not.]"
+    )
 }
 
 /// Which turn is being attempted, and how many times so far.
@@ -381,6 +394,7 @@ where
                         };
                         results.push(result);
                     }
+                    self.count_down(model_turn, &mut results, &mut events)?;
                     input = TurnInput::ToolResults { results };
                 }
                 StopReason::EndTurn => {
@@ -408,6 +422,30 @@ where
         Err(AgentError::ModelTurnLimit(
             self.config.max_model_turns.get(),
         ))
+    }
+
+    /// Tells the model, with its tool results, how few turns remain.
+    fn count_down(
+        &mut self,
+        model_turn: u32,
+        results: &mut [ToolResult],
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<(), AgentError> {
+        let turns_left = self.config.max_model_turns.get() - model_turn;
+        if turns_left == 0 || turns_left > self.config.turn_notice_at {
+            return Ok(());
+        }
+        self.emit(
+            AgentEvent::TurnsRunningOut {
+                model_turn,
+                turns_left,
+            },
+            events,
+        )?;
+        if let Some(last) = results.last_mut() {
+            last.output.content.push_str(&turns_left_note(turns_left));
+        }
+        Ok(())
     }
 
     /// Streams one attempt at a turn, recording its events as they arrive.

@@ -71,6 +71,7 @@ pub struct PromptContext {
     pub workspace_root: String,
     pub tools: Vec<String>,
     pub approval_mode: String,
+    pub max_model_turns: Option<u32>,
 }
 
 /// Renders the system prompt for one session.
@@ -98,6 +99,13 @@ pub fn system_prompt(context: &PromptContext) -> String {
     );
 
     let _ = writeln!(&mut prompt, "- Approval mode: {}", context.approval_mode);
+    if let Some(turns) = context.max_model_turns {
+        let _ = writeln!(
+            &mut prompt,
+            "- Model turns: at most {turns}. Each response you give is one. Near the end \
+             you will be told how many remain; finish and summarise rather than be cut off."
+        );
+    }
     prompt.push_str(
         "\nApproval is enforced below you, in code. Asking for permission in prose\n\
          does not grant it, and a denial is a decision rather than an obstacle to\n\
@@ -128,6 +136,7 @@ mod tests {
             workspace_root: "/ø".repeat(400),
             tools: vec!["read".into()],
             approval_mode: "interactive".into(),
+            max_model_turns: None,
         };
 
         let prompt = system_prompt(&context);
@@ -142,12 +151,14 @@ mod tests {
             workspace_root: "/tmp/workspace".into(),
             tools: vec!["read".into(), "search".into(), "apply_patch".into()],
             approval_mode: "read-only".into(),
+            max_model_turns: Some(40),
         };
 
         let prompt = system_prompt(&context);
 
         assert!(prompt.contains("- Workspace root: /tmp/workspace"));
         assert!(prompt.contains("- Available tools: read, search, apply_patch"));
+        assert!(prompt.contains("- Model turns: at most 40"), "{prompt}");
         assert!(prompt.contains("- Approval mode: read-only"));
     }
 }

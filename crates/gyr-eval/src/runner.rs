@@ -126,6 +126,7 @@ pub async fn run_case(
             .map(|definition| definition.name.clone())
             .collect(),
         approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
+        max_model_turns: Some(case.max_turns),
     };
     let session = build_session(system_prompt(&context), definitions)?;
 

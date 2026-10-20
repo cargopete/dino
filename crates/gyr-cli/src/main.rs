@@ -223,7 +223,12 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let sandbox = config::build_sandbox(args.sandbox, &workspace)?;
     let tools = tool_set(&workspace, sandbox)?;
-    let context = prompt_context(&workspace, ApprovalMode::Interactive, &tools.definitions());
+    let context = prompt_context(
+        &workspace,
+        ApprovalMode::Interactive,
+        &tools.definitions(),
+        None,
+    );
     let prompt = system_prompt(&context);
     eprintln!(
         "model {} · {} bytes of system prompt",
@@ -246,6 +251,7 @@ fn prompt_context(
     workspace: &Path,
     mode: ApprovalMode,
     definitions: &[ToolDefinition],
+    max_model_turns: Option<u32>,
 ) -> PromptContext {
     PromptContext {
         workspace_root: workspace.display().to_string(),
@@ -254,6 +260,7 @@ fn prompt_context(
             .map(|definition| definition.name.clone())
             .collect(),
         approval_mode: mode.label().to_owned(),
+        max_model_turns,
     }
 }
 
@@ -278,7 +285,12 @@ fn prepare(common: &CommonArgs) -> Result<Prepared> {
     let sandbox_label = sandbox.label();
     let tools = tool_set(&settings.workspace, Arc::clone(&sandbox))?;
     let definitions = tools.definitions();
-    let context = prompt_context(&settings.workspace, settings.mode, &definitions);
+    let context = prompt_context(
+        &settings.workspace,
+        settings.mode,
+        &definitions,
+        Some(settings.max_turns.get()),
+    );
     let mut model = config::build_session(&settings, system_prompt(&context), definitions)?;
 
     let log = JsonlSessionLog::create(

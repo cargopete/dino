@@ -316,4 +316,11 @@ pub enum AgentEvent {
         attempt: u32,
         error: String,
     },
+    /// The model was told how few turns it has left. Recorded because the note
+    /// travels inside a tool result, where a reader would not otherwise know
+    /// the model was the one being told.
+    TurnsRunningOut {
+        model_turn: u32,
+        turns_left: u32,
+    },
 }

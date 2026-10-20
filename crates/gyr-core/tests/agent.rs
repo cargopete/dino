@@ -668,3 +668,52 @@ async fn a_stream_that_keeps_breaking_fails_the_run() {
         "{error}"
     );
 }
+
+fn last_result(input: &TurnInput) -> String {
+    match input {
+        TurnInput::ToolResults { results } => results.last().unwrap().output.content.clone(),
+        TurnInput::User { content } => content.clone(),
+    }
+}
+
+#[tokio::test]
+async fn the_last_turns_carry_a_countdown() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            tool_turn(tool_call("call-3", "read", "c.rs")),
+            text_turn("done"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(4).unwrap(),
+            turn_notice_at: 2,
+            ..AgentConfig::default()
+        },
+    );
+
+    let result = agent.run("read them").await.unwrap();
+
+    let inputs = &agent.session().inputs;
+    assert!(!last_result(&inputs[1]).contains("turns left"));
+    assert!(
+        last_result(&inputs[2]).contains("2 model turns left"),
+        "{}",
+        last_result(&inputs[2])
+    );
+    assert!(
+        last_result(&inputs[3]).contains("1 model turn left"),
+        "{}",
+        last_result(&inputs[3])
+    );
+    let notices: Vec<u32> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnsRunningOut { turns_left, .. } => Some(*turns_left),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices, vec![2, 1]);
+}
