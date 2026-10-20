@@ -609,3 +609,62 @@ async fn a_run_cut_off_by_the_turn_limit_reports_the_turns_it_spent() {
     let outcome = outcome.lock().unwrap().clone().unwrap();
     assert_eq!(outcome.model_turns, 2);
 }
+
+fn broken_stream(before: Vec<ModelEvent>) -> Turn {
+    let events = before
+        .into_iter()
+        .map(Ok)
+        .chain(std::iter::once(Err(ModelError::Transport(
+            "error decoding response body".into(),
+        ))));
+    Turn::Stream(Box::pin(stream::iter(events)) as ModelEventStream)
+}
+
+#[tokio::test]
+async fn a_stream_that_breaks_mid_turn_is_sent_again_and_its_fragment_dropped() {
+    let mut agent = agent(vec![
+        broken_stream(vec![
+            ModelEvent::TextDelta {
+                text: "half a tho".into(),
+            },
+            ModelEvent::ToolCallCompleted {
+                call: tool_call("call-1", "read", "src/lib.rs"),
+            },
+        ]),
+        tool_turn(tool_call("call-1", "read", "src/lib.rs")),
+        text_turn("done"),
+    ]);
+
+    let result = agent.run("read it").await.unwrap();
+
+    // The repeated call id is the same call sent again, not a duplicate.
+    assert_eq!(result.text, "done");
+    assert_eq!(result.model_turns, 2);
+    assert_eq!(agent.tools().executed_names(), vec!["read"]);
+    let inputs = &agent.session().inputs;
+    assert_eq!(inputs[0], inputs[1], "the broken turn is resent unchanged");
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TurnRetried { model_turn: 1, attempt: 1, error }
+            if error.contains("decoding response body")
+    )));
+}
+
+#[tokio::test]
+async fn a_stream_that_keeps_breaking_fails_the_run() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![broken_stream(vec![]), broken_stream(vec![])]),
+        ScriptedTools::default(),
+        AgentConfig {
+            turn_attempts: 2,
+            ..AgentConfig::default()
+        },
+    );
+
+    let error = agent.run("hello").await.unwrap_err();
+
+    assert!(
+        error.to_string().contains("decoding response body"),
+        "{error}"
+    );
+}

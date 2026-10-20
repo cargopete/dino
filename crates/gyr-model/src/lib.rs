@@ -35,6 +35,11 @@ pub type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ModelError>>
 pub trait ModelSession: Send {
     fn profile(&self) -> &ModelProfile;
 
+    /// Starts the next turn.
+    ///
+    /// History is committed only once the stream finishes. A stream that fails
+    /// partway must leave it untouched, because the agent sends the same input
+    /// again.
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream>;
 
     /// Replaces what the profile can only assume with what the server reports,

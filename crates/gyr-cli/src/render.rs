@@ -205,6 +205,17 @@ impl EventSink for Renderer {
                     ),
                 ))
             }
+            AgentEvent::TurnRetried { attempt, error, .. } => {
+                self.break_stream()?;
+                write_out(&style::paint(
+                    WARN,
+                    &format!(
+                        "  the stream broke ({}); sending the turn again, attempt {}\n",
+                        cap(first_line(error), MAX_SUMMARY_BYTES),
+                        attempt + 1
+                    ),
+                ))
+            }
             AgentEvent::ToolFinished { result, .. } => {
                 let (colour, summary) = if result.output.is_error {
                     (

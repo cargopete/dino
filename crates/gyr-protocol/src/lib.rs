@@ -307,4 +307,13 @@ pub enum AgentEvent {
         results_elided: usize,
         bytes_reclaimed: usize,
     },
+    /// The stream broke before the turn finished, and the turn is being sent
+    /// again. Whatever it had streamed is discarded, so a reader should not
+    /// take the events between the turn's start and this one as having
+    /// happened.
+    TurnRetried {
+        model_turn: u32,
+        attempt: u32,
+        error: String,
+    },
 }

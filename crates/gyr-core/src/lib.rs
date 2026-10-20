@@ -153,6 +153,8 @@ pub struct AgentConfig {
     pub elide_at_percent: u8,
     /// Tool results kept intact when reducing.
     pub keep_recent_results: usize,
+    /// Times a turn whose stream breaks partway is sent, the first included.
+    pub turn_attempts: u32,
 }
 
 impl Default for AgentConfig {
@@ -164,6 +166,7 @@ impl Default for AgentConfig {
             warn_at_percent: 70,
             elide_at_percent: 85,
             keep_recent_results: 8,
+            turn_attempts: 3,
         }
     }
 }
@@ -174,6 +177,27 @@ pub struct RunResult {
     pub text: String,
     pub stop_reason: StopReason,
     pub model_turns: u32,
+}
+
+/// Which turn is being attempted, and how many times so far.
+struct Turn<'a> {
+    number: u32,
+    attempt: u32,
+    input: &'a TurnInput,
+}
+
+/// What one attempt at a turn came to.
+enum Attempt {
+    Finished {
+        calls: Vec<ToolCall>,
+        stop_reason: Option<StopReason>,
+    },
+    Broken {
+        error: String,
+    },
+    Cancelled {
+        turns: u32,
+    },
 }
 
 pub struct Agent<S, T> {
@@ -305,41 +329,37 @@ where
             }
             self.turns_started = model_turn;
 
-            let mut stream = match cancel.run_until_cancelled(self.session.next(input)).await {
-                Some(stream) => stream?,
-                None => return Ok(cancelled(events, text, model_turn.saturating_sub(1))),
-            };
-            let mut calls = Vec::new();
-            let mut stop_reason = None;
-
-            loop {
-                let Some(next) = cancel.run_until_cancelled(stream.next()).await else {
-                    return Ok(cancelled(events, text, model_turn));
-                };
-                let Some(event) = next else { break };
-                let event = event?;
-                if stop_reason.is_some() {
-                    return Err(AgentError::EventAfterFinished);
-                }
-
-                match &event {
-                    ModelEvent::TextDelta { text: delta } => text.push_str(delta),
-                    ModelEvent::ToolCallCompleted { call } => {
-                        if !seen_call_ids.insert(call.id.clone()) {
-                            return Err(AgentError::DuplicateToolCallId(call.id.clone()));
-                        }
-                        calls.push(call.clone());
+            let mut attempt = 1;
+            let (calls, stop_reason) = loop {
+                let outcome = self
+                    .stream_attempt(
+                        Turn {
+                            number: model_turn,
+                            attempt,
+                            input: &input,
+                        },
+                        &mut text,
+                        &mut seen_call_ids,
+                        &mut events,
+                        cancel,
+                    )
+                    .await?;
+                match outcome {
+                    Attempt::Finished { calls, stop_reason } => break (calls, stop_reason),
+                    Attempt::Cancelled { turns } => return Ok(cancelled(events, text, turns)),
+                    Attempt::Broken { error } => {
+                        self.emit(
+                            AgentEvent::TurnRetried {
+                                model_turn,
+                                attempt,
+                                error,
+                            },
+                            &mut events,
+                        )?;
+                        attempt += 1;
                     }
-                    ModelEvent::Finished { reason } => stop_reason = Some(*reason),
-                    ModelEvent::Started { .. }
-                    | ModelEvent::ReasoningDelta { .. }
-                    | ModelEvent::ToolCallStarted { .. }
-                    | ModelEvent::ToolCallArgumentsDelta { .. }
-                    | ModelEvent::Usage { .. } => {}
                 }
-
-                self.emit(AgentEvent::Model { model_turn, event }, &mut events)?;
-            }
+            };
 
             if let Some(window) = window {
                 self.mind_the_budget(model_turn, window, &mut warned, &mut events)?;
@@ -388,6 +408,75 @@ where
         Err(AgentError::ModelTurnLimit(
             self.config.max_model_turns.get(),
         ))
+    }
+
+    /// Streams one attempt at a turn, recording its events as they arrive.
+    ///
+    /// A stream that breaks in transit, with attempts to spare, comes back as
+    /// [`Attempt::Broken`] with its text and call ids withdrawn. Nothing from a
+    /// turn is acted on until it finishes, so sending it again repeats nothing
+    /// the model asked for.
+    async fn stream_attempt(
+        &mut self,
+        turn: Turn<'_>,
+        text: &mut String,
+        seen_call_ids: &mut HashSet<String>,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Attempt, AgentError> {
+        let model_turn = turn.number;
+        let Some(stream) = cancel
+            .run_until_cancelled(self.session.next(turn.input.clone()))
+            .await
+        else {
+            return Ok(Attempt::Cancelled {
+                turns: model_turn.saturating_sub(1),
+            });
+        };
+        let mut stream = stream?;
+        let text_before = text.len();
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut stop_reason = None;
+
+        loop {
+            let Some(next) = cancel.run_until_cancelled(stream.next()).await else {
+                return Ok(Attempt::Cancelled { turns: model_turn });
+            };
+            let Some(event) = next else { break };
+            let event = match event {
+                Ok(event) => event,
+                Err(ModelError::Transport(error)) if turn.attempt < self.config.turn_attempts => {
+                    text.truncate(text_before);
+                    for call in &calls {
+                        seen_call_ids.remove(&call.id);
+                    }
+                    return Ok(Attempt::Broken { error });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if stop_reason.is_some() {
+                return Err(AgentError::EventAfterFinished);
+            }
+
+            match &event {
+                ModelEvent::TextDelta { text: delta } => text.push_str(delta),
+                ModelEvent::ToolCallCompleted { call } => {
+                    if !seen_call_ids.insert(call.id.clone()) {
+                        return Err(AgentError::DuplicateToolCallId(call.id.clone()));
+                    }
+                    calls.push(call.clone());
+                }
+                ModelEvent::Finished { reason } => stop_reason = Some(*reason),
+                ModelEvent::Started { .. }
+                | ModelEvent::ReasoningDelta { .. }
+                | ModelEvent::ToolCallStarted { .. }
+                | ModelEvent::ToolCallArgumentsDelta { .. }
+                | ModelEvent::Usage { .. } => {}
+            }
+
+            self.emit(AgentEvent::Model { model_turn, event }, events)?;
+        }
+        Ok(Attempt::Finished { calls, stop_reason })
     }
 
     /// Warns once as the window fills, and reduces history past a higher mark.
