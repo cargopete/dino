@@ -47,6 +47,7 @@ pub struct EvalArgs {
     #[arg(long)]
     pub max_diagnostics: Option<usize>,
     /// Cap the model's reasoning per turn, where the server honours a budget.
+    /// Qwen defaults to 4096.
     #[arg(long)]
     pub thinking_budget: Option<u32>,
     /// Emit the whole record, metrics included, as JSON.

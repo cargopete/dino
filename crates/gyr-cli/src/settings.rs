@@ -39,6 +39,7 @@ pub struct FileConfig {
     /// Cargo diagnostics shown to the model per run of the cargo tool.
     pub max_diagnostics: Option<usize>,
     /// Most reasoning tokens per turn, for a server that honours a budget.
+    /// Qwen defaults to 4096.
     pub thinking_budget: Option<u32>,
 }
 
