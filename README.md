@@ -334,6 +334,7 @@ The command is `gyr`; Gyrfalcon is the project.
 - [RFC-0015: Configuration files](docs/rfcs/RFC-0015-configuration.md)
 - [RFC-0016: Replaying a session](docs/rfcs/RFC-0016-replay.md)
 - [RFC-0017: Open-weight first](docs/rfcs/RFC-0017-open-weight-first.md)
+- [RFC-0018: Handing a long task to a fresh session](docs/rfcs/RFC-0018-handover.md)
 
 The RFCs are part of the project. Findings are labelled as measured, observed in
 source, documented by a provider, or inferred. Quantitative claims carry a date
