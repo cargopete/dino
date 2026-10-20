@@ -154,3 +154,16 @@ fn a_named_session_that_does_not_exist_says_so() {
     assert!(!ok, "{output}");
     assert!(output.contains("nonexistent"), "{output}");
 }
+
+#[test]
+fn a_log_outside_any_workspace_replays_by_its_path() {
+    // Eval runs write their logs beside the scratch workspaces, not inside them.
+    let workspace = Workspace::new("");
+    let log = workspace.path.join("interval-set.jsonl");
+    fs::write(&log, session_log(&["from an eval"])).unwrap();
+
+    let (output, ok) = workspace.replay(&[log.to_str().unwrap()]);
+
+    assert!(ok, "{output}");
+    assert!(output.contains("answered from an eval"), "{output}");
+}

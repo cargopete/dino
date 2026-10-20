@@ -23,7 +23,8 @@ use crate::style::FAINT;
 
 #[derive(Debug, clap::Args)]
 pub struct ReplayArgs {
-    /// Session id. Defaults to the most recent in this workspace.
+    /// Session id, or the path of a session log. Defaults to the most recent
+    /// session in this workspace.
     pub session: Option<String>,
     /// Workspace root. Defaults to the current directory.
     #[arg(long)]
@@ -72,6 +73,18 @@ pub fn run(args: &ReplayArgs) -> Result<ExitCode> {
 fn locate(requested: Option<&str>, workspace: &Path) -> Result<(String, PathBuf)> {
     let directory = workspace.join(".gyr").join("sessions");
     if let Some(id) = requested {
+        let given = Path::new(id);
+        if given
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+            && given.is_file()
+        {
+            let stem = given
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(id);
+            return Ok((stem.to_owned(), given.to_path_buf()));
+        }
         let path = directory.join(format!("{id}.jsonl"));
         if !path.is_file() {
             bail!("no session {id:?} in {}", workspace.display());
