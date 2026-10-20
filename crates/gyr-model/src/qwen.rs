@@ -132,7 +132,18 @@ impl QwenSession {
         if !self.config.system_prompt.is_empty() {
             messages.push(ChatMessage::system(self.config.system_prompt.clone()));
         }
-        messages.extend(history.iter().cloned());
+        // Reasoning is most of what a thinking model writes, so replaying it
+        // all would fill a self-hosted context window in a few turns. It goes
+        // back only when the profile asks the template to preserve it.
+        let replay_reasoning = matches!(self.config.profile.reasoning, ReasoningSupport::Toggle)
+            && self.config.preserve_thinking;
+        messages.extend(history.iter().map(|message| {
+            let mut message = message.clone();
+            if !replay_reasoning {
+                message.reasoning_content = None;
+            }
+            message
+        }));
         messages.extend_from_slice(pending);
         drop(history);
 
@@ -506,7 +517,7 @@ impl QwenStreamParser {
                     events.push(ModelEvent::TextDelta { text: content });
                 }
             }
-            if let Some(reasoning) = choice.delta.reasoning_content {
+            if let Some(reasoning) = choice.delta.reasoning_content.or(choice.delta.reasoning) {
                 self.reasoning.push_str(&reasoning);
                 if !reasoning.is_empty() {
                     events.push(ModelEvent::ReasoningDelta { text: reasoning });
@@ -642,6 +653,9 @@ struct Choice {
 struct Delta {
     content: Option<String>,
     reasoning_content: Option<String>,
+    // vLLM renamed the field; 0.32 sends only `reasoning`. Kept apart rather
+    // than aliased, because a server sending both would fail as a duplicate.
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCallDelta>,
 }
@@ -785,6 +799,36 @@ mod tests {
     }
 
     #[test]
+    fn parser_reads_reasoning_in_the_shape_vllm_0_32_sends() {
+        let mut parser = QwenStreamParser::default();
+        let chunks = [
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"reasoning":"check the "},"finish_reason":null}]}"#,
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"reasoning":"borrow"},"finish_reason":null}]}"#,
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
+        ];
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(parser.consume(chunk).unwrap());
+        }
+        let (_, assistant) = parser.finish().unwrap();
+
+        let reasoning: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelEvent::ReasoningDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "check the borrow");
+        // Carried on the assistant message, so the next turn replays it.
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some("check the borrow")
+        );
+    }
+
+    #[test]
     fn parser_accumulates_reasoning_text_tools_and_usage() {
         let mut parser = QwenStreamParser::default();
         let chunks = [
@@ -866,6 +910,34 @@ mod tests {
             body["chat_template_kwargs"],
             json!({"enable_thinking": true, "preserve_thinking": true})
         );
+    }
+
+    #[test]
+    fn reasoning_is_replayed_only_when_the_profile_preserves_thinking() {
+        let replayed = |key: &str| {
+            let profile = crate::builtin_profile(key).unwrap();
+            let session =
+                QwenSession::new(QwenConfig::new("http://127.0.0.1:8000/v1", profile)).unwrap();
+            session.history.lock().unwrap().push(ChatMessage {
+                role: Role::Assistant,
+                content: Some("reading".into()),
+                reasoning_content: Some("the bug is in wrap".into()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            });
+            let body = session.request_body(&[]).unwrap();
+            let assistant = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["role"] == "assistant")
+                .unwrap()
+                .clone();
+            assistant.get("reasoning_content").cloned()
+        };
+
+        assert_eq!(replayed("qwen3.8-27b"), None);
+        assert_eq!(replayed("qwen3.6-27b"), Some(json!("the bug is in wrap")));
     }
 
     #[test]
