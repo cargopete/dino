@@ -42,6 +42,13 @@ pub struct EvalArgs {
     /// Withhold a tool from every case, for ablation. Repeatable.
     #[arg(long = "without")]
     pub without: Vec<String>,
+    /// Show the model at most this many Cargo diagnostics per run of the cargo
+    /// tool, in place of the default, to measure what a small model can use.
+    #[arg(long)]
+    pub max_diagnostics: Option<usize>,
+    /// Cap the model's reasoning per turn, where the server honours a budget.
+    #[arg(long)]
+    pub thinking_budget: Option<u32>,
     /// Emit the whole record, metrics included, as JSON.
     #[arg(long)]
     pub json: bool,
@@ -99,7 +106,7 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         // each case gets its own. An unattended run is exactly when the
         // containment has to be real.
         let workspace = case.materialise(&scratch)?;
-        let sandbox = config::build_sandbox(args.sandbox, &workspace)?;
+        let sandbox = config::build_sandbox(args.sandbox, &workspace, &case.protected)?;
 
         let settings = eval_settings(&args, &profile, &workspace);
         let build = |prompt: String, tools: Vec<gyr_protocol::ToolDefinition>| {
@@ -108,7 +115,12 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
                 .map(|session| session as Box<dyn ModelSession>)
         };
 
-        let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &args.without, &build).await?;
+        let variant = gyr_eval::Variant {
+            without: args.without.clone(),
+            max_diagnostics: args.max_diagnostics,
+            thinking_budget: args.thinking_budget,
+        };
+        let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?;
         if !args.json {
             print_case(&outcome);
         }
@@ -159,6 +171,9 @@ fn eval_settings(
         max_turns: std::num::NonZeroU32::new(1).expect("1 is non-zero"),
         mode: crate::config::ApprovalMode::AllowAll,
         sandbox: args.sandbox,
+        protected: Vec::new(),
+        max_diagnostics: args.max_diagnostics,
+        thinking_budget: args.thinking_budget,
         show_reasoning: false,
         api_base: args.api_base.clone(),
         disable_thinking: args.no_thinking,

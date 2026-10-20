@@ -221,9 +221,14 @@ fn list_models(json: bool) -> Result<()> {
 fn print_prompt(args: &PromptArgs) -> Result<()> {
     let profile = config::resolve_profile(args.model.as_deref())?;
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
-    let sandbox = config::build_sandbox(args.sandbox, &workspace)?;
-    let tools = tool_set(&workspace, sandbox)?;
-    let context = prompt_context(&workspace, ApprovalMode::Interactive, &tools.definitions());
+    let sandbox = config::build_sandbox(args.sandbox, &workspace, &[])?;
+    let tools = tool_set(&workspace, sandbox, &gyr_eval::ToolOptions::default())?;
+    let context = prompt_context(
+        &workspace,
+        ApprovalMode::Interactive,
+        &tools.definitions(),
+        None,
+    );
     let prompt = system_prompt(&context);
     eprintln!(
         "model {} · {} bytes of system prompt",
@@ -238,14 +243,19 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
 ///
 /// Deferred to `gyr-eval` so the corpus and the executable cannot drift. They
 /// did drift once, for exactly one commit, and the eval run said so.
-fn tool_set(workspace: &Path, sandbox: Arc<dyn Sandbox>) -> Result<ToolSet> {
-    gyr_eval::session_tools(workspace, sandbox).map_err(|error| anyhow::anyhow!("{error}"))
+fn tool_set(
+    workspace: &Path,
+    sandbox: Arc<dyn Sandbox>,
+    options: &gyr_eval::ToolOptions,
+) -> Result<ToolSet> {
+    gyr_eval::session_tools(workspace, sandbox, options).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 fn prompt_context(
     workspace: &Path,
     mode: ApprovalMode,
     definitions: &[ToolDefinition],
+    max_model_turns: Option<u32>,
 ) -> PromptContext {
     PromptContext {
         workspace_root: workspace.display().to_string(),
@@ -254,6 +264,7 @@ fn prompt_context(
             .map(|definition| definition.name.clone())
             .collect(),
         approval_mode: mode.label().to_owned(),
+        max_model_turns,
     }
 }
 
@@ -274,11 +285,34 @@ fn prepare(common: &CommonArgs) -> Result<Prepared> {
     // output as well as the flag.
     style::enable(settings.plain);
 
-    let sandbox = config::build_sandbox(settings.sandbox, &settings.workspace)?;
+    let sandbox =
+        config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
     let sandbox_label = sandbox.label();
-    let tools = tool_set(&settings.workspace, Arc::clone(&sandbox))?;
+    if !settings.protected.is_empty() && !sandbox.protects_paths() {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                "protected paths are refused to the file tools only: this sandbox cannot \
+                 stop a process writing them"
+            )
+        );
+    }
+    let tools = tool_set(
+        &settings.workspace,
+        Arc::clone(&sandbox),
+        &gyr_eval::ToolOptions {
+            protected: settings.protected.clone(),
+            max_diagnostics: settings.max_diagnostics,
+        },
+    )?;
     let definitions = tools.definitions();
-    let context = prompt_context(&settings.workspace, settings.mode, &definitions);
+    let context = prompt_context(
+        &settings.workspace,
+        settings.mode,
+        &definitions,
+        Some(settings.max_turns.get()),
+    );
     let mut model = config::build_session(&settings, system_prompt(&context), definitions)?;
 
     let log = JsonlSessionLog::create(
@@ -434,6 +468,9 @@ struct Resolved {
     show_reasoning: (bool, Source),
     no_thinking: (bool, Source),
     plain: (bool, Source),
+    protected: (Vec<PathBuf>, Source),
+    max_diagnostics: (Option<usize>, Source),
+    thinking_budget: (Option<u32>, Source),
     layers: Layers,
 }
 
@@ -506,8 +543,28 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         show_reasoning: switch(args.show_reasoning, |file| file.show_reasoning),
         no_thinking: switch(args.no_thinking, |file| file.no_thinking),
         plain: switch(args.plain, |file| file.plain),
+        protected: layers
+            .pick(|file| file.protected.clone())
+            .unwrap_or((Vec::new(), Source::Default)),
+        max_diagnostics: layers
+            .pick(|file| file.max_diagnostics.map(Some))
+            .unwrap_or((None, Source::Default)),
+        thinking_budget: layers
+            .pick(|file| file.thinking_budget.map(Some))
+            .unwrap_or((None, Source::Default)),
         layers,
     })
+}
+
+fn listed(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "nothing".to_owned();
+    }
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn print_config(args: &PromptArgs) -> Result<()> {
@@ -552,6 +609,10 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         (
             "max turns",
             show(resolved.max_turns.0.to_string(), resolved.max_turns.1),
+        ),
+        (
+            "protected",
+            show(listed(&resolved.protected.0), resolved.protected.1),
         ),
         (
             "api base",
@@ -623,6 +684,9 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         max_turns: resolved.max_turns.0,
         mode,
         sandbox: resolved.sandbox.0,
+        protected: resolved.protected.0,
+        max_diagnostics: resolved.max_diagnostics.0,
+        thinking_budget: resolved.thinking_budget.0,
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,

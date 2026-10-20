@@ -33,6 +33,13 @@ pub struct FileConfig {
     pub approvals: Option<ApprovalMode>,
     pub sandbox: Option<SandboxMode>,
     pub api_base: Option<String>,
+    /// Paths no tool or process may write. Only ever narrows what is allowed,
+    /// so a project file may set it.
+    pub protected: Option<Vec<std::path::PathBuf>>,
+    /// Cargo diagnostics shown to the model per run of the cargo tool.
+    pub max_diagnostics: Option<usize>,
+    /// Most reasoning tokens per turn, for a server that honours a budget.
+    pub thinking_budget: Option<u32>,
 }
 
 /// Which file a value came from, so `gyr config` can say.

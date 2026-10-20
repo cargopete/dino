@@ -496,6 +496,19 @@ async fn a_filling_window_is_reported_once_and_not_on_every_turn() {
 }
 
 #[tokio::test]
+async fn the_window_the_server_reports_is_the_one_measured_against() {
+    // The profile claims ten times the room; the server says otherwise.
+    let mut session =
+        ScriptedSession::new(vec![usage_turn(750, "done")]).with_window(Some(WINDOW * 10));
+    session.served_window = Some(WINDOW);
+    let mut agent = Agent::new(session, ScriptedTools::default(), AgentConfig::default());
+
+    let result = agent.run("keep going").await.unwrap();
+
+    assert_eq!(warnings(&result), vec![(750, WINDOW)]);
+}
+
+#[tokio::test]
 async fn a_window_below_the_mark_says_nothing() {
     let mut agent = budgeted(vec![usage_turn(500, "plenty of room")]);
 
@@ -554,4 +567,189 @@ async fn a_model_with_no_documented_window_is_left_alone() {
     assert!(warnings(&result).is_empty());
     assert!(elisions(&result).is_empty());
     assert!(agent.session().elide_requests.is_empty());
+}
+
+/// Keeps the outcome a run reports, which is what the session log and eval read.
+struct OutcomeSink(std::sync::Arc<std::sync::Mutex<Option<gyr_core::session::RunOutcome>>>);
+
+impl gyr_core::session::EventSink for OutcomeSink {
+    fn emit(&mut self, _event: &AgentEvent) -> Result<(), gyr_core::session::SinkError> {
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        outcome: &gyr_core::session::RunOutcome,
+    ) -> Result<(), gyr_core::session::SinkError> {
+        *self.0.lock().unwrap() = Some(outcome.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_run_cut_off_by_the_turn_limit_reports_the_turns_it_spent() {
+    let outcome = std::sync::Arc::default();
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            tool_turn(tool_call("call-3", "read", "c.rs")),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(2).unwrap(),
+            ..AgentConfig::default()
+        },
+    )
+    .with_sink(OutcomeSink(std::sync::Arc::clone(&outcome)));
+
+    let error = agent.run("read everything").await.unwrap_err();
+
+    assert_eq!(error.to_string(), "model-turn limit reached after 2 turns");
+    let outcome = outcome.lock().unwrap().clone().unwrap();
+    assert_eq!(outcome.model_turns, 2);
+}
+
+fn broken_stream(before: Vec<ModelEvent>) -> Turn {
+    let events = before
+        .into_iter()
+        .map(Ok)
+        .chain(std::iter::once(Err(ModelError::Transport(
+            "error decoding response body".into(),
+        ))));
+    Turn::Stream(Box::pin(stream::iter(events)) as ModelEventStream)
+}
+
+#[tokio::test]
+async fn a_stream_that_breaks_mid_turn_is_sent_again_and_its_fragment_dropped() {
+    let mut agent = agent(vec![
+        broken_stream(vec![
+            ModelEvent::TextDelta {
+                text: "half a tho".into(),
+            },
+            ModelEvent::ToolCallCompleted {
+                call: tool_call("call-1", "read", "src/lib.rs"),
+            },
+        ]),
+        tool_turn(tool_call("call-1", "read", "src/lib.rs")),
+        text_turn("done"),
+    ]);
+
+    let result = agent.run("read it").await.unwrap();
+
+    // The repeated call id is the same call sent again, not a duplicate.
+    assert_eq!(result.text, "done");
+    assert_eq!(result.model_turns, 2);
+    assert_eq!(agent.tools().executed_names(), vec!["read"]);
+    let inputs = &agent.session().inputs;
+    assert_eq!(inputs[0], inputs[1], "the broken turn is resent unchanged");
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TurnRetried { model_turn: 1, attempt: 1, error }
+            if error.contains("decoding response body")
+    )));
+}
+
+#[tokio::test]
+async fn a_stream_that_keeps_breaking_fails_the_run() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![broken_stream(vec![]), broken_stream(vec![])]),
+        ScriptedTools::default(),
+        AgentConfig {
+            turn_attempts: 2,
+            ..AgentConfig::default()
+        },
+    );
+
+    let error = agent.run("hello").await.unwrap_err();
+
+    assert!(
+        error.to_string().contains("decoding response body"),
+        "{error}"
+    );
+}
+
+fn last_result(input: &TurnInput) -> String {
+    match input {
+        TurnInput::ToolResults { results } => results.last().unwrap().output.content.clone(),
+        TurnInput::User { content } => content.clone(),
+    }
+}
+
+#[tokio::test]
+async fn the_last_turns_carry_a_countdown() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            tool_turn(tool_call("call-3", "read", "c.rs")),
+            text_turn("done"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(4).unwrap(),
+            turn_notice_at: 2,
+            ..AgentConfig::default()
+        },
+    );
+
+    let result = agent.run("read them").await.unwrap();
+
+    let inputs = &agent.session().inputs;
+    assert!(!last_result(&inputs[1]).contains("turns left"));
+    assert!(
+        last_result(&inputs[2]).contains("2 model turns left"),
+        "{}",
+        last_result(&inputs[2])
+    );
+    assert!(
+        last_result(&inputs[3]).contains("1 model turn left"),
+        "{}",
+        last_result(&inputs[3])
+    );
+    let notices: Vec<u32> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnsRunningOut { turns_left, .. } => Some(*turns_left),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices, vec![2, 1]);
+}
+
+#[tokio::test]
+async fn reporting_a_blocker_ends_the_run_with_the_reason() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            Turn::Events(vec![
+                ModelEvent::ToolCallCompleted {
+                    call: gyr_protocol::ToolCall {
+                        id: "call-1".into(),
+                        name: gyr_core::blocker::REPORT_BLOCKER.into(),
+                        arguments: json!({
+                            "reason": "tests/basic.rs expects 3 but the spec says 4",
+                            "evidence": ["tests/basic.rs:12"]
+                        }),
+                    },
+                },
+                ModelEvent::Finished {
+                    reason: StopReason::ToolUse,
+                },
+            ]),
+            text_turn("never asked for"),
+        ]),
+        gyr_core::blocker::BlockerTool,
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("make it pass").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::Blocked);
+    assert!(
+        result.text.contains("expects 3 but the spec says 4"),
+        "{}",
+        result.text
+    );
+    assert_eq!(agent.session().inputs.len(), 1, "no turn after the blocker");
 }

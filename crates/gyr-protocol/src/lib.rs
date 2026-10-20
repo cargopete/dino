@@ -140,6 +140,8 @@ pub enum StopReason {
     MaxTokens,
     Refusal,
     Cancelled,
+    /// The model reported that the task cannot be done as asked.
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -306,5 +308,21 @@ pub enum AgentEvent {
         model_turn: u32,
         results_elided: usize,
         bytes_reclaimed: usize,
+    },
+    /// The stream broke before the turn finished, and the turn is being sent
+    /// again. Whatever it had streamed is discarded, so a reader should not
+    /// take the events between the turn's start and this one as having
+    /// happened.
+    TurnRetried {
+        model_turn: u32,
+        attempt: u32,
+        error: String,
+    },
+    /// The model was told how few turns it has left. Recorded because the note
+    /// travels inside a tool result, where a reader would not otherwise know
+    /// the model was the one being told.
+    TurnsRunningOut {
+        model_turn: u32,
+        turns_left: u32,
     },
 }

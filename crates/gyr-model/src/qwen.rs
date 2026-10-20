@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_stream::try_stream;
 use futures_util::StreamExt;
@@ -49,6 +50,33 @@ pub struct QwenConfig {
     pub sampling: Option<SamplingDefaults>,
     pub enable_thinking: Option<bool>,
     pub preserve_thinking: bool,
+    pub retry: RetryPolicy,
+    /// Most reasoning tokens per turn, through vLLM's `thinking_token_budget`.
+    /// Measured on vLLM 0.32 with Qwen3.8 27B: reasoning stops one token short
+    /// of the budget and the model still answers. Servers that do not know the
+    /// field ignore it.
+    pub thinking_budget: Option<u32>,
+}
+
+/// How often a request that never reached the model is tried again.
+///
+/// Only before anything has streamed: a request that failed there produced
+/// nothing, so sending it again cannot duplicate a turn.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Total attempts, the first included.
+    pub attempts: u32,
+    /// Doubled after each failure.
+    pub first_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: 5,
+            first_delay: Duration::from_secs(2),
+        }
+    }
 }
 
 impl QwenConfig {
@@ -64,6 +92,8 @@ impl QwenConfig {
             sampling: None,
             enable_thinking: None,
             preserve_thinking: true,
+            retry: RetryPolicy::default(),
+            thinking_budget: None,
         }
     }
 }
@@ -73,6 +103,7 @@ pub struct QwenSession {
     endpoint: Url,
     config: QwenConfig,
     history: Arc<Mutex<Vec<ChatMessage>>>,
+    limits_discovered: bool,
 }
 
 impl QwenSession {
@@ -100,6 +131,7 @@ impl QwenSession {
             endpoint,
             config,
             history: Arc::new(Mutex::new(Vec::new())),
+            limits_discovered: false,
         })
     }
 
@@ -120,6 +152,52 @@ impl QwenSession {
         }
     }
 
+    async fn send_with_retry(
+        &self,
+        body: &serde_json::Map<String, Value>,
+    ) -> Result<reqwest::Response, ModelError> {
+        let mut delay = self.config.retry.first_delay;
+        let mut attempt = 1;
+        loop {
+            let mut request = self.client.post(self.endpoint.clone()).json(body);
+            if let Some(api_key) = &self.config.api_key {
+                request = request.bearer_auth(api_key);
+            }
+            let (error, retryable) = match request.send().await {
+                Ok(response) if response.status().is_success() => return Ok(response),
+                Ok(response) => {
+                    let status = response.status();
+                    let response_body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|error| format!("could not read response body: {error}"));
+                    // A proxy in front of the server answers 404 with nothing
+                    // while the server is away; the server's own 404, for a
+                    // model it does not have, says so and will not change.
+                    let retryable = matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+                        || (status.as_u16() == 404 && response_body.trim().is_empty());
+                    let message = format!(
+                        "Qwen endpoint returned {status}: {}",
+                        truncate_for_error(&response_body)
+                    );
+                    (message, retryable)
+                }
+                // A connection dropped before the response is `is_request`, not
+                // `is_connect`; nothing streamed, so sending again is safe.
+                Err(error) => (
+                    error.to_string(),
+                    error.is_connect() || error.is_timeout() || error.is_request(),
+                ),
+            };
+            if !retryable || attempt >= self.config.retry.attempts {
+                return Err(ModelError::Transport(error));
+            }
+            tokio::time::sleep(delay).await;
+            delay = delay.saturating_mul(2);
+            attempt += 1;
+        }
+    }
+
     fn request_body(
         &self,
         pending: &[ChatMessage],
@@ -132,7 +210,18 @@ impl QwenSession {
         if !self.config.system_prompt.is_empty() {
             messages.push(ChatMessage::system(self.config.system_prompt.clone()));
         }
-        messages.extend(history.iter().cloned());
+        // Reasoning is most of what a thinking model writes, so replaying it
+        // all would fill a self-hosted context window in a few turns. It goes
+        // back only when the profile asks the template to preserve it.
+        let replay_reasoning = matches!(self.config.profile.reasoning, ReasoningSupport::Toggle)
+            && self.config.preserve_thinking;
+        messages.extend(history.iter().map(|message| {
+            let mut message = message.clone();
+            if !replay_reasoning {
+                message.reasoning_content = None;
+            }
+            message
+        }));
         messages.extend_from_slice(pending);
         drop(history);
 
@@ -144,6 +233,9 @@ impl QwenSession {
 
         if let Some(max_tokens) = self.config.max_output_tokens {
             body.insert("max_tokens".into(), json!(max_tokens));
+        }
+        if let Some(budget) = self.config.thinking_budget {
+            body.insert("thinking_token_budget".into(), json!(budget));
         }
         let profile_sampling = if matches!(self.config.profile.reasoning, ReasoningSupport::Toggle)
             && self.config.enable_thinking == Some(false)
@@ -286,30 +378,42 @@ impl ModelSession for QwenSession {
         Ok(elision)
     }
 
+    fn discover_limits(&mut self) -> ModelFuture<'_, ()> {
+        Box::pin(async move {
+            if std::mem::replace(&mut self.limits_discovered, true) {
+                return Ok(());
+            }
+            // The profile records the model's native window, but a server is
+            // often started with less, and only the server knows how much.
+            let url = format!("{}/models", self.config.api_base.trim_end_matches('/'));
+            let mut request = self.client.get(url).timeout(Duration::from_secs(10));
+            if let Some(api_key) = &self.config.api_key {
+                request = request.bearer_auth(api_key);
+            }
+            let Ok(response) = request.send().await else {
+                return Ok(());
+            };
+            let Ok(models) = response.json::<ModelList>().await else {
+                return Ok(());
+            };
+            let served = models
+                .data
+                .into_iter()
+                .find(|model| model.id == self.config.profile.provider_model)
+                .and_then(|model| model.max_model_len);
+            if let Some(served) = served {
+                let window = &mut self.config.profile.context_window_tokens;
+                *window = Some(window.map_or(served, |native| native.min(served)));
+            }
+            Ok(())
+        })
+    }
+
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
             let pending = Self::pending_messages(input);
             let body = self.request_body(&pending)?;
-            let mut request = self.client.post(self.endpoint.clone()).json(&body);
-            if let Some(api_key) = &self.config.api_key {
-                request = request.bearer_auth(api_key);
-            }
-
-            let response = request
-                .send()
-                .await
-                .map_err(|error| ModelError::Transport(error.to_string()))?;
-            let status = response.status();
-            if !status.is_success() {
-                let response_body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|error| format!("could not read response body: {error}"));
-                let response_body = truncate_for_error(&response_body);
-                return Err(ModelError::Transport(format!(
-                    "Qwen endpoint returned {status}: {response_body}"
-                )));
-            }
+            let response = self.send_with_retry(&body).await?;
 
             let history = Arc::clone(&self.history);
             let stream = try_stream! {
@@ -506,7 +610,7 @@ impl QwenStreamParser {
                     events.push(ModelEvent::TextDelta { text: content });
                 }
             }
-            if let Some(reasoning) = choice.delta.reasoning_content {
+            if let Some(reasoning) = choice.delta.reasoning_content.or(choice.delta.reasoning) {
                 self.reasoning.push_str(&reasoning);
                 if !reasoning.is_empty() {
                     events.push(ModelEvent::ReasoningDelta { text: reasoning });
@@ -632,6 +736,17 @@ struct ChatCompletionChunk {
 }
 
 #[derive(Debug, Deserialize)]
+struct ModelList {
+    data: Vec<ServedModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServedModel {
+    id: String,
+    max_model_len: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct Choice {
     index: u32,
     delta: Delta,
@@ -642,6 +757,9 @@ struct Choice {
 struct Delta {
     content: Option<String>,
     reasoning_content: Option<String>,
+    // vLLM renamed the field; 0.32 sends only `reasoning`. Kept apart rather
+    // than aliased, because a server sending both would fail as a duplicate.
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCallDelta>,
 }
@@ -785,6 +903,36 @@ mod tests {
     }
 
     #[test]
+    fn parser_reads_reasoning_in_the_shape_vllm_0_32_sends() {
+        let mut parser = QwenStreamParser::default();
+        let chunks = [
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"reasoning":"check the "},"finish_reason":null}]}"#,
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"reasoning":"borrow"},"finish_reason":null}]}"#,
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
+        ];
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(parser.consume(chunk).unwrap());
+        }
+        let (_, assistant) = parser.finish().unwrap();
+
+        let reasoning: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelEvent::ReasoningDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "check the borrow");
+        // Carried on the assistant message, so the next turn replays it.
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some("check the borrow")
+        );
+    }
+
+    #[test]
     fn parser_accumulates_reasoning_text_tools_and_usage() {
         let mut parser = QwenStreamParser::default();
         let chunks = [
@@ -866,6 +1014,54 @@ mod tests {
             body["chat_template_kwargs"],
             json!({"enable_thinking": true, "preserve_thinking": true})
         );
+    }
+
+    #[test]
+    fn a_thinking_budget_is_sent_only_when_set() {
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut config = QwenConfig::new("http://127.0.0.1:8000/v1", profile);
+        let unset = QwenSession::new(config.clone()).unwrap();
+        assert!(
+            !unset
+                .request_body(&[])
+                .unwrap()
+                .contains_key("thinking_token_budget")
+        );
+
+        config.thinking_budget = Some(4_096);
+        let set = QwenSession::new(config).unwrap();
+        assert_eq!(
+            set.request_body(&[]).unwrap()["thinking_token_budget"],
+            4_096
+        );
+    }
+
+    #[test]
+    fn reasoning_is_replayed_only_when_the_profile_preserves_thinking() {
+        let replayed = |key: &str| {
+            let profile = crate::builtin_profile(key).unwrap();
+            let session =
+                QwenSession::new(QwenConfig::new("http://127.0.0.1:8000/v1", profile)).unwrap();
+            session.history.lock().unwrap().push(ChatMessage {
+                role: Role::Assistant,
+                content: Some("reading".into()),
+                reasoning_content: Some("the bug is in wrap".into()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            });
+            let body = session.request_body(&[]).unwrap();
+            let assistant = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["role"] == "assistant")
+                .unwrap()
+                .clone();
+            assistant.get("reasoning_content").cloned()
+        };
+
+        assert_eq!(replayed("qwen3.8-27b"), None);
+        assert_eq!(replayed("qwen3.6-27b"), Some(json!("the bug is in wrap")));
     }
 
     #[test]
@@ -979,6 +1175,166 @@ mod tests {
                 reason: StopReason::EndTurn
             })
         );
+    }
+
+    /// Answers one request with `body` as JSON, and returns the request line.
+    async fn serve_json_once(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2_048];
+            while find_bytes(&request, b"\r\n\r\n").is_none() {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request)
+                .lines()
+                .next()
+                .unwrap()
+                .to_owned()
+        });
+        (base, server)
+    }
+
+    const SSE_HELLO: &str = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    /// Answers one connection per response, in order, and counts the requests.
+    async fn serve_in_turn(responses: Vec<String>) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut served = 0;
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4_096];
+                while find_bytes(&request, b"\r\n\r\n").is_none() {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+                served += 1;
+            }
+            served
+        });
+        (base, server)
+    }
+
+    fn quick_retries(base: String) -> QwenSession {
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut config = QwenConfig::new(base, profile);
+        config.retry = RetryPolicy {
+            attempts: 3,
+            first_delay: Duration::from_millis(1),
+        };
+        QwenSession::new(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_proxy_that_briefly_loses_the_server_is_retried() {
+        let (base, server) = serve_in_turn(vec![
+            "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                .into(),
+            SSE_HELLO.into(),
+        ])
+        .await;
+        let mut session = quick_retries(base);
+
+        let events: Vec<_> = session
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert!(events.contains(&ModelEvent::TextDelta {
+            text: "hello".into()
+        }));
+        assert_eq!(server.await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_connection_dropped_before_any_response_is_retried() {
+        let (base, server) = serve_in_turn(vec![String::new(), SSE_HELLO.into()]).await;
+        let mut session = quick_retries(base);
+
+        let events: Vec<_> = session
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert!(events.contains(&ModelEvent::TextDelta {
+            text: "hello".into()
+        }));
+        assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_server_saying_the_model_does_not_exist_is_not_retried() {
+        let body =
+            r#"{"object":"error","message":"The model `qwen-typo` does not exist.","code":404}"#;
+        let (base, server) = serve_in_turn(vec![format!(
+            "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )])
+        .await;
+        let mut session = quick_retries(base);
+
+        let error = session
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains("does not exist"), "{error}");
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_window_shrinks_to_what_the_server_serves() {
+        let (base, server) = serve_json_once(
+            r#"{"object":"list","data":[{"id":"other","max_model_len":8192},{"id":"qwen3.8-27b","max_model_len":65536}]}"#,
+        )
+        .await;
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut session = QwenSession::new(QwenConfig::new(base, profile)).unwrap();
+
+        session.discover_limits().await.unwrap();
+
+        assert_eq!(session.profile().context_window_tokens, Some(65_536));
+        assert_eq!(server.await.unwrap(), "GET /v1/models HTTP/1.1");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_reports_no_limit_leaves_the_profile_alone() {
+        let (base, _server) =
+            serve_json_once(r#"{"object":"list","data":[{"id":"qwen3.8-27b"}]}"#).await;
+        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        let mut session = QwenSession::new(QwenConfig::new(base, profile)).unwrap();
+
+        session.discover_limits().await.unwrap();
+
+        assert_eq!(session.profile().context_window_tokens, Some(262_144));
     }
 
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

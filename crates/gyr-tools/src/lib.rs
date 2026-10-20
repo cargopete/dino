@@ -1,9 +1,12 @@
 //! Bounded filesystem tools rooted in one canonical workspace.
 
+use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -56,6 +59,17 @@ impl Default for ToolLimits {
 pub struct WorkspaceTools {
     root: WorkspaceRoot,
     limits: ToolLimits,
+    /// The fingerprint each file had when the model last saw it, through a read
+    /// or through its own write. A file that still has it has not changed
+    /// behind the model's back, whatever hash the model copies into a patch.
+    seen: Mutex<HashMap<PathBuf, String>>,
+    /// Workspace-relative paths no tool may write, such as the tests a task is
+    /// judged by. A model under pressure edits those to pass.
+    protected: Vec<PathBuf>,
+    /// Every fingerprint each file has had in this session, oldest first. An
+    /// edit that lands on one of them has undone work, which a model going in
+    /// circles does not notice on its own.
+    versions: Mutex<HashMap<PathBuf, Vec<String>>>,
 }
 
 impl WorkspaceTools {
@@ -69,7 +83,38 @@ impl WorkspaceTools {
         Ok(Self {
             root: WorkspaceRoot::new(root)?,
             limits,
+            seen: Mutex::new(HashMap::new()),
+            protected: Vec::new(),
+            versions: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Refuses writes beneath these workspace-relative paths.
+    #[must_use]
+    pub fn protecting(mut self, paths: Vec<PathBuf>) -> Self {
+        self.protected = paths;
+        self
+    }
+
+    /// Resolves a path for writing, refusing one that is protected.
+    fn writable(&self, path: &str, existing: bool) -> Result<PathBuf, ToolError> {
+        let resolved = if existing {
+            self.root.resolve_file(path)?
+        } else {
+            self.root.resolve_writable(path)?
+        };
+        let relative = PathBuf::from(self.root.relative(&resolved)?);
+        if self
+            .protected
+            .iter()
+            .any(|protected| relative.starts_with(protected))
+        {
+            return Err(ToolError::new(format!(
+                "{path} is protected and cannot be changed. If the task cannot be done \
+                 without changing it, call report_blocker and say why."
+            )));
+        }
+        Ok(resolved)
     }
 
     #[must_use]
@@ -132,11 +177,34 @@ impl WorkspaceTools {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
-                        "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "expected_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8,64}$",
+                            "description": "The sha256 from reading the file. May be left out \
+                                            when the file has not changed since you last read \
+                                            or wrote it."
+                        },
                         "old_text": {"type": "string", "minLength": 1},
                         "new_text": {"type": "string"}
                     },
-                    "required": ["path", "expected_sha256", "old_text", "new_text"],
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "write_file".into(),
+                description: "Write a whole UTF-8 file in the workspace, creating it and any \
+                              missing directories. A file that already exists must have been \
+                              read first; for a small change to one, apply_patch is cheaper."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    },
+                    "required": ["path", "content"],
                     "additionalProperties": false
                 }),
             },
@@ -165,7 +233,12 @@ impl WorkspaceTools {
             }
             "apply_patch" => {
                 let arguments: PatchArguments = parse_arguments(&call.arguments, "apply_patch")?;
-                let resolved = self.root.resolve_file(&arguments.path)?;
+                let resolved = self.writable(&arguments.path, true)?;
+                Ok(ToolAction::mutating(self.root.relative(&resolved)?))
+            }
+            "write_file" => {
+                let arguments: WriteArguments = parse_arguments(&call.arguments, "write_file")?;
+                let resolved = self.writable(&arguments.path, false)?;
                 Ok(ToolAction::mutating(self.root.relative(&resolved)?))
             }
             name => Err(ToolError::new(format!("unknown tool {name:?}"))),
@@ -178,6 +251,7 @@ impl WorkspaceTools {
             "search" => self.search(parse_arguments(&call.arguments, "search")?),
             "list" => self.list(&parse_arguments(&call.arguments, "list")?),
             "apply_patch" => self.apply_patch(parse_arguments(&call.arguments, "apply_patch")?),
+            "write_file" => self.write_file(parse_arguments(&call.arguments, "write_file")?),
             name => Err(ToolError::new(format!("unknown tool {name:?}"))),
         }
     }
@@ -221,13 +295,15 @@ impl WorkspaceTools {
         }
         let byte_truncated = truncate_utf8(&mut content, self.limits.max_read_bytes);
         let truncated = byte_truncated || end_line < requested_end.min(total_lines);
+        let sha256 = fingerprint(&bytes);
+        self.remember(&path, &sha256);
         let output = ReadOutput {
             path: arguments.path,
             start_line,
             end_line,
             total_lines,
             truncated,
-            sha256: fingerprint(&bytes),
+            sha256,
             content,
         };
         json_output(&output)
@@ -389,15 +465,15 @@ impl WorkspaceTools {
         if arguments.old_text == arguments.new_text {
             return Err(ToolError::new("patch would not change the file"));
         }
-        let path = self.root.resolve_file(&arguments.path)?;
+        let path = self.writable(&arguments.path, true)?;
         let bytes = fs::read(&path).map_err(|error| file_error("read", &path, &error))?;
         let before_sha256 = fingerprint(&bytes);
-        if before_sha256 != arguments.expected_sha256 {
-            return Err(ToolError::new(format!(
-                "stale file: expected SHA-256 {}, found {before_sha256}",
-                arguments.expected_sha256
-            )));
-        }
+        self.check_current(
+            &path,
+            &arguments.path,
+            arguments.expected_sha256.as_deref(),
+            &before_sha256,
+        )?;
         let text = String::from_utf8(bytes)
             .map_err(|_| ToolError::new(format!("file is not valid UTF-8: {}", arguments.path)))?;
         let occurrences = text.match_indices(&arguments.old_text).count();
@@ -409,13 +485,126 @@ impl WorkspaceTools {
         let updated = text.replacen(&arguments.old_text, &arguments.new_text, 1);
         write_atomic(&path, updated.as_bytes())?;
         let after_sha256 = fingerprint(updated.as_bytes());
+        let note = self.revisit_note(&path, &after_sha256, &arguments.path);
+        self.remember(&path, &after_sha256);
         let output = PatchOutput {
             path: arguments.path,
             before_sha256,
             after_sha256,
             bytes_written: updated.len(),
+            note,
         };
         json_output(&output)
+    }
+
+    fn remember(&self, path: &Path, sha256: &str) {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.insert(path.to_path_buf(), sha256.to_owned());
+        }
+        if let Ok(mut versions) = self.versions.lock() {
+            let known = versions.entry(path.to_path_buf()).or_default();
+            if !known.iter().any(|version| version == sha256) {
+                known.push(sha256.to_owned());
+            }
+        }
+    }
+
+    /// Says so when a write puts a file back to a version it had before.
+    fn revisit_note(&self, path: &Path, sha256: &str, shown: &str) -> Option<String> {
+        let versions = self.versions.lock().ok()?;
+        let known = versions.get(path)?;
+        known.iter().any(|version| version == sha256).then(|| {
+            format!(
+                "this edit returns {shown} to a version it had earlier in this session; \
+                 if that was not the intent, the last changes are going round in circles"
+            )
+        })
+    }
+
+    /// Refuses to change a file the model has not seen as it now is.
+    ///
+    /// Seen means read or written through these tools at its current
+    /// fingerprint, or named by a hash, or a prefix of at least eight
+    /// characters, that matches. Anything else changed behind the model's back.
+    fn check_current(
+        &self,
+        path: &Path,
+        shown: &str,
+        expected: Option<&str>,
+        current: &str,
+    ) -> Result<(), ToolError> {
+        let seen = self
+            .seen
+            .lock()
+            .ok()
+            .and_then(|seen| seen.get(path).cloned());
+        let named = expected.is_some_and(|hash| hash.len() >= 8 && current.starts_with(hash));
+        if named || seen.as_deref() == Some(current) {
+            return Ok(());
+        }
+        match (seen, expected) {
+            (None, None) => Err(ToolError::new(format!(
+                "read {shown} before changing it, or pass its sha256"
+            ))),
+            (_, Some(expected)) => Err(ToolError::new(format!(
+                "stale file: expected SHA-256 {expected}, found {current}; it has changed \
+                 since you last saw it, so read it again"
+            ))),
+            (Some(last), None) => Err(ToolError::new(format!(
+                "stale file: last seen at SHA-256 {last}, found {current}; it has changed \
+                 since you last saw it, so read it again"
+            ))),
+        }
+    }
+
+    fn write_file(&self, arguments: WriteArguments) -> Result<ToolOutput, ToolError> {
+        let path = self.writable(&arguments.path, false)?;
+        let created = match fs::read(&path) {
+            Ok(bytes) => {
+                let found = fingerprint(&bytes);
+                let seen = self.seen.lock().is_ok_and(|seen| seen.contains_key(&path));
+                if !seen && arguments.expected_sha256.is_none() {
+                    return Err(ToolError::new(format!(
+                        "{} already exists: read it before replacing it, or use apply_patch \
+                         to change part of it",
+                        arguments.path
+                    )));
+                }
+                self.check_current(
+                    &path,
+                    &arguments.path,
+                    arguments.expected_sha256.as_deref(),
+                    &found,
+                )?;
+                false
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if arguments.expected_sha256.is_some() {
+                    return Err(ToolError::new(format!(
+                        "{} does not exist, so there is no sha256 to match; leave \
+                         expected_sha256 out to create it",
+                        arguments.path
+                    )));
+                }
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|error| file_error("create the directory for", &path, &error))?;
+                }
+                true
+            }
+            Err(error) => return Err(file_error("read", &path, &error)),
+        };
+        write_atomic(&path, arguments.content.as_bytes())?;
+        let sha256 = fingerprint(arguments.content.as_bytes());
+        let note = self.revisit_note(&path, &sha256, &arguments.path);
+        self.remember(&path, &sha256);
+        json_output(&WriteOutput {
+            note,
+            path: arguments.path,
+            created,
+            sha256,
+            bytes_written: arguments.content.len(),
+        })
     }
 }
 
@@ -481,9 +670,12 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ToolError> {
     let parent = path.parent().ok_or_else(|| {
         ToolError::new(format!("file has no parent directory: {}", path.display()))
     })?;
-    let permissions = fs::metadata(path)
-        .map_err(|error| file_error("inspect", path, &error))?
-        .permissions();
+    // A new file keeps the permissions its creation gave it.
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(file_error("inspect", path, &error)),
+    };
     let mut last_error = None;
     for _ in 0..16 {
         let serial = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -495,7 +687,9 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ToolError> {
         {
             Ok(mut file) => {
                 let result = (|| {
-                    file.set_permissions(permissions.clone())?;
+                    if let Some(permissions) = &permissions {
+                        file.set_permissions(permissions.clone())?;
+                    }
                     file.write_all(contents)?;
                     file.sync_all()?;
                     drop(file);
@@ -603,9 +797,27 @@ struct ListOutput {
 #[serde(deny_unknown_fields)]
 struct PatchArguments {
     path: String,
-    expected_sha256: String,
+    expected_sha256: Option<String>,
     old_text: String,
     new_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteArguments {
+    path: String,
+    content: String,
+    expected_sha256: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WriteOutput {
+    path: String,
+    created: bool,
+    sha256: String,
+    bytes_written: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -614,6 +826,8 @@ struct PatchOutput {
     before_sha256: String,
     after_sha256: String,
     bytes_written: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[cfg(test)]
@@ -1008,7 +1222,9 @@ mod tests {
         );
         assert_ne!(patched["before_sha256"], patched["after_sha256"]);
 
-        let stale = tools
+        // Built on the hash from before its own last edit, as a model issuing
+        // two patches in one turn does. The only change since was its own.
+        let chained = tools
             .execute_sync(&call(
                 "apply_patch",
                 json!({
@@ -1018,8 +1234,93 @@ mod tests {
                     "new_text": "newer"
                 }),
             ))
+            .unwrap();
+        assert!(!chained.is_error);
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "fn newer() {}\n"
+        );
+    }
+
+    #[test]
+    fn a_change_the_model_did_not_make_makes_the_file_stale() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn old() {}\n");
+        let tools = workspace.tools();
+        let read = output_json(
+            &tools
+                .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+                .unwrap(),
+        );
+        let fingerprint = read["sha256"].as_str().unwrap().to_owned();
+        // A formatter, a build script or a person, between the read and the patch.
+        workspace.write("src/lib.rs", "fn old() {}\nfn added() {}\n");
+
+        for hash in [Some(fingerprint.as_str()), None] {
+            let mut arguments = json!({"path": "src/lib.rs", "old_text": "old", "new_text": "new"});
+            if let Some(hash) = hash {
+                arguments["expected_sha256"] = json!(hash);
+            }
+            let stale = tools
+                .execute_sync(&call("apply_patch", arguments))
+                .unwrap_err();
+            assert!(stale.to_string().contains("stale file"), "{stale}");
+        }
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "fn old() {}\nfn added() {}\n"
+        );
+    }
+
+    #[test]
+    fn a_mis_copied_or_missing_hash_is_forgiven_for_a_file_seen_as_it_is() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn a() {}\nfn b() {}\n");
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+
+        tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "expected_sha256": "b4ca2f645931f9a2e94473e5e54a8f21a11b8f2a3c5d6e7f8a9b0c1d2e3f4a5b", "old_text": "a()", "new_text": "first()"}),
+            ))
+            .unwrap();
+        tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": "b()", "new_text": "second()"}),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "fn first() {}\nfn second() {}\n"
+        );
+    }
+
+    #[test]
+    fn a_file_never_read_needs_its_hash() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        let tools = workspace.tools();
+
+        let unread = tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": "a()", "new_text": "b()"}),
+            ))
             .unwrap_err();
-        assert!(stale.to_string().contains("stale file"));
+        assert!(unread.to_string().contains("read"), "{unread}");
+
+        let prefix = &fingerprint(b"fn a() {}\n")[..12];
+        tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "expected_sha256": prefix, "old_text": "a()", "new_text": "b()"}),
+            ))
+            .unwrap();
     }
 
     #[test]
@@ -1047,5 +1348,174 @@ mod tests {
             fs::read(workspace.path.join("src/lib.rs")).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn write_file_creates_a_file_and_the_directories_above_it() {
+        let workspace = TestWorkspace::new();
+        let tools = workspace.tools();
+
+        let output = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "tests/properties.rs", "content": "#[test]\nfn holds() {}\n"}),
+            ))
+            .unwrap();
+        let output = output_json(&output);
+
+        assert_eq!(output["created"], true);
+        assert_eq!(
+            output["sha256"],
+            fingerprint(b"#[test]\nfn holds() {}\n").as_str()
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("tests/properties.rs")).unwrap(),
+            "#[test]\nfn holds() {}\n"
+        );
+    }
+
+    #[test]
+    fn write_file_overwrites_only_with_the_current_fingerprint() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "old\n");
+        let tools = workspace.tools();
+
+        let unasked = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "new\n"}),
+            ))
+            .unwrap_err();
+        assert!(unasked.to_string().contains("already exists"), "{unasked}");
+
+        let stale = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "new\n", "expected_sha256": fingerprint(b"other")}),
+            ))
+            .unwrap_err();
+        assert!(stale.to_string().contains("stale file"), "{stale}");
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "old\n"
+        );
+
+        let output = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "new\n", "expected_sha256": fingerprint(b"old\n")}),
+            ))
+            .unwrap();
+        assert_eq!(output_json(&output)["created"], false);
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "new\n"
+        );
+    }
+
+    #[test]
+    fn write_file_cannot_leave_the_workspace() {
+        let workspace = TestWorkspace::new();
+        let outside = TestWorkspace::new();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside.path, workspace.path.join("escape")).unwrap();
+        let tools = workspace.tools();
+
+        for path in ["../sibling.rs", "/tmp/absolute.rs", "escape/planted.rs"] {
+            let error = tools
+                .classify_sync(&call("write_file", json!({"path": path, "content": "x"})))
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("workspace"),
+                "{path} said: {error}"
+            );
+        }
+        assert!(!outside.path.join("planted.rs").exists());
+    }
+
+    #[test]
+    fn write_file_is_classified_as_mutating_its_resolved_path() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "");
+        let tools = workspace.tools();
+
+        let action = tools
+            .classify_sync(&call(
+                "write_file",
+                json!({"path": "./src/new.rs", "content": ""}),
+            ))
+            .unwrap();
+
+        assert_eq!(action, ToolAction::mutating("src/new.rs"));
+    }
+
+    #[test]
+    fn a_protected_path_cannot_be_patched_or_written() {
+        let workspace = TestWorkspace::new();
+        workspace.write("tests/rounding.rs", "#[test]\nfn t() {}\n");
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        let tools = workspace.tools().protecting(vec!["tests".into()]);
+        let sha = fingerprint(b"#[test]\nfn t() {}\n");
+
+        for call_ in [
+            call(
+                "apply_patch",
+                json!({"path": "tests/rounding.rs", "expected_sha256": sha, "old_text": "t()", "new_text": "u()"}),
+            ),
+            call(
+                "write_file",
+                json!({"path": "tests/new.rs", "content": "", }),
+            ),
+            call(
+                "write_file",
+                json!({"path": "./tests/../tests/rounding.rs", "content": ""}),
+            ),
+        ] {
+            let error = tools.classify_sync(&call_).unwrap_err();
+            assert!(
+                error.to_string().contains("protected") || error.to_string().contains("workspace"),
+                "{error}"
+            );
+            assert!(tools.execute_sync(&call_).is_err());
+        }
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("tests/rounding.rs")).unwrap(),
+            "#[test]\nfn t() {}\n"
+        );
+        assert!(!workspace.path.join("tests/new.rs").exists());
+
+        // Everything else is as writable as before, including a name that only
+        // begins like a protected one.
+        tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "tests_scratch.rs", "content": ""}),
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn an_edit_that_returns_a_file_to_an_earlier_version_says_so() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+        let patch = |old: &str, new: &str| {
+            output_json(
+                &tools
+                    .execute_sync(&call(
+                        "apply_patch",
+                        json!({"path": "src/lib.rs", "old_text": old, "new_text": new}),
+                    ))
+                    .unwrap(),
+            )
+        };
+
+        let forward = patch("a()", "b()");
+        assert!(forward.get("note").is_none(), "{forward}");
+        let back = patch("b()", "a()");
+        assert!(back["note"].as_str().unwrap().contains("earlier"), "{back}");
     }
 }

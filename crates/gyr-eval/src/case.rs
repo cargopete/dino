@@ -18,6 +18,10 @@ pub struct Case {
     pub max_turns: u32,
     #[serde(default)]
     pub expect: Expectations,
+    /// Workspace-relative paths the model may not write, such as the tests the
+    /// case is judged by.
+    #[serde(default)]
+    pub protected: Vec<PathBuf>,
     /// Where the case was loaded from. Not part of the file.
     #[serde(skip)]
     pub directory: PathBuf,
@@ -53,6 +57,11 @@ pub struct Expectations {
     /// case can check behaviour rather than only that the code compiles.
     #[serde(default)]
     pub hidden_tests: bool,
+    /// The task is meant to be impossible as asked, and the model must say so
+    /// with `report_blocker` rather than finish. A run that reports a blocker
+    /// the case did not expect fails, so the exit cannot be used to dodge work.
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

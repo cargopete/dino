@@ -58,26 +58,48 @@ impl WorkspaceRoot {
     /// Returns [`ToolError`] when the path is not relative, does not exist, or
     /// resolves outside the root.
     pub fn resolve(&self, path: &str) -> Result<PathBuf, ToolError> {
-        let relative = Path::new(path);
-        if relative.as_os_str().is_empty()
-            || relative.is_absolute()
-            || relative.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(ToolError::new(format!(
-                "path must be relative and remain inside the workspace: {path}"
-            )));
-        }
+        let relative = checked_relative(path)?;
         let resolved = std::fs::canonicalize(self.root.join(relative))
             .map_err(|error| ToolError::new(format!("cannot resolve {path}: {error}")))?;
         if !resolved.starts_with(&self.root) {
             return Err(ToolError::new(format!(
                 "resolved path escapes the workspace: {path}"
             )));
+        }
+        Ok(resolved)
+    }
+
+    /// Resolves a file that may not exist yet, for writing.
+    ///
+    /// The deepest existing ancestor is canonicalised and must lie beneath the
+    /// root, so a symbolic link to a directory elsewhere cannot be written
+    /// through. The rest of the path does not exist, so it cannot be a link.
+    ///
+    /// # Errors
+    ///
+    /// As [`WorkspaceRoot::resolve`], and when the target exists but is not a
+    /// file.
+    pub fn resolve_writable(&self, path: &str) -> Result<PathBuf, ToolError> {
+        let relative = checked_relative(path)?;
+        let mut existing = self.root.join(relative);
+        let mut missing = Vec::new();
+        while std::fs::symlink_metadata(&existing).is_err() {
+            let Some(name) = existing.file_name() else {
+                break;
+            };
+            missing.push(name.to_owned());
+            existing.pop();
+        }
+        let mut resolved = std::fs::canonicalize(&existing)
+            .map_err(|error| ToolError::new(format!("cannot resolve {path}: {error}")))?;
+        if !resolved.starts_with(&self.root) {
+            return Err(ToolError::new(format!(
+                "resolved path escapes the workspace: {path}"
+            )));
+        }
+        resolved.extend(missing.iter().rev());
+        if resolved.is_dir() {
+            return Err(ToolError::new(format!("path is a directory: {path}")));
         }
         Ok(resolved)
     }
@@ -120,4 +142,24 @@ impl WorkspaceRoot {
             .map(|relative| relative.to_string_lossy().into_owned())
             .map_err(|_| ToolError::new(format!("path escaped the workspace: {}", path.display())))
     }
+}
+
+/// Checks a model-supplied path lexically: relative, non-empty, and with no
+/// component that could climb out.
+fn checked_relative(path: &str) -> Result<&Path, ToolError> {
+    let relative = Path::new(path);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ToolError::new(format!(
+            "path must be relative and remain inside the workspace: {path}"
+        )));
+    }
+    Ok(relative)
 }

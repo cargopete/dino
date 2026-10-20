@@ -41,6 +41,8 @@ pub struct ScriptedSession {
     /// What `elide_tool_results` will claim to have done, and what it was asked.
     pub elision: Option<gyr_model::Elision>,
     pub elide_requests: Vec<usize>,
+    /// The window a server would report, applied by `discover_limits`.
+    pub served_window: Option<u32>,
 }
 
 impl ScriptedSession {
@@ -51,6 +53,7 @@ impl ScriptedSession {
             inputs: Vec::new(),
             elision: None,
             elide_requests: Vec::new(),
+            served_window: None,
         }
     }
 
@@ -72,6 +75,13 @@ impl ScriptedSession {
 impl ModelSession for ScriptedSession {
     fn profile(&self) -> &ModelProfile {
         &self.profile
+    }
+
+    fn discover_limits(&mut self) -> ModelFuture<'_, ()> {
+        if let Some(served) = self.served_window {
+            self.profile.context_window_tokens = Some(served);
+        }
+        Box::pin(async { Ok(()) })
     }
 
     fn elide_tool_results(&mut self, keep_recent: usize) -> Result<gyr_model::Elision, ModelError> {

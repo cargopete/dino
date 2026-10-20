@@ -40,6 +40,12 @@ pub struct Metrics {
     pub bytes_reclaimed: usize,
     /// Whether the run was told it was filling the window.
     pub context_warned: bool,
+    /// Turns sent again after their stream broke partway.
+    #[serde(default)]
+    pub turns_retried: usize,
+    /// Whether the run was told it was running out of turns.
+    #[serde(default)]
+    pub told_turns_left: bool,
     pub tokens: TokenUsage,
     pub stop_reason: Option<StopReason>,
 }
@@ -133,6 +139,8 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &Ag
             metrics.bytes_reclaimed += bytes_reclaimed;
         }
         AgentEvent::ContextWarning { .. } => metrics.context_warned = true,
+        AgentEvent::TurnRetried { .. } => metrics.turns_retried += 1,
+        AgentEvent::TurnsRunningOut { .. } => metrics.told_turns_left = true,
         // Counted by nothing: a submission is the unit a metric is per, not a
         // metric itself.
         AgentEvent::Submitted { .. }

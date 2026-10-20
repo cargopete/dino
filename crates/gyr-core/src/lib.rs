@@ -6,6 +6,7 @@
 //! proposed action, the decision, the execution and the result.
 
 pub mod approval;
+pub mod blocker;
 pub mod prompt;
 pub mod resume;
 pub mod session;
@@ -153,6 +154,10 @@ pub struct AgentConfig {
     pub elide_at_percent: u8,
     /// Tool results kept intact when reducing.
     pub keep_recent_results: usize,
+    /// Times a turn whose stream breaks partway is sent, the first included.
+    pub turn_attempts: u32,
+    /// From how many turns left the model is told the count.
+    pub turn_notice_at: u32,
 }
 
 impl Default for AgentConfig {
@@ -164,6 +169,8 @@ impl Default for AgentConfig {
             warn_at_percent: 70,
             elide_at_percent: 85,
             keep_recent_results: 8,
+            turn_attempts: 3,
+            turn_notice_at: 3,
         }
     }
 }
@@ -176,12 +183,78 @@ pub struct RunResult {
     pub model_turns: u32,
 }
 
+fn blocked(events: Vec<AgentEvent>, mut text: String, reason: &str, turns: u32) -> RunResult {
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(reason);
+    RunResult {
+        events,
+        text,
+        stop_reason: StopReason::Blocked,
+        model_turns: turns,
+    }
+}
+
+/// Told to the model with its last tool result, because that is the one
+/// channel every provider carries into the next turn.
+fn turns_left_note(turns_left: u32) -> String {
+    let turns = if turns_left == 1 { "turn" } else { "turns" };
+    format!(
+        "\n\n[gyrfalcon: {turns_left} model {turns} left in this run, including your next \
+         response. Finish the change, check it once, and say what is done and what is not.]"
+    )
+}
+
+/// Which turn is being attempted, and how many times so far.
+struct Turn<'a> {
+    number: u32,
+    attempt: u32,
+    input: &'a TurnInput,
+}
+
+/// What settling a turn's tool calls came to.
+enum Settled {
+    Results(Vec<ToolResult>),
+    /// The model reported a blocker, and this is what it said.
+    Blocked(String),
+    Cancelled,
+}
+
+/// What a turn came to, once any broken streams have been sent again.
+enum Streamed {
+    Finished {
+        calls: Vec<ToolCall>,
+        stop_reason: Option<StopReason>,
+    },
+    Cancelled {
+        turns: u32,
+    },
+}
+
+/// What one attempt at a turn came to.
+enum Attempt {
+    Finished {
+        calls: Vec<ToolCall>,
+        stop_reason: Option<StopReason>,
+    },
+    Broken {
+        error: String,
+    },
+    Cancelled {
+        turns: u32,
+    },
+}
+
 pub struct Agent<S, T> {
     session: S,
     tools: T,
     policy: Box<dyn ApprovalPolicy>,
     sink: Box<dyn EventSink>,
     config: AgentConfig,
+    // Kept outside `drive` so a run that ends in an error still reports what it
+    // spent.
+    turns_started: u32,
 }
 
 impl<S, T> Agent<S, T>
@@ -200,6 +273,7 @@ where
             policy: Box::new(approval::ReadOnly),
             sink: Box::new(NullSink),
             config,
+            turns_started: 0,
         }
     }
 
@@ -246,6 +320,7 @@ where
         user_message: impl Into<String>,
         cancel: &CancellationToken,
     ) -> Result<RunResult, AgentError> {
+        self.turns_started = 0;
         let outcome = self.drive(user_message.into(), cancel).await;
         let record = match &outcome {
             Ok(result) => RunOutcome {
@@ -255,7 +330,7 @@ where
             },
             Err(error) => RunOutcome {
                 stop_reason: None,
-                model_turns: 0,
+                model_turns: self.turns_started,
                 error: Some(error.to_string()),
             },
         };
@@ -285,6 +360,9 @@ where
         };
         let mut text = String::new();
         let mut seen_call_ids = HashSet::new();
+        // Asked for before the window is read, because a self-hosted server
+        // often serves far less than the model's native window.
+        self.session.discover_limits().await?;
         // A window has one documented size or none. Without one, none of this
         // runs: guessing a window and cutting history against the guess would
         // be worse than an honest refusal later.
@@ -295,42 +373,22 @@ where
             if cancel.is_cancelled() {
                 return Ok(cancelled(events, text, model_turn.saturating_sub(1)));
             }
+            self.turns_started = model_turn;
 
-            let mut stream = match cancel.run_until_cancelled(self.session.next(input)).await {
-                Some(stream) => stream?,
-                None => return Ok(cancelled(events, text, model_turn.saturating_sub(1))),
+            let (calls, stop_reason) = match self
+                .stream_turn(
+                    model_turn,
+                    &input,
+                    &mut text,
+                    &mut seen_call_ids,
+                    &mut events,
+                    cancel,
+                )
+                .await?
+            {
+                Streamed::Finished { calls, stop_reason } => (calls, stop_reason),
+                Streamed::Cancelled { turns } => return Ok(cancelled(events, text, turns)),
             };
-            let mut calls = Vec::new();
-            let mut stop_reason = None;
-
-            loop {
-                let Some(next) = cancel.run_until_cancelled(stream.next()).await else {
-                    return Ok(cancelled(events, text, model_turn));
-                };
-                let Some(event) = next else { break };
-                let event = event?;
-                if stop_reason.is_some() {
-                    return Err(AgentError::EventAfterFinished);
-                }
-
-                match &event {
-                    ModelEvent::TextDelta { text: delta } => text.push_str(delta),
-                    ModelEvent::ToolCallCompleted { call } => {
-                        if !seen_call_ids.insert(call.id.clone()) {
-                            return Err(AgentError::DuplicateToolCallId(call.id.clone()));
-                        }
-                        calls.push(call.clone());
-                    }
-                    ModelEvent::Finished { reason } => stop_reason = Some(*reason),
-                    ModelEvent::Started { .. }
-                    | ModelEvent::ReasoningDelta { .. }
-                    | ModelEvent::ToolCallStarted { .. }
-                    | ModelEvent::ToolCallArgumentsDelta { .. }
-                    | ModelEvent::Usage { .. } => {}
-                }
-
-                self.emit(AgentEvent::Model { model_turn, event }, &mut events)?;
-            }
 
             if let Some(window) = window {
                 self.mind_the_budget(model_turn, window, &mut warned, &mut events)?;
@@ -343,15 +401,17 @@ where
                         return Err(AgentError::ToolStopWithoutCalls);
                     }
 
-                    let mut results = Vec::with_capacity(calls.len());
-                    for call in calls {
-                        let Some(result) =
-                            self.settle(model_turn, call, &mut events, cancel).await?
-                        else {
-                            return Ok(cancelled(events, text, model_turn));
-                        };
-                        results.push(result);
-                    }
+                    let mut results = match self
+                        .settle_all(model_turn, calls, &mut events, cancel)
+                        .await?
+                    {
+                        Settled::Results(results) => results,
+                        Settled::Blocked(reason) => {
+                            return Ok(blocked(events, text, &reason, model_turn));
+                        }
+                        Settled::Cancelled => return Ok(cancelled(events, text, model_turn)),
+                    };
+                    self.count_down(model_turn, &mut results, &mut events)?;
                     input = TurnInput::ToolResults { results };
                 }
                 StopReason::EndTurn => {
@@ -365,7 +425,10 @@ where
                         model_turns: model_turn,
                     });
                 }
-                StopReason::MaxTokens | StopReason::Refusal | StopReason::Cancelled => {
+                StopReason::MaxTokens
+                | StopReason::Refusal
+                | StopReason::Cancelled
+                | StopReason::Blocked => {
                     return Ok(RunResult {
                         events,
                         text,
@@ -379,6 +442,169 @@ where
         Err(AgentError::ModelTurnLimit(
             self.config.max_model_turns.get(),
         ))
+    }
+
+    /// Settles every call of a turn in order, noticing a reported blocker.
+    async fn settle_all(
+        &mut self,
+        model_turn: u32,
+        calls: Vec<ToolCall>,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Settled, AgentError> {
+        let mut results = Vec::with_capacity(calls.len());
+        let mut reported_blocker = None;
+        for call in calls {
+            let reported = (call.name == blocker::REPORT_BLOCKER)
+                .then(|| blocker::describe(&call).ok())
+                .flatten();
+            let Some(result) = self.settle(model_turn, call, events, cancel).await? else {
+                return Ok(Settled::Cancelled);
+            };
+            // Only a call that went through counts: a refused one is a refusal.
+            if !result.output.is_error {
+                reported_blocker = reported_blocker.or(reported);
+            }
+            results.push(result);
+        }
+        Ok(match reported_blocker {
+            Some(reason) => Settled::Blocked(reason),
+            None => Settled::Results(results),
+        })
+    }
+
+    /// Tells the model, with its tool results, how few turns remain.
+    fn count_down(
+        &mut self,
+        model_turn: u32,
+        results: &mut [ToolResult],
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<(), AgentError> {
+        let turns_left = self.config.max_model_turns.get() - model_turn;
+        if turns_left == 0 || turns_left > self.config.turn_notice_at {
+            return Ok(());
+        }
+        self.emit(
+            AgentEvent::TurnsRunningOut {
+                model_turn,
+                turns_left,
+            },
+            events,
+        )?;
+        if let Some(last) = results.last_mut() {
+            last.output.content.push_str(&turns_left_note(turns_left));
+        }
+        Ok(())
+    }
+
+    /// Streams a turn, sending it again while its stream breaks partway and
+    /// attempts remain.
+    async fn stream_turn(
+        &mut self,
+        model_turn: u32,
+        input: &TurnInput,
+        text: &mut String,
+        seen_call_ids: &mut HashSet<String>,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Streamed, AgentError> {
+        let mut attempt = 1;
+        loop {
+            let turn = Turn {
+                number: model_turn,
+                attempt,
+                input,
+            };
+            match self
+                .stream_attempt(turn, text, seen_call_ids, events, cancel)
+                .await?
+            {
+                Attempt::Broken { error } => {
+                    self.emit(
+                        AgentEvent::TurnRetried {
+                            model_turn,
+                            attempt,
+                            error,
+                        },
+                        events,
+                    )?;
+                    attempt += 1;
+                }
+                Attempt::Finished { calls, stop_reason } => {
+                    return Ok(Streamed::Finished { calls, stop_reason });
+                }
+                Attempt::Cancelled { turns } => return Ok(Streamed::Cancelled { turns }),
+            }
+        }
+    }
+
+    /// Streams one attempt at a turn, recording its events as they arrive.
+    ///
+    /// A stream that breaks in transit, with attempts to spare, comes back as
+    /// [`Attempt::Broken`] with its text and call ids withdrawn. Nothing from a
+    /// turn is acted on until it finishes, so sending it again repeats nothing
+    /// the model asked for.
+    async fn stream_attempt(
+        &mut self,
+        turn: Turn<'_>,
+        text: &mut String,
+        seen_call_ids: &mut HashSet<String>,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Attempt, AgentError> {
+        let model_turn = turn.number;
+        let Some(stream) = cancel
+            .run_until_cancelled(self.session.next(turn.input.clone()))
+            .await
+        else {
+            return Ok(Attempt::Cancelled {
+                turns: model_turn.saturating_sub(1),
+            });
+        };
+        let mut stream = stream?;
+        let text_before = text.len();
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut stop_reason = None;
+
+        loop {
+            let Some(next) = cancel.run_until_cancelled(stream.next()).await else {
+                return Ok(Attempt::Cancelled { turns: model_turn });
+            };
+            let Some(event) = next else { break };
+            let event = match event {
+                Ok(event) => event,
+                Err(ModelError::Transport(error)) if turn.attempt < self.config.turn_attempts => {
+                    text.truncate(text_before);
+                    for call in &calls {
+                        seen_call_ids.remove(&call.id);
+                    }
+                    return Ok(Attempt::Broken { error });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if stop_reason.is_some() {
+                return Err(AgentError::EventAfterFinished);
+            }
+
+            match &event {
+                ModelEvent::TextDelta { text: delta } => text.push_str(delta),
+                ModelEvent::ToolCallCompleted { call } => {
+                    if !seen_call_ids.insert(call.id.clone()) {
+                        return Err(AgentError::DuplicateToolCallId(call.id.clone()));
+                    }
+                    calls.push(call.clone());
+                }
+                ModelEvent::Finished { reason } => stop_reason = Some(*reason),
+                ModelEvent::Started { .. }
+                | ModelEvent::ReasoningDelta { .. }
+                | ModelEvent::ToolCallStarted { .. }
+                | ModelEvent::ToolCallArgumentsDelta { .. }
+                | ModelEvent::Usage { .. } => {}
+            }
+
+            self.emit(AgentEvent::Model { model_turn, event }, events)?;
+        }
+        Ok(Attempt::Finished { calls, stop_reason })
     }
 
     /// Warns once as the window fills, and reduces history past a higher mark.

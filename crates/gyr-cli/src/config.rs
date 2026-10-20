@@ -70,6 +70,12 @@ pub struct RunSettings {
     pub mode: ApprovalMode,
     pub show_reasoning: bool,
     pub sandbox: SandboxMode,
+    /// Workspace-relative paths no tool or process may write.
+    pub protected: Vec<PathBuf>,
+    /// Cargo diagnostics shown to the model per run, when not the default.
+    pub max_diagnostics: Option<usize>,
+    /// Most reasoning tokens per turn, for a server that honours a budget.
+    pub thinking_budget: Option<u32>,
     /// Overrides the endpoint for a self-served model.
     pub api_base: Option<String>,
     /// Asks a toggling model not to think. Absent leaves the server's default.
@@ -160,6 +166,7 @@ fn build_session_from(
                 config.enable_thinking = Some(false);
             }
             config.api_key = env("QWEN_API_KEY").filter(|key| !key.is_empty());
+            config.thinking_budget = settings.thinking_budget;
             config.system_prompt = system_prompt;
             config.tools = tools;
             config.max_output_tokens = profile.max_output_tokens;
@@ -191,10 +198,14 @@ fn require_env(
 /// A platform without an implementation does not quietly fall through to
 /// running unconfined. The person has to ask for that by name, and the log
 /// records that they did.
-pub fn build_sandbox(mode: SandboxMode, workspace: &Path) -> Result<Arc<dyn Sandbox>> {
+pub fn build_sandbox(
+    mode: SandboxMode,
+    workspace: &Path,
+    protected: &[PathBuf],
+) -> Result<Arc<dyn Sandbox>> {
     match mode {
         SandboxMode::None => Ok(Arc::new(Unconfined)),
-        SandboxMode::Workspace => match gyr_sandbox::detect(workspace) {
+        SandboxMode::Workspace => match gyr_sandbox::detect_protecting(workspace, protected) {
             Ok(sandbox) => Ok(Arc::from(sandbox)),
             Err(error) => bail!(
                 "{error}. Pass --sandbox none to run without containment, \
@@ -230,6 +241,9 @@ mod tests {
             max_turns: NonZeroU32::new(4).unwrap(),
             mode: ApprovalMode::ReadOnly,
             sandbox: SandboxMode::Workspace,
+            protected: Vec::new(),
+            max_diagnostics: None,
+            thinking_budget: None,
             show_reasoning: false,
             api_base: None,
             disable_thinking: false,

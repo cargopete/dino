@@ -205,6 +205,24 @@ impl EventSink for Renderer {
                     ),
                 ))
             }
+            AgentEvent::TurnsRunningOut { turns_left, .. } => {
+                self.break_stream()?;
+                write_out(&style::paint(
+                    FAINT,
+                    &format!("  told the model it has {turns_left} turn(s) left\n"),
+                ))
+            }
+            AgentEvent::TurnRetried { attempt, error, .. } => {
+                self.break_stream()?;
+                write_out(&style::paint(
+                    WARN,
+                    &format!(
+                        "  the stream broke ({}); sending the turn again, attempt {}\n",
+                        cap(first_line(error), MAX_SUMMARY_BYTES),
+                        attempt + 1
+                    ),
+                ))
+            }
             AgentEvent::ToolFinished { result, .. } => {
                 let (colour, summary) = if result.output.is_error {
                     (
@@ -310,7 +328,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             }
         }),
         "list" => Some(argument_string(&call.arguments, "path").unwrap_or_else(|| ".".to_owned())),
-        "apply_patch" => argument_string(&call.arguments, "path"),
+        "apply_patch" | "write_file" => argument_string(&call.arguments, "path"),
         "exec" => call
             .arguments
             .get("command")
@@ -348,6 +366,7 @@ fn stop_reason_label(reason: StopReason) -> &'static str {
         StopReason::ToolUse => "waiting on tools",
         StopReason::MaxTokens => "hit the output limit",
         StopReason::Refusal => "refused",
+        StopReason::Blocked => "blocked",
         StopReason::Cancelled => "cancelled",
     }
 }

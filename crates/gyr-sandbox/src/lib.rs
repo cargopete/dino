@@ -47,6 +47,12 @@ pub trait Sandbox: Send + Sync + Debug {
 
     fn denies_network(&self) -> bool;
 
+    /// Whether writes beneath the protected paths are refused to processes, and
+    /// not only to the file tools.
+    fn protects_paths(&self) -> bool {
+        false
+    }
+
     /// A temporary directory the child may write to, inside the confined set.
     ///
     /// Without one, anything that uses the system temporary directory fails
@@ -103,8 +109,25 @@ impl Sandbox for Unconfined {
 /// does not quietly fall back to [`Unconfined`]; a caller that wants no
 /// containment has to ask for it by name.
 pub fn detect(workspace: &Path) -> Result<Box<dyn Sandbox>, SandboxError> {
+    detect_protecting(workspace, &[])
+}
+
+/// As [`detect`], and also denies writes beneath these workspace-relative
+/// paths where the platform can.
+///
+/// Landlock cannot: it only grants, and a grant on the workspace covers
+/// everything beneath it. On Linux the paths are protected by the file tools
+/// alone, and a process can still write them.
+///
+/// # Errors
+///
+/// As [`detect`].
+pub fn detect_protecting(
+    workspace: &Path,
+    protected: &[std::path::PathBuf],
+) -> Result<Box<dyn Sandbox>, SandboxError> {
     if cfg!(target_os = "macos") {
-        return Ok(Box::new(Seatbelt::new(workspace)?));
+        return Ok(Box::new(Seatbelt::protecting(workspace, protected)?));
     }
     if cfg!(target_os = "linux") {
         return Ok(Box::new(Landlock::new(workspace)?));

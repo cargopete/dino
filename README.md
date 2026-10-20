@@ -46,14 +46,17 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Six tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Eight tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals. `list` shows what is
   in the workspace through the same ignore rules, with `all` to see what those
-  rules hide. `apply_patch` replaces one exact occurrence and refuses a stale or
-  ambiguous edit. `exec` runs one program with one argument vector, no shell.
-  `cargo` runs a closed set of subcommands and returns parsed diagnostics, so an
-  `E0308` arrives as a level, a code, a file, a line and a column rather than as
-  a page of compiler output.
+  rules hide. `apply_patch` replaces one exact occurrence and refuses an
+  ambiguous edit, or one to a file that changed since the model last saw it.
+  `write_file` creates a file, or replaces one the model has read. `exec` runs
+  one program with one argument vector, no shell. `cargo` runs a closed set of
+  subcommands and returns parsed diagnostics, so an `E0308` arrives as a level,
+  a code, a file, a line and a column rather than as a page of compiler output.
+  `report_blocker` lets the model stop and say a task contradicts itself,
+  rather than bend a test to fit.
 - **Approval enforced below the model.** Every call is classified read-only,
   mutating or process. Read-only calls proceed. Anything else asks, and a session
   rule is keyed on the tool and the resolved target, never on a description of
@@ -71,7 +74,8 @@ CI and evals.
   provider, model or payload version is refused rather than half-loaded.
 - **A context budget.** A session used to grow until the provider refused the
   request and then keep refusing, without saying why. It now watches reported
-  input tokens against the model's documented window, says so once at 70%, and
+  input tokens against the model's window, or the smaller one a self-hosted
+  server reports it was started with, says so once at 70%, and
   past 85% hollows out the oldest tool results, keeping the calls, the text and
   every call ID, with a marker naming what went. Elision rather than
   summarisation: no extra request, deterministic, and it does not quietly rewrite
@@ -112,6 +116,12 @@ deployments and purchases as non-goals. Under confinement `git push` fails with
 `connect to host github.com port 22: Operation not permitted`, because the
 sandbox refused the socket rather than because its name is on a list. There is no
 list.
+
+Paths can be **protected**: `protected = ["tests"]` in a config file or an eval
+case. The file tools refuse them everywhere. On macOS, Seatbelt also refuses
+them to every process. Landlock cannot carve a read-only hole out of a writable
+tree, so on Linux a process can still write them, and `gyr` says so when a
+session starts.
 
 On every other platform the sandbox is unimplemented and Gyrfalcon refuses to run
 any process rather than quietly running it unconfined. `--sandbox none` remains
@@ -233,8 +243,14 @@ unquantised, and nothing smaller has been tried.
 ```console
 vllm serve Qwen/Qwen3.8-27B --served-model-name qwen3.8-27b \
   --max-model-len 65536 --api-key "$VLLM_KEY" \
-  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
+  --enable-prompt-tokens-details
 ```
+
+The last flag makes vLLM report how much of each prompt it served from its
+prefix cache, which it does by default but does not otherwise say. Without it
+every session reports zero cached tokens. Measured 2026-10-20: a repeated
+3,056-token prefix came back with 2,352 tokens cached.
 
 ```console
 export QWEN_API_BASE=https://<pod>-8000.proxy.runpod.net/v1

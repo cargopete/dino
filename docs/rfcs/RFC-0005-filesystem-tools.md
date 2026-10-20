@@ -189,3 +189,25 @@ Approvals arrived with RFC-0006. This slice still does not include OS
 sandboxing, process execution, structured Cargo diagnostics, cancellation of a
 long search, binary-file reads, new-file creation or a rendered diff. Those are
 missing features rather than properties delegated to the system prompt.
+
+**Amendment, 2026-10-20.** New-file creation arrived as `write_file` (issue #4).
+The hard bench showed why: Qwen3.8-27B wrote about twenty files through `exec`
+with `python3 -c` and shell heredocs, and once gave up and put its tests in
+`src/lib.rs`. The tool creates missing directories, refuses to overwrite a file
+without its current SHA-256, and resolves the path through its deepest existing
+ancestor, so a symbolic link cannot carry a write outside the workspace.
+
+**Amendment, 2026-10-20: what "stale" means.** Section 5 required the exact
+SHA-256 on every patch. In the hard bench that check caused 49 of Qwen's 64 tool
+errors:
+- 39 named a hash the file really had earlier. These were mostly a second patch
+  in one turn, refused because of the first.
+- 10 were hashes copied wrongly or invented.
+
+The tools now remember the fingerprint each file had when the model last read
+or wrote it. A patch or replacement goes ahead when the file still has that
+fingerprint, or when the model names it (a prefix of eight or more characters
+will do). `expected_sha256` is therefore optional for a file the model has seen.
+What the check exists to catch is unchanged: a file altered by anything other
+than the model's own edits, such as a formatter, a build script or a person, is
+refused as stale until it is read again (issues #2 and #3).
