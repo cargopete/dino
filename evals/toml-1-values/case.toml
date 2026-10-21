@@ -1,0 +1,77 @@
+name = "toml-1-values"
+prompt = """
+Implement `parse` in `src/lib.rs`: the first part of a parser for a subset of \
+TOML 1.0. This part reads documents of key/value pairs with simple keys and \
+string, integer and boolean values. Table headers, dotted keys, arrays and \
+inline tables come later and are not part of this task. Keep the public types \
+and the signature exactly as they are:
+
+  pub fn parse(src: &str) -> Result<Table, ParseError>
+
+## Document
+
+The input is a sequence of lines. A newline is `\\n` or `\\r\\n`; a `\\r` not \
+followed by `\\n` is an error. Whitespace means space or tab only. Each line \
+is either blank or a key/value pair, `key = value`, optionally surrounded by \
+whitespace and optionally followed by a comment. Anything else left on a line \
+after its pair is a `Syntax` error. A comment starts with `#` and runs to the \
+end of the line. Control characters (U+0000 to U+001F, and U+007F) are not \
+allowed in comments or strings, except tab, and except the newlines a \
+multi-line string may contain.
+
+## Keys
+
+A key is a bare key (one or more of `A-Z a-z 0-9 _ -`), a basic string or a \
+literal string (as below, single-line only; `\"\"` is a valid empty key). \
+Setting a key that already exists is a `Redefinition` error, reported at the \
+start of the key, before its value is read.
+
+## Values
+
+- **Basic string** `\"...\"`: escapes `\\b \\t \\n \\f \\r \\\" \\\\`, `\\uXXXX` \
+and `\\UXXXXXXXX` (exactly 4 or 8 hex digits naming a Unicode scalar value). \
+Any other backslash sequence is an `Escape` error at the backslash. A raw \
+newline before the closing quote is a `Syntax` error.
+- **Literal string** `'...'`: no escapes, no newlines.
+- **Multi-line basic string** `\"\"\"...\"\"\"`: a newline straight after the \
+opening delimiter is dropped. Newlines are kept, with `\\r\\n` read as `\\n`. \
+Escapes as for basic strings, plus a backslash that is the last \
+non-whitespace character on a line, which removes itself and all whitespace \
+and newlines up to the next other character. Up to two `\"` may appear \
+together in the content, including straight before the closing delimiter: \
+`\"\"\"a\"\"\"\"` is `a\"`.
+- **Multi-line literal string** `'''...'''`: the same, with no escapes.
+- **Integer**: decimal with an optional `+` or `-`, or `0x`, `0o` or `0b` \
+followed by hexadecimal (either case), octal or binary digits, with no sign. \
+A decimal integer has no leading zero unless it is `0` itself (`+0` and \
+`-0` are 0). In any base, `_` may appear only between two digits. A literal \
+of the right form whose value does not fit in `i64` is an `Integer` error at \
+the literal. Anything else, including floats, is a `Syntax` error.
+- **Boolean**: `true` or `false`.
+
+## Errors
+
+Report the first error in the input. `line` is 1-based: one more than the \
+number of `\\n` before the position of the error. A `Syntax` error is at the \
+first character where the input stops being a prefix of any valid document, \
+or at the end of the input when it ends too soon. Where a position above \
+says where an error is, that position wins.
+
+The tests in `tests/basics.rs` are a start, not a specification; more will \
+be run against your implementation afterwards. Do not change \
+`tests/basics.rs` and do not add dependencies. `cargo check` must be clean.
+"""
+max_turns = 50
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "tests/basics.rs"]
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "todo!"
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "unimplemented!"

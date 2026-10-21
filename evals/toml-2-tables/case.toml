@@ -1,0 +1,81 @@
+name = "toml-2-tables"
+prompt = """
+`src/lib.rs` parses part of a subset of TOML 1.0: documents of `key = value` \
+lines with simple keys and string, integer and boolean values. Extend it with \
+dotted keys, table headers and arrays of tables, as specified below. Arrays \
+and inline tables come later and are not part of this task. Keep the public \
+types and the signature of `parse` exactly as they are. Everything the parser \
+does now still holds, and the tests in `tests/` must keep passing.
+
+## Lines
+
+Besides blank lines and key/value pairs, a line may now be a table header, \
+`[key]`, or an array-of-tables header, `[[key]]`, with the same optional \
+whitespace and comment around it. Anything else left on a line after its \
+header is a `Syntax` error.
+
+## Keys
+
+A key is now one or more simple keys joined by `.`, with optional whitespace \
+around each dot: `a . \"b.c\" . 'd'` is the three keys `a`, `b.c`, `d`. \
+Whitespace is allowed inside the brackets of headers, but the two brackets of \
+`[[` and `]]` must be adjacent.
+
+## Tables
+
+- A key/value pair goes into the table named by the most recent header, or \
+the root table before any header.
+- `[a.b.c]` defines the table `a.b.c`, creating `a` and `a.b` if they do not \
+exist. The tables it creates on the way are only implicitly defined: a later \
+`[a]` or `[a.b]` may define each of them, once.
+- `[[a.b]]` appends a new table to the array of tables `a.b`, creating the \
+array if it is missing. On a header's path, a step through an array of tables \
+goes into its last element.
+- A dotted key/value `a.b.c = 1` creates `a` and `a.b` as tables if they do \
+not exist. A dotted key may pass through a table only if that table was \
+created by dotted keys in the same section (the same header, or the root \
+before any header).
+
+Everything below is a `Redefinition` error:
+
+- setting a key that already exists;
+- a dotted key passing through any table it may not, as above, or through a \
+value that is not a table;
+- defining a table with `[...]` that is already defined, whether by an \
+earlier header or by dotted keys;
+- a header whose path passes through a value that is not a table;
+- `[[a]]` where `a` exists and is not an array of tables, and `[a]` where `a` \
+is an array of tables.
+
+A `Redefinition` is reported at the start of the offending key, before its \
+value is read, or at the `[` of the offending header.
+
+## Result
+
+Arrays of tables are `Value::Array` of `Value::Table`. Tables, implicit or \
+not, are `Value::Table`.
+
+## Errors
+
+As before: the first error in the input, `line` 1-based, and a `Syntax` error \
+at the first character where the input stops being a prefix of any valid \
+document, or at the end of the input when it ends too soon.
+
+The tests in `tests/` are a start, not a specification; more will be run \
+against your implementation afterwards. Do not change anything in `tests/` \
+and do not add dependencies. `cargo check` must be clean.
+"""
+max_turns = 50
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = [
+    "Cargo.toml",
+    "tests/basics.rs",
+    "tests/common/mod.rs",
+    "tests/lines.rs",
+    "tests/scalars.rs",
+    "tests/strings.rs",
+    "tests/table_basics.rs",
+]

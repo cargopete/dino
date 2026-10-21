@@ -1,0 +1,66 @@
+name = "toml-3-arrays"
+prompt = """
+`src/lib.rs` parses most of a subset of TOML 1.0: key/value pairs with dotted \
+keys, table headers and arrays of tables, and string, integer and boolean \
+values. Extend it with arrays and inline tables, as specified below. Keep the \
+public types and the signature of `parse` exactly as they are. Everything the \
+parser does now still holds, and the tests in `tests/` must keep passing.
+
+## Values
+
+- **Array** `[ ... ]`: values separated by commas, a trailing comma allowed, \
+and whitespace, newlines and comments allowed between elements. Elements may \
+be of mixed types, including arrays and inline tables.
+- **Inline table** `{ k = v, ... }`: on one line (a value inside may still \
+span lines), pairs separated by commas, no trailing comma. Keys may be dotted.
+
+## Tables
+
+- A dotted key inside an inline table may pass through a table only if that \
+table was created by dotted keys in the same inline table. Each inline table \
+is its own section, like a header.
+- An inline table, like an array or any other value, is complete as written: \
+nothing may be added to it afterwards by a header or by dotted keys.
+
+Everything below is a `Redefinition` error, in addition to what already is:
+
+- setting a key that already exists inside an inline table;
+- a dotted key passing through an inline table, or through an array;
+- defining a table with `[...]` that is already defined as an inline table;
+- a header whose path passes through an array that is not an array of tables;
+- `[[a]]` where `a` is an array written as a value.
+
+A `Redefinition` is reported at the start of the offending key, before its \
+value is read, or at the `[` of the offending header.
+
+## Result
+
+An array is `Value::Array`, an inline table `Value::Table`.
+
+## Errors
+
+As before: the first error in the input, `line` 1-based, and a `Syntax` error \
+at the first character where the input stops being a prefix of any valid \
+document, or at the end of the input when it ends too soon.
+
+The tests in `tests/` are a start, not a specification; more will be run \
+against your implementation afterwards. Do not change anything in `tests/` \
+and do not add dependencies. `cargo check` must be clean.
+"""
+max_turns = 50
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = [
+    "Cargo.toml",
+    "tests/array_basics.rs",
+    "tests/basics.rs",
+    "tests/common/mod.rs",
+    "tests/lines.rs",
+    "tests/scalars.rs",
+    "tests/sections.rs",
+    "tests/strings.rs",
+    "tests/table_basics.rs",
+    "tests/tables.rs",
+]

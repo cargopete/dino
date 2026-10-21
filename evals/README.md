@@ -15,6 +15,11 @@ tests, which is what lets a case check behaviour instead of only that the code
 compiles. A `reference/` tree beside them, never copied, holds a solution that
 proves the case can be passed.
 
+`toml-subset-parser` is too long for an open-weight model to finish in its turn
+limit, so it also comes as three stages, `toml-1-values`, `toml-2-tables` and
+`toml-3-arrays`. Each stage starts from the previous stage's reference and keeps
+its tests, so a stage passes or fails on its own work.
+
 Two rules the harness applies to every case, whether or not the case remembers:
 
 - A case where nothing in the workspace changed fails, even if the code already

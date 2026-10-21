@@ -3,9 +3,10 @@
 usage: python3.12 -I scripts/analyse-bench.py <out_dir> [--rescore] [--context N]
 
 Reads what scripts/bench.sh wrote under <out_dir> and writes report.md and
-runs.json beside it. --rescore copies the workspace each unfinished run left,
-overlays the case's hidden tests and runs them, because a run cut off while
-re-checking finished work is not the same as one that failed. --context is the
+runs.json beside it. --rescore copies the workspace each failed run left,
+overlays the case's hidden tests and counts how many pass, because a run cut off
+while re-checking finished work is not the same as one that failed, and a run
+that passes 40 of 44 is not the same as one that passes none. --context is the
 served context length the peak prompt is measured against (default 65536).
 """
 import collections
@@ -119,9 +120,31 @@ def rescore(case, ws):
     shutil.rmtree(dst, ignore_errors=True)
     shutil.copytree(ws, dst, ignore=shutil.ignore_patterns(".gyr"))
     shutil.copytree(os.path.join(CORPUS, case, "hidden"), dst, dirs_exist_ok=True)
-    r = subprocess.run(["cargo", "test", "--offline", "--workspace"], cwd=dst, capture_output=True, text=True, timeout=900)
-    res = [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("test result:")]
-    return {"passes_hidden": r.returncode == 0, "summary": res[-3:]}
+    r = subprocess.run(["cargo", "test", "--offline", "--workspace", "--no-fail-fast"], cwd=dst, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
+    # Only the case's own test files count, not tests the model wrote.
+    ours = {os.path.basename(f) for d in ("hidden", "workspace")
+            for f in glob.glob(os.path.join(CORPUS, case, d, "tests", "*.rs"))}
+    passed = total = 0
+    target = None
+    for line in r.stdout.splitlines():
+        if m := re.match(r"\s+Running (\S+)", line):
+            target = os.path.basename(m[1])
+        elif (m := re.match(r"test result: \w+\. (\d+) passed; (\d+) failed", line)) and target in ours:
+            passed += int(m[1])
+            total += int(m[1]) + int(m[2])
+    return {"passes_hidden": r.returncode == 0, "tests": f"{passed}/{total}"}
+
+
+def split_name(base):
+    """Splits <model>-<trial>-<case>.json, matching the case against the corpus,
+    since case names hold hyphens and digits too."""
+    stem = re.sub(r"\.json(\.tmp)?$", "", base)
+    for case in sorted(os.listdir(CORPUS), key=len, reverse=True):
+        if stem.endswith("-" + case):
+            m = re.match(r"(.+)-(\d+)$", stem[: -len(case) - 1])
+            if m:
+                return m[1], m[2], case
+    return None
 
 
 def main():
@@ -130,10 +153,10 @@ def main():
         base = os.path.basename(f)
         if base.endswith(".err"):
             continue
-        m = re.match(r"(.+)-(\d+)-(.+?)\.json(\.tmp)?$", base)
-        if not m:
+        parts = split_name(base)
+        if not parts:
             continue
-        model, trial, case, tmp = m.groups()
+        model, trial, case = parts
         text = open(f).read().strip()
         if not text:
             continue  # still running
@@ -150,8 +173,7 @@ def main():
         if os.path.exists(log):
             row["gyr"] = True
             row.update(mine(log))
-            unfinished = any("did not complete" in x for x in row["fails"] or [])
-            if "--rescore" in sys.argv and unfinished:
+            if "--rescore" in sys.argv and not row["pass"]:
                 row["rescore"] = rescore(case, os.path.join(B, "work", f"{model}-{trial}", case))
         else:
             row.update({"turns": d.get("turns"), "wall_s": d.get("wall_s"), "cost": d.get("cost_usd")})
@@ -162,7 +184,8 @@ def main():
     for r in runs:
         note = "; ".join(r["fails"] or [])[:90]
         if r.get("rescore"):
-            note = ("final code PASSES hidden tests; " if r["rescore"]["passes_hidden"] else "final code fails hidden; ") + note
+            rs = r["rescore"]
+            note = f"final code {'PASSES' if rs['passes_hidden'] else 'fails'} hidden, tests {rs['tests']}; " + note
         L.append(f"| {r['model']} | {r['trial']} | {r['case']} | {r['pass']} | {r.get('turns')} | {r.get('wall_s')} | {note} |")
     q = [r for r in runs if r.get("gyr") and "errors" in r]
     errs = collections.Counter((e["tool"], e["kind"]) for r in q for e in r["errors"])
