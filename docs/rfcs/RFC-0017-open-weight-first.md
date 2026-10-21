@@ -467,7 +467,7 @@ went:
 
 - 77-82% of turns made a single call, though parallel calls were enabled;
 - 37-52% of turns only looked: a read, a search or a list;
-- 154 of the 299 ranged reads covered fewer than 100 lines;
+- 152 of the 299 ranged reads covered fewer than 100 lines;
 - 20-22% of turns ended their reasoning at the 4,096-token budget, which
   the shorter cases of §8.7 never reached;
 - 3 runs copied the elision marker into new calls, 6 turns in all (#36);
