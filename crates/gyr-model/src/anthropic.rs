@@ -29,6 +29,7 @@ use crate::ModelEventStream;
 use crate::ModelFuture;
 use crate::ModelSession;
 use crate::SessionState;
+use crate::elide_arguments;
 use crate::elided_marker;
 use crate::sse::SseDecoder;
 
@@ -223,6 +224,18 @@ impl ModelSession for AnthropicSession {
         let mut elision = Elision::default();
         for message in history.iter_mut().rev() {
             for block in &mut message.content {
+                if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && seen > keep_recent
+                {
+                    if let Some(input) = block.get_mut("input") {
+                        let reclaimed = elide_arguments(input);
+                        if reclaimed > 0 {
+                            elision.bytes_reclaimed += reclaimed;
+                            elision.calls_elided += 1;
+                        }
+                    }
+                    continue;
+                }
                 if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                     continue;
                 }
@@ -1056,6 +1069,44 @@ mod tests {
                 format!("call-{index}")
             );
         }
+    }
+
+    #[test]
+    fn elision_hollows_long_inputs_of_old_tool_uses() {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let mut session = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
+        let patch =
+            json!({"path": "src/lib.rs", "old_text": "a".repeat(800), "new_text": "b".repeat(900)});
+        session.history.lock().unwrap().extend([
+            AnthropicMessage {
+                role: Role::Assistant,
+                content: vec![json!({"type": "tool_use", "id": "call-1", "name": "apply_patch", "input": patch})],
+            },
+            AnthropicMessage {
+                role: Role::User,
+                content: vec![json!({"type": "tool_result", "tool_use_id": "call-1", "content": "ok", "is_error": false})],
+            },
+        ]);
+
+        let elision = session.elide_tool_results(0).unwrap();
+
+        let history = session.history.lock().unwrap();
+        let input = &history[0].content[0]["input"];
+        assert_eq!(elision.calls_elided, 1);
+        assert_eq!(input["path"], "src/lib.rs");
+        assert!(
+            input["old_text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[gyrfalcon elided 800 bytes")
+        );
+        assert!(
+            input["new_text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[gyrfalcon elided 900 bytes")
+        );
+        assert_eq!(history[0].content[0]["id"], "call-1");
     }
 
     #[test]

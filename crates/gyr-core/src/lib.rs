@@ -727,11 +727,12 @@ where
             .session
             .elide_tool_results(self.config.keep_recent_results)
         {
-            Ok(elision) if elision.results_elided > 0 => {
+            Ok(elision) if elision.results_elided + elision.calls_elided > 0 => {
                 self.emit(
                     AgentEvent::Elided {
                         model_turn,
                         results_elided: elision.results_elided,
+                        calls_elided: elision.calls_elided,
                         bytes_reclaimed: elision.bytes_reclaimed,
                     },
                     events,

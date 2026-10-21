@@ -56,6 +56,24 @@ The marker names what was removed and how much, so the model can ask again
 rather than assume the file was empty. Absent data must not render as healthy
 state, and a tool result silently becoming `""` is exactly that.
 
+### 3.1 Amendment, 2026-10-21: long arguments of old calls
+
+A long task disproved "tool results are usually the largest thing". On
+`toml-subset-parser` (bench v5, #30), Qwen's history at the end held 156 to
+188 KB of its own `write_file` and `apply_patch` arguments against 16 to 19 KB
+of elided results. Elision ran nearly every turn, often reclaiming 82 bytes,
+and one run ended with nothing left to reclaim.
+
+So elision now also hollows the long strings in the arguments of calls whose
+results are being elided: a written file, both sides of a patch. Each string
+over the same floor becomes a marker giving its size. The call, its id and
+short fields such as the path stay, so the history still says what was done.
+The call has run and its effect is on disk, so a `read` recovers anything the
+marker removed. `Elided` reports these as `calls_elided`.
+
+The assistant's text is still left alone. One v5 run wrote 140 KB of it, but
+text is what the model said, not a copy of something on disk.
+
 ## 4. The interface
 
 `ModelSession` gains one method:
