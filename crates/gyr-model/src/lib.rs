@@ -108,9 +108,31 @@ pub(crate) const ELIDED_MARKER_FLOOR: usize = 160;
 /// than conclude the file was empty.
 pub(crate) fn elided_marker(bytes: usize) -> String {
     format!(
-        "[gyrfalcon elided {bytes} bytes of this earlier tool result to stay within the context \
-         window. Run the tool again if you need it.]"
+        "{ELIDED_PREFIX}{bytes}{ELIDED_INFIX} tool result to stay within the context window. \
+         Run the tool again if you need it.]"
     )
+}
+
+const ELIDED_PREFIX: &str = "[gyrfalcon elided ";
+const ELIDED_INFIX: &str = " bytes of this earlier";
+
+/// Whether a call's arguments carry one of the markers elision leaves behind.
+///
+/// A model that sees its old calls hollowed out may copy the marker into a new
+/// call, as an `old_text` that can match nothing. Qwen did, in three of fifteen
+/// long runs.
+#[must_use]
+pub fn holds_elided_marker(arguments: &serde_json::Value) -> bool {
+    match arguments {
+        serde_json::Value::String(text) => text.match_indices(ELIDED_PREFIX).any(|(at, _)| {
+            let rest = &text[at + ELIDED_PREFIX.len()..];
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            digits > 0 && rest[digits..].starts_with(ELIDED_INFIX)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(holds_elided_marker),
+        serde_json::Value::Object(fields) => fields.values().any(holds_elided_marker),
+        _ => false,
+    }
 }
 
 /// Replaces every long string in an earlier call's arguments, and returns the
@@ -125,8 +147,8 @@ pub(crate) fn elide_arguments(arguments: &mut serde_json::Value) -> usize {
         serde_json::Value::String(text) if text.len() > ELIDED_MARKER_FLOOR => {
             let bytes = text.len();
             let marker = format!(
-                "[gyrfalcon elided {bytes} bytes of this earlier argument. The call ran as sent; \
-                 read the file if you need what it wrote.]"
+                "{ELIDED_PREFIX}{bytes}{ELIDED_INFIX} argument. The call ran as sent; read the \
+                 file if you need what it wrote.]"
             );
             let reclaimed = bytes.saturating_sub(marker.len());
             *text = marker;
@@ -516,6 +538,26 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn a_copied_elision_marker_is_recognised_and_ordinary_text_is_not() {
+        let mut arguments = serde_json::json!({"path": "src/lib.rs", "old_text": "x".repeat(400)});
+        elide_arguments(&mut arguments);
+        assert!(holds_elided_marker(&arguments));
+        assert!(holds_elided_marker(&serde_json::json!([elided_marker(9)])));
+
+        // Gyrfalcon's own source, which a model working on it may quote.
+        for text in [
+            "plain text",
+            "[gyrfalcon elided {bytes} bytes of this earlier argument",
+            "assert!(content.starts_with(\"[gyrfalcon elided 5000 bytes\"))",
+        ] {
+            assert!(
+                !holds_elided_marker(&serde_json::json!({"t": text})),
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn only_profiles_measured_live_are_supported() {

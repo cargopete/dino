@@ -250,6 +250,24 @@ async fn an_unclassifiable_call_is_never_decided_and_never_executed() {
 }
 
 #[tokio::test]
+async fn a_call_carrying_an_elision_marker_is_refused_unrun() {
+    let mut call = tool_call("call-1", "read", "src/lib.rs");
+    call.arguments["old_text"] = json!(
+        "[gyrfalcon elided 352 bytes of this earlier argument. The call ran as sent; read the \
+         file if you need what it wrote.]"
+    );
+    let mut agent = agent(vec![tool_turn(call), text_turn("I will read it")]).with_policy(AllowAll);
+
+    let result = agent.run("patch it").await.unwrap();
+
+    let results = tool_results(&result);
+    assert!(results[0].output.is_error);
+    assert!(results[0].output.content.contains("placeholder"));
+    assert!(decisions(&result).is_empty());
+    assert!(agent.tools().executed_names().is_empty());
+}
+
+#[tokio::test]
 async fn cancellation_stops_the_run_mid_stream() {
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
