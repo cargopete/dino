@@ -298,3 +298,22 @@ fn an_unknown_command_is_refused_rather_than_ignored() {
         "said: {error}"
     );
 }
+
+#[tokio::test]
+async fn a_broken_build_is_unfinished_work_and_a_clean_one_is_not() {
+    use gyr_core::FinishCheck;
+
+    let fixture =
+        Fixture::new("pub fn one() -> u32 { \"one\" }\npub fn two() -> u32 { \"two\" }\n");
+    let cargo =
+        gyr_rust::CargoTool::new(&fixture.path, CargoLimits::default(), Arc::new(Unconfined))
+            .unwrap();
+    let check = gyr_rust::BuildCheck::new(cargo);
+
+    let note = check.unfinished().await.expect("two type errors");
+    assert!(note.contains("reports 2 error(s)"), "{note}");
+    assert!(note.contains("src/lib.rs:1: mismatched types"), "{note}");
+
+    fixture.edit("pub fn one() -> u32 { 1 }\npub fn two() -> u32 { 2 }\n");
+    assert_eq!(check.unfinished().await, None);
+}

@@ -20,6 +20,7 @@ pub use crate::metrics::Metrics;
 pub use crate::runner::Outcome;
 pub use crate::runner::ToolOptions;
 pub use crate::runner::Variant;
+pub use crate::runner::build_check;
 pub use crate::runner::run_case;
 pub use crate::runner::session_tools;
 

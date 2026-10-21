@@ -43,6 +43,17 @@ use crate::session::SinkError;
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolOutput, ToolError>> + Send + 'a>>;
 
+pub type CheckFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
+
+/// Looks at the workspace when a model ends its turn, for runs nobody is
+/// watching. A model that stops with the build broken has not finished, and
+/// with no person to hand back to, ending there wastes the turns it had left.
+pub trait FinishCheck: Send + Sync {
+    /// What is still wrong, as told to the model, or `None` when nothing is.
+    /// A check that cannot run says `None`: it may not end a run on its own.
+    fn unfinished(&self) -> CheckFuture<'_>;
+}
+
 /// A set of tools, which both classifies and executes calls against itself.
 ///
 /// Classification lives here rather than in the core because the runtime owns
@@ -257,9 +268,11 @@ pub struct Agent<S, T> {
     policy: Box<dyn ApprovalPolicy>,
     sink: Box<dyn EventSink>,
     config: AgentConfig,
+    finish_check: Option<Box<dyn FinishCheck>>,
     // Kept outside `drive` so a run that ends in an error still reports what it
     // spent.
     turns_started: u32,
+    sent_back: bool,
 }
 
 impl<S, T> Agent<S, T>
@@ -278,8 +291,18 @@ where
             policy: Box::new(approval::ReadOnly),
             sink: Box::new(NullSink),
             config,
+            finish_check: None,
             turns_started: 0,
+            sent_back: false,
         }
+    }
+
+    /// Sends a model that ends its turn with work unfinished back to it, once
+    /// per run.
+    #[must_use]
+    pub fn with_finish_check(mut self, check: impl FinishCheck + 'static) -> Self {
+        self.finish_check = Some(Box::new(check));
+        self
     }
 
     #[must_use]
@@ -373,6 +396,7 @@ where
         // be worse than an honest refusal later.
         let window = self.session.profile().context_window_tokens;
         let mut warned = false;
+        self.sent_back = false;
 
         for model_turn in 1..=self.config.max_model_turns.get() {
             if cancel.is_cancelled() {
@@ -418,6 +442,10 @@ where
                 StopReason::EndTurn => {
                     if !calls.is_empty() {
                         return Err(AgentError::UnresolvedToolCalls(calls.len()));
+                    }
+                    if let Some(note) = self.send_back(model_turn, &mut events, cancel).await? {
+                        input = TurnInput::User { content: note };
+                        continue;
                     }
                     return Ok(RunResult {
                         events,
@@ -545,6 +573,34 @@ where
         }
         self.count_down(model_turn, &mut results, events)?;
         Ok(Ok(TurnInput::ToolResults { results }))
+    }
+
+    /// What to tell a model that ended its turn with work unfinished, if this
+    /// run checks and has not already sent it back.
+    async fn send_back(
+        &mut self,
+        model_turn: u32,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, AgentError> {
+        let Some(check) = self.finish_check.as_ref() else {
+            return Ok(None);
+        };
+        if self.sent_back || model_turn >= self.config.max_model_turns.get() {
+            return Ok(None);
+        }
+        let Some(Some(reason)) = cancel.run_until_cancelled(check.unfinished()).await else {
+            return Ok(None);
+        };
+        self.sent_back = true;
+        self.emit(
+            AgentEvent::SentBack {
+                model_turn,
+                reason: reason.clone(),
+            },
+            events,
+        )?;
+        Ok(Some(reason))
     }
 
     /// Tells the model, with its tool results, how few turns remain.

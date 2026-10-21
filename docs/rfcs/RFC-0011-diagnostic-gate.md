@@ -221,6 +221,27 @@ Building something, arguing for it, measuring it twice and then withdrawing it
 is the outcome this repository's method is supposed to produce. It is not a
 pleasant one.
 
+## 10.1 A broken build at the end of a turn, 2026-10-21
+
+The gate came back in one narrow form (#31). In bench v5, Qwen ended its turn
+after 9 of 80 turns with 19 compile errors and no message, and the run ended
+there.
+
+In `gyr run` and `gyr eval` only, when a model ends its turn in a Cargo
+workspace, the harness runs `cargo check`. If there are errors, the model is
+sent back with the count and the first three, and told to fix them or call
+`report_blocker`. This happens once per submission, never on the last turn,
+and never in an interactive session, where ending a turn hands control to a
+person. A check that cannot run lets the run end. It is recorded as
+`AgentEvent::SentBack`.
+
+This is the "definition of done" of §1 at its smallest: not a verdict on
+progress, only a refusal to call a broken build finished.
+
+The eval harness now ignores a root `Cargo.lock` when deciding whether the
+workspace changed. That check runs Cargo and may create the lockfile, and a
+run that did nothing must still fail.
+
 ## 11. Open questions
 
 - Whether `exhausted` should be two consecutive checks or a ratio over the
