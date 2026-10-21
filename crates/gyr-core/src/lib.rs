@@ -14,6 +14,7 @@ pub mod workspace;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
@@ -45,12 +46,14 @@ pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolOutput, ToolErr
 
 pub type CheckFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
 
-/// Looks at the workspace when a model ends its turn, for runs nobody is
-/// watching. A model that stops with the build broken has not finished, and
-/// with no person to hand back to, ending there wastes the turns it had left.
+/// Looks at the workspace when a model ends its turn, and as its turns run
+/// out, for runs nobody is watching. A model that stops with the build broken
+/// has not finished, and with no person to hand back to, ending there wastes
+/// the turns it had left.
 pub trait FinishCheck: Send + Sync {
-    /// What is still wrong, as told to the model, or `None` when nothing is.
-    /// A check that cannot run says `None`: it may not end a run on its own.
+    /// What is still wrong, in a sentence or two the core frames for the
+    /// model, or `None` when nothing is. A check that cannot run says `None`:
+    /// it may not end a run on its own.
     fn unfinished(&self) -> CheckFuture<'_>;
 }
 
@@ -210,11 +213,26 @@ fn blocked(events: Vec<AgentEvent>, mut text: String, reason: &str, turns: u32) 
 
 /// Told to the model with its last tool result, because that is the one
 /// channel every provider carries into the next turn.
-fn turns_left_note(turns_left: u32) -> String {
+fn turns_left_note(turns_left: u32, unfinished: Option<&str>) -> String {
     let turns = if turns_left == 1 { "turn" } else { "turns" };
-    format!(
+    let mut note = format!(
         "\n\n[gyrfalcon: {turns_left} model {turns} left in this run, including your next \
          response. Finish the change, check it once, and say what is done and what is not.]"
+    );
+    if let Some(unfinished) = unfinished {
+        let _ = write!(
+            note,
+            "\n[gyrfalcon: right now {unfinished}\nLeave the workspace building: complete or \
+             undo the change in progress before the turns run out.]"
+        );
+    }
+    note
+}
+
+fn sent_back_note(unfinished: &str) -> String {
+    format!(
+        "[gyrfalcon: you ended your turn, but the work is not finished: {unfinished}\nFix it \
+         and check again. If the task cannot be done, call report_blocker and say why.]"
     )
 }
 
@@ -571,7 +589,8 @@ where
             last.output.content.push_str("\n\n");
             last.output.content.push_str(note);
         }
-        self.count_down(model_turn, &mut results, events)?;
+        self.count_down(model_turn, &mut results, events, cancel)
+            .await?;
         Ok(Ok(TurnInput::ToolResults { results }))
     }
 
@@ -593,22 +612,26 @@ where
             return Ok(None);
         };
         self.sent_back = true;
+        let note = sent_back_note(&reason);
         self.emit(
             AgentEvent::SentBack {
                 model_turn,
-                reason: reason.clone(),
+                reason: note.clone(),
             },
             events,
         )?;
-        Ok(Some(reason))
+        Ok(Some(note))
     }
 
-    /// Tells the model, with its tool results, how few turns remain.
-    fn count_down(
+    /// Tells the model, with its tool results, how few turns remain, and what
+    /// the finish check finds unfinished, since a run cut off by the turn limit
+    /// is never sent back.
+    async fn count_down(
         &mut self,
         model_turn: u32,
         results: &mut [ToolResult],
         events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let turns_left = self.config.max_model_turns.get() - model_turn;
         if turns_left == 0 || turns_left > self.config.turn_notice_at {
@@ -621,8 +644,17 @@ where
             },
             events,
         )?;
+        let unfinished = match self.finish_check.as_ref() {
+            Some(check) => cancel
+                .run_until_cancelled(check.unfinished())
+                .await
+                .flatten(),
+            None => None,
+        };
         if let Some(last) = results.last_mut() {
-            last.output.content.push_str(&turns_left_note(turns_left));
+            last.output
+                .content
+                .push_str(&turns_left_note(turns_left, unfinished.as_deref()));
         }
         Ok(())
     }

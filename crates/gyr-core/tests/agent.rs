@@ -949,7 +949,7 @@ struct AlwaysBroken(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 impl gyr_core::FinishCheck for AlwaysBroken {
     fn unfinished(&self) -> gyr_core::CheckFuture<'_> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::pin(async { Some("[the build is broken]".to_owned()) })
+        Box::pin(async { Some("the build is broken.".to_owned()) })
     }
 }
 
@@ -984,12 +984,42 @@ async fn a_model_that_stops_with_work_unfinished_is_sent_back_once() {
     assert_eq!(result.model_turns, 2);
     assert_eq!(sent_back(&result), vec![1]);
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(
-        agent.session().inputs[1],
-        TurnInput::User {
-            content: "[the build is broken]".into()
-        }
+    let note = last_result(&agent.session().inputs[1]);
+    assert!(
+        note.contains("not finished: the build is broken."),
+        "{note}"
     );
+}
+
+#[tokio::test]
+async fn the_countdown_says_what_is_unfinished() {
+    let asked = std::sync::Arc::default();
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            tool_turn(tool_call("call-3", "read", "c.rs")),
+            text_turn("done"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(4).unwrap(),
+            turn_notice_at: 2,
+            ..AgentConfig::default()
+        },
+    )
+    .with_finish_check(AlwaysBroken(std::sync::Arc::clone(&asked)));
+
+    agent.run("read them").await.unwrap();
+
+    let inputs = &agent.session().inputs;
+    assert!(!last_result(&inputs[1]).contains("the build is broken"));
+    for input in &inputs[2..4] {
+        let note = last_result(input);
+        assert!(note.contains("right now the build is broken."), "{note}");
+    }
+    // Twice in the countdown; never on the last turn, which is not sent back.
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
