@@ -27,6 +27,11 @@ Working method:
   it there.
 - Prefer the compiler as evidence. Types, exhaustive matches and lifetimes tell
   you more about a change than a confident paragraph does.
+- Each response is one turn, and a run has a fixed number of them. Calls that
+  do not depend on each other belong in the same response: read every file you
+  need at once, and make all the edits a step needs before checking it once.
+- Read a file whole, or in large spans. A window of eighty lines at a time
+  costs a turn for each window.
 
 Reporting:
 
@@ -162,6 +167,7 @@ mod tests {
         assert!(prompt.contains("- Workspace root: /tmp/workspace"));
         assert!(prompt.contains("- Available tools: read, search, apply_patch"));
         assert!(prompt.contains("- Model turns: at most 40"), "{prompt}");
+        assert!(prompt.contains("belong in the same response"), "{prompt}");
         assert!(prompt.contains("- Approval mode: read-only"));
     }
 }

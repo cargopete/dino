@@ -440,6 +440,43 @@ The budget is now the default for Qwen profiles. The window-recovery path
 added after the third bench (a length stop with a full window elides and goes
 on) did not fire in the fourth: no prompt passed 80% of the window.
 
+### 8.8 A long case, and where the turns go, 2026-10-21
+
+Benches five to seven ran `toml-subset-parser`, a case written to be too
+long for one context window, three trials each, with one harness change
+between them. No run passed. These are the case's own 44 tests passing on
+the code each run left behind:
+
+| bench | change | tests passed | how the runs ended |
+|---|---|---|---|
+| v5 | none | 21, 0, 37 | window full twice, broken build, turn cap |
+| v6 | old call arguments elided (#30) | 29, 18, 6 | turn cap |
+| v7 | broken build sent back (#31) | 22, 5, 23 | turn cap |
+
+v5's two middle counts were taken by hand against a total of 48. They do not
+compare exactly with the rest.
+
+After #30 no run died of a full window; every run used all 80 turns instead.
+At that spread three trials cannot tell one change from another, so bench v8
+ran the same work as three staged cases (`toml-1-values`, `toml-2-tables`,
+`toml-3-arrays`) with 50 turns each. Stage 3 passed in both trials that
+reached it, while stages 1 and 2 failed every time, all at the turn cap.
+
+The session logs from v6 to v8 (15 runs, 917 turns) say where the turns
+went:
+
+- 77-82% of turns made a single call, though parallel calls were enabled;
+- 37-52% of turns only looked: a read, a search or a list;
+- 154 of the 299 ranged reads covered fewer than 100 lines;
+- 20-22% of turns ended their reasoning at the 4,096-token budget, which
+  the shorter cases of §8.7 never reached;
+- 3 runs copied the elision marker into new calls, 6 turns in all (#36);
+- `search` refused a file path in most long runs (#35).
+
+The system prompt said nothing about turns or batching, so it now says both:
+independent calls go in one response, and files are read whole or in large
+spans. Whether that moves the single-call share is for the next bench.
+
 ## 9. Amendments
 
 - **RFC-0001 §1.** The second paragraph's "three provider families" are kept.
