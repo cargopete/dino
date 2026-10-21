@@ -193,6 +193,7 @@ impl EventSink for Renderer {
             }
             AgentEvent::Elided {
                 results_elided,
+                calls_elided,
                 bytes_reclaimed,
                 ..
             } => {
@@ -200,7 +201,7 @@ impl EventSink for Renderer {
                 write_out(&style::paint(
                     FAINT,
                     &format!(
-                        "  elided {results_elided} earlier tool result(s), \
+                        "  elided {results_elided} earlier result(s) and {calls_elided} call(s), \
                          {bytes_reclaimed} bytes, to stay inside the window\n"
                     ),
                 ))

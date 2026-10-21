@@ -113,6 +113,31 @@ pub(crate) fn elided_marker(bytes: usize) -> String {
     )
 }
 
+/// Replaces every long string in an earlier call's arguments, and returns the
+/// bytes reclaimed.
+///
+/// A long task's history fills with the model's own writes: whole files in
+/// `write_file`, both sides of every `apply_patch`. The call has run and its
+/// effect is on disk, so a `read` gets back anything the marker removes. Short
+/// strings, such as a path, are kept so the call still says what it did.
+pub(crate) fn elide_arguments(arguments: &mut serde_json::Value) -> usize {
+    match arguments {
+        serde_json::Value::String(text) if text.len() > ELIDED_MARKER_FLOOR => {
+            let bytes = text.len();
+            let marker = format!(
+                "[gyrfalcon elided {bytes} bytes of this earlier argument. The call ran as sent; \
+                 read the file if you need what it wrote.]"
+            );
+            let reclaimed = bytes.saturating_sub(marker.len());
+            *text = marker;
+            reclaimed
+        }
+        serde_json::Value::Array(items) => items.iter_mut().map(elide_arguments).sum(),
+        serde_json::Value::Object(fields) => fields.values_mut().map(elide_arguments).sum(),
+        _ => 0,
+    }
+}
+
 /// One adapter's native history, as bytes the core stores and never reads.
 ///
 /// RFC-0003 puts native history inside the adapter so continuation does not
@@ -165,6 +190,8 @@ impl SessionState {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Elision {
     pub results_elided: usize,
+    /// Earlier tool calls whose long arguments were replaced.
+    pub calls_elided: usize,
     pub bytes_reclaimed: usize,
 }
 

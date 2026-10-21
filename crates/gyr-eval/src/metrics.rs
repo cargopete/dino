@@ -37,6 +37,8 @@ pub struct Metrics {
     /// How many earlier tool results were hollowed out to stay inside the
     /// window, and how much that reclaimed.
     pub results_elided: usize,
+    #[serde(default)]
+    pub calls_elided: usize,
     pub bytes_reclaimed: usize,
     /// Whether the run was told it was filling the window.
     pub context_warned: bool,
@@ -135,10 +137,12 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &Ag
         }
         AgentEvent::Elided {
             results_elided,
+            calls_elided,
             bytes_reclaimed,
             ..
         } => {
             metrics.results_elided += results_elided;
+            metrics.calls_elided += calls_elided;
             metrics.bytes_reclaimed += bytes_reclaimed;
         }
         AgentEvent::ContextWarning { .. } => metrics.context_warned = true,

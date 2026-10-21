@@ -31,6 +31,7 @@ use crate::ModelEventStream;
 use crate::ModelFuture;
 use crate::ModelSession;
 use crate::SessionState;
+use crate::elide_arguments;
 use crate::elided_marker;
 use crate::sse::SseDecoder;
 
@@ -354,6 +355,9 @@ impl ModelSession for QwenSession {
         let mut seen = 0_usize;
         let mut elision = Elision::default();
         for message in history.iter_mut().rev() {
+            if message.role == Role::Assistant && seen > keep_recent {
+                elide_calls(&mut message.tool_calls, &mut elision);
+            }
             if message.role != Role::Tool {
                 continue;
             }
@@ -534,6 +538,22 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id),
         }
+    }
+}
+
+/// Hollows the long arguments of calls whose results are being elided.
+fn elide_calls(calls: &mut [ChatToolCall], elision: &mut Elision) {
+    for call in calls {
+        let Ok(mut arguments) = serde_json::from_str::<Value>(&call.function.arguments) else {
+            continue;
+        };
+        if elide_arguments(&mut arguments) == 0 {
+            continue;
+        }
+        let shorter = arguments.to_string();
+        elision.bytes_reclaimed += call.function.arguments.len().saturating_sub(shorter.len());
+        elision.calls_elided += 1;
+        call.function.arguments = shorter;
     }
 }
 
@@ -905,6 +925,58 @@ mod tests {
             );
         }
         assert_eq!(history[4].content.as_deref(), Some("carrying on"));
+    }
+
+    #[test]
+    fn elision_hollows_long_arguments_of_old_calls_and_keeps_recent_ones() {
+        let profile = crate::builtin_profile("qwen3-coder-next").unwrap();
+        let mut session =
+            QwenSession::new(QwenConfig::new("http://127.0.0.1:8000/v1", profile)).unwrap();
+        let write = |id: &str| ChatMessage {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![ChatToolCall {
+                id: id.into(),
+                r#type: CallKind::Function,
+                function: ChatFunction {
+                    name: "write_file".into(),
+                    arguments: json!({"path": "src/lib.rs", "content": "z".repeat(5_000)})
+                        .to_string(),
+                },
+            }],
+            tool_call_id: None,
+        };
+        let result = |id: &str| ChatMessage::tool(id.into(), "wrote src/lib.rs".into());
+        session.history.lock().unwrap().extend([
+            write("old"),
+            result("old"),
+            write("new"),
+            result("new"),
+        ]);
+
+        let elision = session.elide_tool_results(1).unwrap();
+
+        let history = session.history.lock().unwrap();
+        assert_eq!(elision.calls_elided, 1);
+        assert!(elision.bytes_reclaimed > 4_500, "{elision:?}");
+        let old: Value =
+            serde_json::from_str(&history[0].tool_calls[0].function.arguments).unwrap();
+        assert_eq!(old["path"], "src/lib.rs");
+        assert!(
+            old["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("[gyrfalcon elided 5000 bytes")
+        );
+        assert_eq!(history[0].tool_calls[0].id, "old");
+        let new: Value =
+            serde_json::from_str(&history[2].tool_calls[0].function.arguments).unwrap();
+        assert_eq!(new["content"].as_str().unwrap().len(), 5_000);
+
+        drop(history);
+        let again = session.elide_tool_results(1).unwrap();
+        assert_eq!(again.calls_elided, 0, "a marker is not elided again");
     }
 
     #[test]

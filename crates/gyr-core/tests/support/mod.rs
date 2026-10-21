@@ -67,6 +67,7 @@ impl ScriptedSession {
         self.elision = Some(gyr_model::Elision {
             results_elided: results,
             bytes_reclaimed: bytes,
+            ..Default::default()
         });
         self
     }

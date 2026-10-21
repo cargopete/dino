@@ -307,6 +307,10 @@ pub enum AgentEvent {
     Elided {
         model_turn: u32,
         results_elided: usize,
+        /// Earlier calls whose long arguments, such as a written file, were
+        /// replaced.
+        #[serde(default)]
+        calls_elided: usize,
         bytes_reclaimed: usize,
     },
     /// The stream broke before the turn finished, and the turn is being sent
