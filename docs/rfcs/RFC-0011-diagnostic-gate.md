@@ -242,6 +242,12 @@ The eval harness now ignores a root `Cargo.lock` when deciding whether the
 workspace changed. That check runs Cargo and may create the lockfile, and a
 run that did nothing must still fail.
 
+A run that hits its turn limit is never sent back, and in bench v8 one ended
+that way with two borrow errors, scoring nothing on tests it had mostly
+passed. So the same check also runs with each turns-running-out notice, and
+its findings go into the notice: the model is told the build is broken while
+it still has turns to fix or undo the change in progress.
+
 ## 11. Open questions
 
 - Whether `exhausted` should be two consecutive checks or a ratio over the

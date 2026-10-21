@@ -39,9 +39,7 @@ impl FinishCheck for BuildCheck {
                 })
                 .collect();
             Some(format!(
-                "[gyrfalcon: you ended your turn, but `cargo check` reports {errors} error(s), so \
-                 the work is not finished. The first:\n{}\nFix them and check again. If the task \
-                 cannot be done, call report_blocker and say why.]",
+                "`cargo check` reports {errors} error(s). The first:\n{}",
                 named.join("\n")
             ))
         })
