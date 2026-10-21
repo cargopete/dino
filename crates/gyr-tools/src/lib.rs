@@ -137,7 +137,8 @@ impl WorkspaceTools {
             ToolDefinition {
                 name: "search".into(),
                 description:
-                    "Search UTF-8 workspace files for a literal string, respecting ignore files."
+                    "Search UTF-8 workspace files for a literal string, respecting ignore files. \
+                     path narrows it to a directory or a single file."
                         .into(),
                 input_schema: json!({
                     "type": "object",
@@ -314,7 +315,9 @@ impl WorkspaceTools {
             return Err(ToolError::new("search query must not be empty"));
         }
         let relative_root = arguments.path.as_deref().unwrap_or(".");
-        let search_root = self.root.resolve_directory(relative_root)?;
+        // A file is a fair thing to search; refusing one cost a turn in every
+        // long eval run.
+        let search_root = self.root.resolve(relative_root)?;
         let result_limit = arguments
             .max_results
             .unwrap_or(self.limits.max_search_matches)
@@ -1190,6 +1193,33 @@ mod tests {
         assert_eq!(output["matches"].as_array().unwrap().len(), 1);
         assert_eq!(output["matches"][0]["path"], "src/lib.rs");
         assert_eq!(output["truncated"], true);
+    }
+
+    #[test]
+    fn search_may_be_narrowed_to_one_file() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "needle here\n");
+        workspace.write("src/main.rs", "needle there\n");
+        let tools = workspace.tools();
+
+        let output = tools
+            .execute_sync(&call(
+                "search",
+                json!({"query": "needle", "path": "src/lib.rs"}),
+            ))
+            .unwrap();
+        let output = output_json(&output);
+
+        assert_eq!(output["total_matches"], 1);
+        assert_eq!(output["matches"][0]["path"], "src/lib.rs");
+        assert!(
+            tools
+                .execute_sync(&call(
+                    "search",
+                    json!({"query": "needle", "path": "src/gone.rs"})
+                ))
+                .is_err()
+        );
     }
 
     #[test]
