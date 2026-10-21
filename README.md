@@ -16,8 +16,16 @@ harness, not that it does it as well. The same day, Sonnet 5.5 and Opus 5.5 in
 Claude Code also passed nine of nine, in 136 and 183 seconds, so on this
 corpus the open model is as correct and three to four and a half times slower
 (RFC-0017 §8.5). RFC-0017 asks for ten trials per case
-and a corpus of twenty before any such claim. Everything else measured in this
-README is of Claude.
+and a corpus of twenty before any such claim.
+
+**On harder cases it is slower and less reliable.** Six cases with hidden tests
+the model never sees, three trials each: after a round of harness changes made
+for it, Qwen in `gyr` passed 15 of 18 (16 counting runs whose final code passes
+the hidden tests), where Opus 5.5 in Claude Code passed 18 of 18 in about a
+thirtieth of the time (RFC-0017 §8.6). On a case written to be longer than one
+context window, a TOML parser, no Qwen run has yet passed: every one runs out
+of turns first (RFC-0017 §8.8). Most of the findings further down were measured
+on Claude.
 
 It is also a serious educational implementation of the machinery behind tools
 such as Claude Code and Codex, published with its design record, its failures
@@ -47,9 +55,9 @@ CI and evals.
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
 - **Eight tools.** `read` returns bounded, numbered, fingerprinted ranges.
-  `search` is literal and ignore-aware with explicit totals. `list` shows what is
-  in the workspace through the same ignore rules, with `all` to see what those
-  rules hide. `apply_patch` replaces one exact occurrence and refuses an
+  `search` is literal and ignore-aware with explicit totals, over the workspace,
+  a directory or one file. `list` shows what is in the workspace through the
+  same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
   ambiguous edit, or one to a file that changed since the model last saw it.
   `write_file` creates a file, or replaces one the model has read. `exec` runs
   one program with one argument vector, no shell. `cargo` runs a closed set of
@@ -76,10 +84,25 @@ CI and evals.
   request and then keep refusing, without saying why. It now watches reported
   input tokens against the model's window, or the smaller one a self-hosted
   server reports it was started with, says so once at 70%, and
-  past 85% hollows out the oldest tool results, keeping the calls, the text and
-  every call ID, with a marker naming what went. Elision rather than
-  summarisation: no extra request, deterministic, and it does not quietly rewrite
-  what the model believes happened.
+  past 85%, or when the next turn might not fit, hollows out the oldest tool
+  results and the long arguments of the calls that made them, such as a whole
+  file sent to `write_file`. It keeps the calls, the text and every call ID,
+  with a marker naming what went, and refuses a later call that copies a
+  marker in place of real text. A turn cut off because the window filled is
+  elided and carried on rather than ending the run. Elision rather than
+  summarisation: no extra request, deterministic, and it does not quietly
+  rewrite what the model believes happened.
+- **A turn budget.** `--max-turns` bounds a submission. The model is told the
+  limit in its system prompt and counted down over its last three turns, so it
+  can finish and say what is done rather than be cut off.
+- **Unattended runs check their own build.** In `gyr run` and `gyr eval`, a
+  model that ends its turn while `cargo check` reports errors is sent back once
+  with the first of them, and the countdown names them too. An interactive
+  session hands the turn to you instead.
+- **A reasoning budget for Qwen.** Qwen profiles cap reasoning at 4,096 tokens
+  a turn, through vLLM's `thinking_token_budget`. Measured on the four slowest
+  hard cases, it gave the same pass rate in 15% less time (RFC-0017 §8.7).
+  `thinking_budget` in a config file changes it.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `gyr replay` renders a past session through the same renderer the live one
@@ -93,9 +116,13 @@ CI and evals.
 - **An eval harness.** `gyr eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also
-  how the log's sufficiency gets tested. `--without <tool>` hides a tool as
-  completely as if it had never been built, which is how several of the findings
-  below were obtained.
+  how the log's sufficiency gets tested. A case may carry hidden tests, laid
+  over the workspace only after the run, and protected paths the model may not
+  change. `--without <tool>` hides a tool as completely as if it had never been
+  built, which is how several of the findings below were obtained.
+  `scripts/bench.sh` runs cases through `gyr` on a self-hosted model and
+  through Claude Code as a baseline, and `scripts/analyse-bench.py` mines the
+  logs (see [evals/README.md](evals/README.md)).
 
 ### What is enforced, and what is not
 
@@ -120,8 +147,11 @@ list.
 Paths can be **protected**: `protected = ["tests"]` in a config file or an eval
 case. The file tools refuse them everywhere. On macOS, Seatbelt also refuses
 them to every process. Landlock cannot carve a read-only hole out of a writable
-tree, so on Linux a process can still write them, and `gyr` says so when a
-session starts.
+tree, so on Linux `gyr` copies them before each process and puts them back
+after it, removing anything added beneath them, and the tool result names what
+it restored. That undoes a write rather than preventing it: until the process
+exits, what it wrote is there. `gyr` says which kind of protection is in force
+when a session starts.
 
 On every other platform the sandbox is unimplemented and Gyrfalcon refuses to run
 any process rather than quietly running it unconfined. `--sandbox none` remains
@@ -138,16 +168,20 @@ worse version of git. Resuming *from* a log as opposed to replaying one, which
 RFC-0014 section 2 argues cannot be done honestly. A conformance run against a live
 endpoint: the suite exists and has only ever seen recorded traffic. `gyr probe`,
 which would let you run it against your own endpoint, is RFC-0017's next step.
+Handing a long task to a fresh session when one context window is not enough:
+RFC-0018 proposes it and nothing is built. Signing in with a Claude
+subscription: the Anthropic profiles take an API key and nothing else.
 
 These are missing features. None is delegated to the system prompt and none is
 claimed to be present.
 
 ## What the corpus has changed
 
-The eval corpus is nine cases, which is a start rather than a corpus. All nine
-pass against `claude-sonnet-5`. It exists to answer questions this repository
-would otherwise settle by argument, and it has now overruled the argument four
-times.
+The eval corpus began as nine cases, all of which pass against
+`claude-sonnet-5`, and is now twenty: the hard cases with hidden tests, a case
+whose tests contradict its prompt, and a long TOML parser in one piece and in
+three stages. It exists to answer questions this repository would otherwise
+settle by argument, and it has overruled the argument several times.
 
 **A missing capability, not a missing syntax.** The one `exec` call across six
 cases was `find . -name "*.rs"`. Not a pipeline: a directory listing, which
@@ -176,6 +210,18 @@ expensive, Opus read all thirty-one files and Sonnet read five, for the same
 correct result and 2.6 times the tokens; across the corpus Opus cost $2.04 to
 Sonnet's $0.58. Every assertion missed that difference and the metrics carried
 it, which is the clearest argument yet for keeping the two apart.
+
+**An open model needs a different harness, not a different prompt alone.** The
+hard bench against Qwen found faults Claude never showed. It went round in
+circles, undoing and redoing the same edit, so an edit that puts a file back to
+an earlier version now says so. It lost a run to a dropped connection, so a
+broken stream is retried. It filled the window with its own writes, not with tool results, so old call
+arguments are elided too. Given an unlimited reasoning budget it spent it, for
+no gain in correctness. And on the long case it ended every run at the turn
+limit: across 917 turns, four in five made a single call and up to half only
+looked at something. The system prompt now says that each response costs a
+turn and that independent calls belong together. Whether that helps is for the
+next bench (RFC-0017 §8.8).
 
 Two rules the corpus applies to itself. A case where nothing changed fails even
 if the code compiled, unless its deliverable is an answer rather than an edit.
@@ -207,8 +253,9 @@ conformance suite and no live run; RFC-0017 says what promotes them.
 `qwen3.8-27b` is the default because its weights are open: anyone can serve
 exactly the model the corpus measured. It has no endpoint of its own. Give it
 one with `--api-base`, `QWEN_API_BASE` or `api_base` in the user config file,
-and serve the weights under the name `qwen3.8-27b`. Its sampling and thinking
-control are left unset in the catalogue until something has measured them.
+and serve the weights under the name `qwen3.8-27b`. Its reasoning is budgeted
+at 4,096 tokens a turn, as measured; its sampling is left to the server until
+something has measured that too.
 
 Qwen's reference serving stacks are vLLM and SGLang. Ollama and other local
 runtimes may follow once they pass the same conformance suite. `qwen3-8b` is
@@ -271,7 +318,8 @@ gyr --model claude-sonnet
 ```
 
 Or put the model in `~/.config/gyr/config.toml` and run `gyr`. `gyr config`
-prints every setting and where its value came from.
+prints every setting and where its value came from. `gyr prompt` prints the
+system prompt a run would send, so its cost can be read rather than guessed.
 
 Inside a session: `/help`, `/status`, `/log`, `/exit`. Ctrl-C cancels the current
 turn and keeps the conversation; Ctrl-D leaves. Paste a stack trace and it
@@ -353,23 +401,27 @@ gyr eval --model claude-sonnet   # needs a credential; not part of cargo test
 
 CI runs the first three on macOS and Linux against a pinned toolchain, and
 separately installs the binaries and has the helper refuse a write outside a
-workspace. It has now caught two defects invisible to the ordinary test run: a
+workspace. That has caught two defects invisible to the ordinary test run: a
 macOS-only helper left undead on Linux, and a sandbox helper that `cargo install`
-did not deliver at all.
+did not deliver at all. A third job reports the Landlock ABI the hosted Linux
+runner offers.
 
 Nine crates:
 
-- `gyr-protocol` — values crossing crate and frontend boundaries.
-- `gyr-model` — provider session traits and the explicit model catalogue.
-- `gyr-core` — the act-observe loop, approval, the session log, the workspace
-  fence, the context budget and the system prompt.
-- `gyr-tools` — workspace filesystem tools and their hard output limits.
-- `gyr-sandbox` — operating-system containment. Rewrites a command; never spawns.
-- `gyr-exec` — the process runner and the `exec` tool.
-- `gyr-rust` — the `cargo` tool, diagnostic parsing, and the withdrawn gate.
-- `gyr-eval` — the case format, the runner, the metrics read from a log, and the
+- `gyr-protocol`: values crossing crate and frontend boundaries.
+- `gyr-model`: provider session traits and the explicit model catalogue.
+- `gyr-core`: the act-observe loop, approval, the session log, the workspace
+  fence, the context budget, the turn countdown, the finish check and the
+  system prompt.
+- `gyr-tools`: workspace filesystem tools and their hard output limits.
+- `gyr-sandbox`: operating-system containment, and the snapshot that restores
+  protected paths on Linux. Rewrites a command; never spawns.
+- `gyr-exec`: the process runner and the `exec` tool.
+- `gyr-rust`: the `cargo` tool, diagnostic parsing, the build check that sends
+  an unattended model back, and the withdrawn gate.
+- `gyr-eval`: the case format, the runner, the metrics read from a log, and the
   one definition of what tools a session gets.
-- `gyr-cli` — the `gyr` executable, its session loop, renderer, palette and
+- `gyr-cli`: the `gyr` executable, its session loop, renderer, palette and
   approval prompt, and the `gyr-confine` helper that restricts itself with
   Landlock and then `exec`s.
 
