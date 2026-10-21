@@ -822,6 +822,16 @@ where
             return Ok(None);
         }
 
+        if gyr_model::holds_elided_marker(&call.arguments) {
+            let refusal = ToolOutput::error(
+                "an argument holds the placeholder gyrfalcon leaves in place of an earlier call's \
+                 text, not the text itself. Read the file and send the text you mean.",
+            );
+            return self
+                .finish_call(model_turn, call.id, refusal, events)
+                .map(Some);
+        }
+
         let action = match self.tools.classify(&call) {
             Ok(action) => action,
             Err(error) => {
