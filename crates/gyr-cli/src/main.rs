@@ -278,7 +278,9 @@ struct Prepared {
     session_id: SessionId,
 }
 
-fn prepare(common: &CommonArgs) -> Result<Prepared> {
+/// `unattended` is for a one-shot run, which has no person to hand an unfinished
+/// build back to.
+fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
     let session_id = SessionId::generate();
     let settings = settings(common, &session_id)?;
     // After resolution rather than before, so a config file can ask for plain
@@ -356,6 +358,15 @@ fn prepare(common: &CommonArgs) -> Result<Prepared> {
     )
     .with_policy(policy(settings.mode, &sandbox_label))
     .with_sink((renderer, log));
+    let check = if unattended {
+        gyr_eval::build_check(&settings.workspace, Arc::clone(&sandbox))?
+    } else {
+        None
+    };
+    let agent = match check {
+        Some(check) => agent.with_finish_check(check),
+        None => agent,
+    };
 
     Ok(Prepared {
         agent,
@@ -368,7 +379,7 @@ fn prepare(common: &CommonArgs) -> Result<Prepared> {
 }
 
 async fn session(common: CommonArgs) -> Result<ExitCode> {
-    let prepared = prepare(&common)?;
+    let prepared = prepare(&common, false)?;
     let mut session = Session {
         agent: prepared.agent,
         usage: prepared.usage,
@@ -386,7 +397,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
 }
 
 async fn run(args: RunArgs) -> Result<ExitCode> {
-    let mut prepared = prepare(&args.common)?;
+    let mut prepared = prepare(&args.common, true)?;
     let request = request_text(args.prompt)?;
     eprintln!(
         "{}",

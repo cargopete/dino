@@ -329,6 +329,12 @@ pub enum AgentEvent {
         model_turn: u32,
         turns_left: u32,
     },
+    /// The model ended its turn, a check found the work unfinished, and the
+    /// model was told why and given another turn. Once per run.
+    SentBack {
+        model_turn: u32,
+        reason: String,
+    },
     /// The turn stopped for length because the prompt and its output filled
     /// the window, so history was reduced and the run went on.
     TurnCutOff {

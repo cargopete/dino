@@ -51,6 +51,9 @@ pub struct Metrics {
     /// Turns stopped for length by a full window, after which the run went on.
     #[serde(default)]
     pub turns_cut_off: usize,
+    /// Whether the model ended its turn with work unfinished and was sent back.
+    #[serde(default)]
+    pub sent_back: bool,
     pub tokens: TokenUsage,
     pub stop_reason: Option<StopReason>,
 }
@@ -149,6 +152,7 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &Ag
         AgentEvent::TurnRetried { .. } => metrics.turns_retried += 1,
         AgentEvent::TurnsRunningOut { .. } => metrics.told_turns_left = true,
         AgentEvent::TurnCutOff { .. } => metrics.turns_cut_off += 1,
+        AgentEvent::SentBack { .. } => metrics.sent_back = true,
         // Counted by nothing: a submission is the unit a metric is per, not a
         // metric itself.
         AgentEvent::Submitted { .. }

@@ -23,6 +23,7 @@ use gyr_model::ModelSession;
 use gyr_protocol::ToolAction;
 use gyr_protocol::ToolCall;
 use gyr_protocol::ToolDefinition;
+use gyr_rust::BuildCheck;
 use gyr_rust::CargoLimits;
 use gyr_rust::CargoTool;
 use gyr_sandbox::Sandbox;
@@ -181,18 +182,8 @@ pub async fn run_case(
     )
     .map_err(|error| EvalError::Setup(error.to_string()))?;
 
-    let turns = std::num::NonZeroU32::new(case.max_turns)
-        .ok_or_else(|| EvalError::Case(format!("case {} allows zero turns", case.name)))?;
-    let mut agent = Agent::new(
-        session,
-        tools,
-        AgentConfig {
-            max_model_turns: turns,
-            ..AgentConfig::default()
-        },
-    )
-    .with_policy(AllowAll)
-    .with_sink(log);
+    let finish = build_check(&workspace, Arc::clone(&sandbox))?;
+    let mut agent = eval_agent(case, session, tools, log, finish)?;
 
     let started = Instant::now();
     let run = agent.run(case.prompt.clone()).await;
@@ -293,6 +284,47 @@ pub fn session_tools(
         ));
     }
     ToolSet::new(runtimes).map_err(setup)
+}
+
+/// An agent for one unattended case: everything allowed, inside the sandbox.
+fn eval_agent<S: ModelSession, T: ToolRuntime>(
+    case: &Case,
+    session: S,
+    tools: T,
+    log: JsonlSessionLog,
+    check: Option<BuildCheck>,
+) -> Result<Agent<S, T>, EvalError> {
+    let turns = std::num::NonZeroU32::new(case.max_turns)
+        .ok_or_else(|| EvalError::Case(format!("case {} allows zero turns", case.name)))?;
+    let config = AgentConfig {
+        max_model_turns: turns,
+        ..AgentConfig::default()
+    };
+    let agent = Agent::new(session, tools, config)
+        .with_policy(AllowAll)
+        .with_sink(log);
+    Ok(match check {
+        Some(check) => agent.with_finish_check(check),
+        None => agent,
+    })
+}
+
+/// The check that sends a model back when it stops with the build broken, for a
+/// Cargo workspace run unattended.
+///
+/// # Errors
+///
+/// Returns [`EvalError::Setup`] when the Cargo tool cannot be built.
+pub fn build_check(
+    workspace: &Path,
+    sandbox: Arc<dyn Sandbox>,
+) -> Result<Option<BuildCheck>, EvalError> {
+    if !workspace.join("Cargo.toml").is_file() {
+        return Ok(None);
+    }
+    let cargo = CargoTool::new(workspace, CargoLimits::default(), sandbox)
+        .map_err(|error| EvalError::Setup(error.to_string()))?;
+    Ok(Some(BuildCheck::new(cargo)))
 }
 
 fn changed_files(

@@ -219,10 +219,12 @@ fn collect(
         })?;
         let path = entry.path();
         // Build output and the agent's own session directory are not the work.
-        if matches!(
-            entry.file_name().to_string_lossy().as_ref(),
-            "target" | ".gyr"
-        ) {
+        // Nor is a lockfile Cargo writes on its first run, including the
+        // harness's own check at the end of a turn.
+        let name = entry.file_name();
+        if matches!(name.to_string_lossy().as_ref(), "target" | ".gyr")
+            || (directory == root && name == "Cargo.lock")
+        {
             continue;
         }
         if path.is_dir() {

@@ -7,11 +7,13 @@
 
 mod cargo;
 mod diagnostics;
+mod finish;
 mod gate;
 
 pub use crate::cargo::CargoLimits;
 pub use crate::cargo::CargoTool;
 pub use crate::diagnostics::Diagnostic;
 pub use crate::diagnostics::DiagnosticCounts;
+pub use crate::finish::BuildCheck;
 pub use crate::gate::GateTool;
 pub use crate::gate::Verdict;

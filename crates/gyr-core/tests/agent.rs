@@ -924,3 +924,99 @@ async fn reporting_a_blocker_ends_the_run_with_the_reason() {
     );
     assert_eq!(agent.session().inputs.len(), 1, "no turn after the blocker");
 }
+
+/// Says the work is unfinished every time it is asked, and counts the asking.
+struct AlwaysBroken(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl gyr_core::FinishCheck for AlwaysBroken {
+    fn unfinished(&self) -> gyr_core::CheckFuture<'_> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Some("[the build is broken]".to_owned()) })
+    }
+}
+
+struct AllGood;
+
+impl gyr_core::FinishCheck for AllGood {
+    fn unfinished(&self) -> gyr_core::CheckFuture<'_> {
+        Box::pin(async { None })
+    }
+}
+
+fn sent_back(result: &gyr_core::RunResult) -> Vec<u32> {
+    result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::SentBack { model_turn, .. } => Some(*model_turn),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_model_that_stops_with_work_unfinished_is_sent_back_once() {
+    let asked = std::sync::Arc::default();
+    let mut agent = agent(vec![text_turn("done"), text_turn("still done")])
+        .with_finish_check(AlwaysBroken(std::sync::Arc::clone(&asked)));
+
+    let result = agent.run("fix it").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(result.model_turns, 2);
+    assert_eq!(sent_back(&result), vec![1]);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        agent.session().inputs[1],
+        TurnInput::User {
+            content: "[the build is broken]".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn finished_work_ends_the_run() {
+    let mut agent = agent(vec![text_turn("done")]).with_finish_check(AllGood);
+
+    let result = agent.run("fix it").await.unwrap();
+
+    assert_eq!(result.model_turns, 1);
+    assert!(sent_back(&result).is_empty());
+}
+
+#[tokio::test]
+async fn the_last_turn_is_not_sent_back() {
+    let asked = std::sync::Arc::default();
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![text_turn("done")]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(1).unwrap(),
+            ..AgentConfig::default()
+        },
+    )
+    .with_finish_check(AlwaysBroken(std::sync::Arc::clone(&asked)));
+
+    let result = agent.run("fix it").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert!(sent_back(&result).is_empty());
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn each_submission_may_be_sent_back_once() {
+    let mut agent = agent(vec![
+        text_turn("done"),
+        text_turn("done again"),
+        text_turn("second task done"),
+        text_turn("really"),
+    ])
+    .with_finish_check(AlwaysBroken(std::sync::Arc::default()));
+
+    let first = agent.run("one").await.unwrap();
+    let second = agent.run("two").await.unwrap();
+
+    assert_eq!(sent_back(&first), vec![1]);
+    assert_eq!(sent_back(&second), vec![1]);
+}

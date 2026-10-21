@@ -21,6 +21,7 @@ use gyr_protocol::ModelEvent;
 use gyr_protocol::StopReason;
 use gyr_protocol::TokenUsage;
 use gyr_protocol::ToolCall;
+use gyr_protocol::ToolResult;
 use serde_json::Value;
 
 use crate::style;
@@ -239,23 +240,17 @@ impl EventSink for Renderer {
                     ),
                 ))
             }
-            AgentEvent::ToolFinished { result, .. } => {
-                let (colour, summary) = if result.output.is_error {
-                    (
-                        WARN,
-                        format!(
-                            "    {}\n",
-                            cap(first_line(&result.output.content), MAX_SUMMARY_BYTES)
-                        ),
-                    )
-                } else {
-                    (
-                        FAINT,
-                        format!("    {} bytes\n", result.output.content.len()),
-                    )
-                };
-                write_out(&style::paint(colour, &summary))
+            AgentEvent::SentBack { reason, .. } => {
+                self.break_stream()?;
+                write_out(&style::paint(
+                    WARN,
+                    &format!(
+                        "  not finished, sent back: {}\n",
+                        cap(first_line(reason), MAX_SUMMARY_BYTES)
+                    ),
+                ))
             }
+            AgentEvent::ToolFinished { result, .. } => tool_finished(result),
         }
     }
 
@@ -396,6 +391,24 @@ fn argument_string(arguments: &Value, key: &str) -> Option<String> {
 
 fn argument_number(arguments: &Value, key: &str) -> Option<u64> {
     arguments.get(key).and_then(Value::as_u64)
+}
+
+fn tool_finished(result: &ToolResult) -> Result<(), SinkError> {
+    let (colour, summary) = if result.output.is_error {
+        (
+            WARN,
+            format!(
+                "    {}\n",
+                cap(first_line(&result.output.content), MAX_SUMMARY_BYTES)
+            ),
+        )
+    } else {
+        (
+            FAINT,
+            format!("    {} bytes\n", result.output.content.len()),
+        )
+    };
+    write_out(&style::paint(colour, &summary))
 }
 
 fn first_line(value: &str) -> &str {
