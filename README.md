@@ -218,10 +218,12 @@ coding target and never will be.
 
 `qwen3.7-plus` is Alibaba's hosted model, for anyone without a GPU. It speaks
 DashScope's dialect: thinking controls at the top level, no vLLM extensions,
-sampling left to Alibaba. The Coding Plan serves it at
-`https://coding-intl.dashscope.aliyuncs.com/v1`, with the key in
-`QWEN_API_KEY`. Its terms allow interactive sessions only, which rules out
-`gyr run` and `gyr eval`. Nothing has measured it yet.
+sampling left to Alibaba. A personal Token Plan serves it at
+`https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`, with
+the plan-specific key (`sk-sp-...`) in `QWEN_API_KEY`. The older Coding Plan
+uses `https://coding-intl.dashscope.aliyuncs.com/v1` and allows interactive
+sessions only, which rules out `gyr run` and `gyr eval`. Driven live on
+2026-10-23; not yet through the corpus.
 
 ## Using it
 
