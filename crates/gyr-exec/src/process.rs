@@ -100,8 +100,8 @@ pub async fn run(
         command.env(name, value);
     }
 
-    let mut child = command
-        .spawn()
+    let mut child = spawn(&mut command)
+        .await
         .map_err(|error| ToolError::new(format!("cannot run {}: {error}", wrapped.program)))?;
     let stdout = child
         .stdout
@@ -156,6 +156,26 @@ pub async fn run(
             restored,
         }),
     }
+}
+
+/// Spawns, retrying briefly on `ETXTBSY`.
+///
+/// On Linux a script that was just written can be refused as busy: a fork on
+/// another thread inherits the writer's descriptor for the instant before its
+/// own exec. The file is fine and a moment later it runs.
+async fn spawn(command: &mut Command) -> std::io::Result<tokio::process::Child> {
+    const TEXT_FILE_BUSY: i32 = 26;
+    let mut delay = Duration::from_millis(10);
+    for _ in 0..5 {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(TEXT_FILE_BUSY) => {
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            result => return result,
+        }
+    }
+    command.spawn()
 }
 
 /// Reads a pipe, keeping the first `limit` bytes and discarding the rest.
