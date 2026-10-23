@@ -27,6 +27,9 @@ use gyr_exec::process;
 /// The longest a package name or test filter may be.
 const MAX_ARGUMENT_BYTES: usize = 128;
 
+/// Appended to the approval subject of a command that reaches the network.
+const FETCH_NOTE: &str = " (network: HTTPS, Cargo cache)";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CargoLimits {
     pub max_diagnostics: usize,
@@ -138,6 +141,20 @@ impl CargoTool {
                 arguments.push("test".to_owned());
                 scope(&mut arguments);
             }
+            CargoCommand::Fetch => arguments.push("fetch".to_owned()),
+            CargoCommand::Add => {
+                arguments.push("add".to_owned());
+                arguments.extend(request.crates.iter().cloned());
+                if !request.features.is_empty() {
+                    arguments.extend(["--features".to_owned(), request.features.join(",")]);
+                }
+                if request.dev {
+                    arguments.push("--dev".to_owned());
+                }
+                if let Some(package) = &request.package {
+                    arguments.extend(["-p".to_owned(), package.clone()]);
+                }
+            }
             CargoCommand::Fmt => {
                 arguments.push("fmt".to_owned());
                 match &request.package {
@@ -151,7 +168,10 @@ impl CargoTool {
         // A confined child has no network, and without --offline Cargo fails on
         // DNS in a way that reads as a network fault rather than as policy.
         // `cargo fmt` does not accept the flag and does not need it.
-        if self.sandbox.denies_network() && request.command != CargoCommand::Fmt {
+        if self.sandbox.denies_network()
+            && request.command != CargoCommand::Fmt
+            && !request.command.fetches()
+        {
             arguments.push("--offline".to_owned());
         }
         if let Some(filter) = &request.filter
@@ -166,6 +186,33 @@ impl CargoTool {
     ///
     /// The manifest path is shown relative to the root because it is invariant
     /// for the session; every other argument appears exactly as it will be run.
+    fn subject_for(&self, request: &CargoRequest) -> String {
+        let subject = self.subject(&self.arguments(request));
+        if request.command.fetches() {
+            subject + FETCH_NOTE
+        } else {
+            subject
+        }
+    }
+
+    /// The sandbox a command runs in: the session's, or for a fetch the same
+    /// confinement with HTTPS and Cargo's cache opened.
+    fn sandbox_for(&self, command: CargoCommand) -> Result<Arc<dyn Sandbox>, ToolError> {
+        if !command.fetches() {
+            return Ok(Arc::clone(&self.sandbox));
+        }
+        let cache = cargo_cache()?;
+        self.sandbox
+            .for_fetching(&cache)
+            .map(Arc::from)
+            .ok_or_else(|| {
+                ToolError::new(format!(
+                    "this sandbox ({}) cannot allow fetching; run `cargo fetch` yourself",
+                    self.sandbox.label()
+                ))
+            })
+    }
+
     fn subject(&self, arguments: &[String]) -> String {
         let manifest = self.manifest.display().to_string();
         let shown: Vec<&str> = arguments
@@ -193,11 +240,7 @@ impl CargoTool {
     /// timeout as an error because a gate has no honest verdict without a
     /// complete diagnostic set.
     pub async fn parsed_check(&self) -> Result<ParsedDiagnostics, ToolError> {
-        let request = CargoRequest {
-            command: CargoCommand::Check,
-            package: None,
-            filter: None,
-        };
+        let request = CargoRequest::plain(CargoCommand::Check);
         let arguments = self.arguments(&request);
         let execution = process::run(
             &Self::program(),
@@ -236,11 +279,7 @@ impl CargoTool {
     ///
     /// Returns [`ToolError`] when the child cannot be run.
     pub async fn run_tests(&self) -> Result<TestRun, ToolError> {
-        let arguments = self.arguments(&CargoRequest {
-            command: CargoCommand::Test,
-            package: None,
-            filter: None,
-        });
+        let arguments = self.arguments(&CargoRequest::plain(CargoCommand::Test));
         let execution = process::run(
             &Self::program(),
             &arguments,
@@ -274,20 +313,17 @@ impl CargoTool {
     /// The Cargo invocation the gate will make, for the approval subject.
     #[must_use]
     pub fn check_subject(&self) -> String {
-        self.subject(&self.arguments(&CargoRequest {
-            command: CargoCommand::Check,
-            package: None,
-            filter: None,
-        }))
+        self.subject(&self.arguments(&CargoRequest::plain(CargoCommand::Check)))
     }
 
     async fn run(&self, request: CargoRequest) -> Result<ToolOutput, ToolError> {
         let arguments = self.arguments(&request);
+        let sandbox = self.sandbox_for(request.command)?;
         let execution = process::run(
             &Self::program(),
             &arguments,
             &self.root,
-            self.sandbox.as_ref(),
+            sandbox.as_ref(),
             self.limits.max_captured_bytes,
             self.limits.timeout,
         )
@@ -295,7 +331,7 @@ impl CargoTool {
 
         if execution.timed_out {
             return json_output(&CargoOutput {
-                command: self.subject(&arguments),
+                command: self.subject_for(&request),
                 exit_code: None,
                 timed_out: true,
                 counts: DiagnosticCounts::default(),
@@ -312,7 +348,7 @@ impl CargoTool {
         }
 
         let mut output = CargoOutput {
-            command: self.subject(&arguments),
+            command: self.subject_for(&request),
             exit_code: execution.exit_code,
             timed_out: false,
             counts: DiagnosticCounts::default(),
@@ -347,7 +383,7 @@ impl CargoTool {
                     output.output = capped(&execution.stderr, self.limits.max_output_bytes);
                 }
             }
-            CargoCommand::Test | CargoCommand::Fmt => {
+            CargoCommand::Test | CargoCommand::Fmt | CargoCommand::Fetch | CargoCommand::Add => {
                 // Neither has a machine-readable stream worth parsing yet, so
                 // the captured text is returned as text and labelled as such.
                 let combined = format!("{}{}", execution.stdout, execution.stderr);
@@ -366,7 +402,9 @@ impl ToolRuntime for CargoTool {
             description: format!(
                 "Run one of a fixed set of Cargo commands in the workspace and return parsed \
                  diagnostics. No subcommand is read-only: check and clippy run build scripts, \
-                 and test runs test code. Containment: {}.",
+                 and test runs test code. Everything runs offline except fetch, which \
+                 downloads the locked dependencies, and add, which adds crates to Cargo.toml; \
+                 use those when a build fails for a missing dependency. Containment: {}.",
                 self.sandbox.label()
             ),
             input_schema: json!({
@@ -374,7 +412,21 @@ impl ToolRuntime for CargoTool {
                 "properties": {
                     "command": {
                         "type": "string",
-                        "enum": ["metadata", "check", "clippy", "test", "fmt"]
+                        "enum": ["metadata", "check", "clippy", "test", "fmt", "fetch", "add"]
+                    },
+                    "crates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Only for add: crate names, each optionally name@version."
+                    },
+                    "features": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Only for add: features to enable."
+                    },
+                    "dev": {
+                        "type": "boolean",
+                        "description": "Only for add: add as a dev-dependency."
                     },
                     "package": {
                         "type": "string",
@@ -396,7 +448,7 @@ impl ToolRuntime for CargoTool {
             return Err(ToolError::new(format!("unknown tool {:?}", call.name)));
         }
         let request = CargoRequest::parse(&call.arguments)?;
-        Ok(ToolAction::process(self.subject(&self.arguments(&request))))
+        Ok(ToolAction::process(self.subject_for(&request)))
     }
 
     fn execute(&self, call: &ToolCall) -> ToolFuture<'_> {
@@ -417,9 +469,15 @@ enum CargoCommand {
     Clippy,
     Test,
     Fmt,
+    Fetch,
+    Add,
 }
 
 impl CargoCommand {
+    fn fetches(self) -> bool {
+        matches!(self, Self::Fetch | Self::Add)
+    }
+
     fn subcommand(self) -> &'static str {
         match self {
             Self::Metadata => "metadata",
@@ -427,6 +485,8 @@ impl CargoCommand {
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Fmt => "fmt",
+            Self::Fetch => "fetch",
+            Self::Add => "add",
         }
     }
 }
@@ -437,9 +497,27 @@ struct CargoRequest {
     command: CargoCommand,
     package: Option<String>,
     filter: Option<String>,
+    #[serde(default)]
+    crates: Vec<String>,
+    #[serde(default)]
+    features: Vec<String>,
+    #[serde(default)]
+    dev: bool,
 }
 
 impl CargoRequest {
+    /// A whole-workspace request with no options, for the harness's own calls.
+    fn plain(command: CargoCommand) -> Self {
+        Self {
+            command,
+            package: None,
+            filter: None,
+            crates: Vec::new(),
+            features: Vec::new(),
+            dev: false,
+        }
+    }
+
     fn parse(arguments: &Value) -> Result<Self, ToolError> {
         let request: Self = serde_json::from_value(arguments.clone())
             .map_err(|error| ToolError::new(format!("invalid cargo arguments: {error}")))?;
@@ -451,6 +529,19 @@ impl CargoRequest {
             if request.command != CargoCommand::Test {
                 return Err(ToolError::new("filter applies only to the test command"));
             }
+        }
+        if request.command == CargoCommand::Add {
+            if request.crates.is_empty() {
+                return Err(ToolError::new("add needs at least one crate"));
+            }
+            for name in &request.crates {
+                validate_spec("crate", name, "@^~=<>*.+")?;
+            }
+            for feature in &request.features {
+                validate_spec("feature", feature, "/+.")?;
+            }
+        } else if !request.crates.is_empty() || !request.features.is_empty() || request.dev {
+            return Err(ToolError::new("crates, features and dev apply only to add"));
         }
         Ok(request)
     }
@@ -481,6 +572,52 @@ fn validate(field: &str, value: &str) -> Result<(), ToolError> {
         )));
     }
     Ok(())
+}
+
+/// As [`validate`], allowing `extra` characters as well, for version
+/// requirements and feature paths.
+fn validate_spec(field: &str, value: &str, extra: &str) -> Result<(), ToolError> {
+    if value.is_empty() || value.len() > MAX_ARGUMENT_BYTES || value.starts_with('-') {
+        return Err(ToolError::new(format!(
+            "{field} must be 1 to {MAX_ARGUMENT_BYTES} bytes and not begin with a hyphen: \
+             {value:?}"
+        )));
+    }
+    if !value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || "_-".contains(character) || extra.contains(character)
+    }) {
+        return Err(ToolError::new(format!(
+            "{field} holds a character Cargo would not expect: {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Where Cargo keeps what it downloads, created if absent so it can be granted.
+fn cargo_cache() -> Result<Vec<PathBuf>, ToolError> {
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .ok_or_else(|| ToolError::new("neither CARGO_HOME nor HOME is set"))?;
+    let directories = [home.join("registry"), home.join("git")];
+    // Cargo's lock files, which it opens for writing before it fetches.
+    let locks = [
+        home.join(".package-cache"),
+        home.join(".package-cache-mutate"),
+    ];
+    for directory in &directories {
+        std::fs::create_dir_all(directory).map_err(|error| {
+            ToolError::new(format!("cannot create {}: {error}", directory.display()))
+        })?;
+    }
+    for lock in &locks {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(lock)
+            .map_err(|error| ToolError::new(format!("cannot open {}: {error}", lock.display())))?;
+    }
+    Ok(directories.into_iter().chain(locks).collect())
 }
 
 #[derive(Debug, Serialize)]

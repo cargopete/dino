@@ -20,7 +20,7 @@ const HELPER: &str = "gyr-confine";
 /// Overrides where the helper is found, for tests and for packaging.
 const HELPER_VARIABLE: &str = "GYR_CONFINE";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Landlock {
     helper: PathBuf,
     writable: PathBuf,
@@ -28,6 +28,9 @@ pub struct Landlock {
     protected: Vec<PathBuf>,
     /// How many of `protected` the user chose, ahead of the executable config.
     chosen: usize,
+    /// Extra writable paths and outbound HTTPS, for fetching dependencies.
+    fetch_writable: Vec<PathBuf>,
+    fetching: bool,
 }
 
 impl Landlock {
@@ -72,6 +75,8 @@ impl Landlock {
             temp_dir,
             protected,
             chosen,
+            fetch_writable: Vec::new(),
+            fetching: false,
         })
     }
 }
@@ -90,9 +95,14 @@ impl Sandbox for Landlock {
         };
         // Landlock grants by allow-list, so it cannot carve credentials out of a
         // readable home. Said here rather than implied by Seatbelt's label.
+        let network = if self.fetching {
+            "fetching: TCP 443 out and writes to Cargo's cache"
+        } else {
+            "TCP denied"
+        };
         format!(
             "workspace (landlock: writes confined, executable config{chosen} restored after \
-             each process, TCP denied, credential reads not denied)"
+             each process, {network}, credential reads not denied)"
         )
     }
 
@@ -100,10 +110,17 @@ impl Sandbox for Landlock {
         true
     }
 
+    fn for_fetching(&self, writable: &[PathBuf]) -> Option<Box<dyn Sandbox>> {
+        let mut fetching = self.clone();
+        fetching.fetch_writable = writable.to_vec();
+        fetching.fetching = true;
+        Some(Box::new(fetching))
+    }
+
     /// True for the purpose the caller uses it for: Cargo must run `--offline`,
     /// because it fetches over TCP and will fail without it.
     fn denies_network(&self) -> bool {
-        true
+        !self.fetching
     }
 
     fn protects_paths(&self) -> bool {
@@ -128,12 +145,17 @@ impl Sandbox for Landlock {
             .writable
             .to_str()
             .ok_or_else(|| SandboxError::Profile("workspace path is not valid UTF-8".to_owned()))?;
-        let mut wrapped = vec![
-            "--allow-write".to_owned(),
-            writable.to_owned(),
-            "--".to_owned(),
-            program.to_owned(),
-        ];
+        let mut wrapped = vec!["--allow-write".to_owned(), writable.to_owned()];
+        for path in &self.fetch_writable {
+            let path = path
+                .to_str()
+                .ok_or_else(|| SandboxError::Profile("fetch path is not valid UTF-8".to_owned()))?;
+            wrapped.extend(["--allow-write".to_owned(), path.to_owned()]);
+        }
+        if self.fetching {
+            wrapped.extend(["--allow-connect".to_owned(), "443".to_owned()]);
+        }
+        wrapped.extend(["--".to_owned(), program.to_owned()]);
         wrapped.extend_from_slice(arguments);
         Ok(WrappedCommand {
             program: self.helper.display().to_string(),

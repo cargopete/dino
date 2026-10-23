@@ -114,6 +114,12 @@ pub trait Sandbox: Send + Sync + Debug {
     /// every child a staging area outside the workspace.
     fn temp_dir(&self) -> Option<&Path>;
 
+    /// The same confinement plus outbound HTTPS and writes beneath `writable`,
+    /// for fetching dependencies. `None` where this sandbox cannot express it.
+    fn for_fetching(&self, _writable: &[std::path::PathBuf]) -> Option<Box<dyn Sandbox>> {
+        None
+    }
+
     /// Rewrites a command so the child runs contained.
     ///
     /// # Errors
@@ -145,6 +151,10 @@ impl Sandbox for Unconfined {
 
     fn temp_dir(&self) -> Option<&Path> {
         None
+    }
+
+    fn for_fetching(&self, _writable: &[std::path::PathBuf]) -> Option<Box<dyn Sandbox>> {
+        Some(Box::new(Self))
     }
 
     fn wrap(&self, program: &str, arguments: &[String]) -> Result<WrappedCommand, SandboxError> {

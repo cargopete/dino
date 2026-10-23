@@ -155,6 +155,12 @@ deployments and purchases as non-goals. Under confinement `git push` fails with
 sandbox refused the socket rather than because its name is on a list. There is no
 list.
 
+The one opening is for dependencies. The `cargo` tool's `fetch` and `add` run
+in the same confinement with outbound TCP to port 443 and writes to Cargo's
+registry and git cache allowed, and nothing else. Their approval prompt ends in
+`(network: HTTPS, Cargo cache)`. Every other Cargo command still runs
+`--offline`. Port 22 stays shut, so `git push` still fails.
+
 Paths can be **protected**: `protected = ["tests"]` in a config file or an eval
 case. The file tools refuse them everywhere. On macOS, Seatbelt also refuses
 them to every process. Landlock cannot carve a read-only hole out of a writable

@@ -384,3 +384,51 @@ async fn a_confined_run_gets_a_temporary_directory_inside_the_workspace() {
         output["output"]
     );
 }
+
+#[test]
+fn add_and_fetch_say_they_use_the_network() {
+    let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
+    let tool = fixture.tool();
+
+    let add = tool
+        .classify(&call(json!({
+            "command": "add",
+            "crates": ["serde@1", "thiserror"],
+            "features": ["derive"],
+            "dev": true
+        })))
+        .unwrap();
+    let fetch = tool.classify(&call(json!({"command": "fetch"}))).unwrap();
+
+    assert_eq!(
+        add.subject.as_deref(),
+        Some(
+            "cargo add serde@1 thiserror --features derive --dev --manifest-path Cargo.toml \
+             (network: HTTPS, Cargo cache)"
+        )
+    );
+    assert_eq!(
+        fetch.subject.as_deref(),
+        Some("cargo fetch --manifest-path Cargo.toml (network: HTTPS, Cargo cache)")
+    );
+}
+
+#[test]
+fn add_needs_a_crate_and_its_fields_belong_to_it_alone() {
+    let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
+    let tool = fixture.tool();
+
+    for arguments in [
+        json!({"command": "add"}),
+        json!({"command": "add", "crates": ["--git"]}),
+        json!({"command": "add", "crates": ["serde json"]}),
+        json!({"command": "add", "crates": ["serde"], "features": ["a b"]}),
+        json!({"command": "check", "crates": ["serde"]}),
+        json!({"command": "fetch", "dev": true}),
+    ] {
+        assert!(
+            tool.classify(&call(arguments.clone())).is_err(),
+            "{arguments}"
+        );
+    }
+}

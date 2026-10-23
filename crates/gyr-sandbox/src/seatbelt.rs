@@ -18,12 +18,13 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// Where a confined child may write, besides the workspace itself.
 const WRITABLE_DEVICES: [&str; 1] = ["/dev/null"];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Seatbelt {
     profile: String,
     temp_dir: PathBuf,
     protected: usize,
     credentials_denied: bool,
+    fetching: bool,
 }
 
 impl Seatbelt {
@@ -85,6 +86,7 @@ impl Seatbelt {
             temp_dir,
             protected: protected.len(),
             credentials_denied: home.is_some(),
+            fetching: false,
         })
     }
 
@@ -106,6 +108,12 @@ impl Sandbox for Seatbelt {
         } else {
             ""
         };
+        if self.fetching {
+            return format!(
+                "workspace (seatbelt: writes confined{protected}, executable config \
+                 protected{credentials}, fetching: HTTPS out and writes to Cargo's cache)"
+            );
+        }
         format!(
             "workspace (seatbelt: writes confined{protected}, executable config \
              protected{credentials}, network denied)"
@@ -117,7 +125,7 @@ impl Sandbox for Seatbelt {
     }
 
     fn denies_network(&self) -> bool {
-        true
+        !self.fetching
     }
 
     fn protects_paths(&self) -> bool {
@@ -126,6 +134,13 @@ impl Sandbox for Seatbelt {
 
     fn temp_dir(&self) -> Option<&Path> {
         Some(&self.temp_dir)
+    }
+
+    fn for_fetching(&self, writable: &[PathBuf]) -> Option<Box<dyn Sandbox>> {
+        let mut fetching = self.clone();
+        fetching.profile.push_str(&fetch_rules(writable).ok()?);
+        fetching.fetching = true;
+        Some(Box::new(fetching))
     }
 
     fn wrap(&self, program: &str, arguments: &[String]) -> Result<WrappedCommand, SandboxError> {
@@ -196,6 +211,28 @@ fn profile_for(
         .expect("writing to a String cannot fail");
     }
     Ok(profile)
+}
+
+/// Outbound HTTPS and DNS, and writes beneath each of `writable`.
+fn fetch_rules(writable: &[PathBuf]) -> Result<String, SandboxError> {
+    let mut rules = String::new();
+    for path in writable {
+        let path = std::fs::canonicalize(path).map_err(|error| {
+            SandboxError::Profile(format!("cannot resolve {}: {error}", path.display()))
+        })?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| SandboxError::Profile("fetch path is not valid UTF-8".into()))?;
+        writeln!(rules, "(allow file-write* (subpath \"{}\"))", escape(path)?)
+            .expect("writing to a String cannot fail");
+    }
+    rules.push_str(
+        "(allow system-socket)\n\
+         (allow network-outbound (remote tcp \"*:443\"))\n\
+         (allow network-outbound (remote udp \"*:53\"))\n\
+         (allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n",
+    );
+    Ok(rules)
 }
 
 /// Escapes a path for an SBPL string literal.

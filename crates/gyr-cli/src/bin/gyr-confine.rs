@@ -9,7 +9,7 @@
 //! Usage:
 //!
 //! ```text
-//! gyr-confine --allow-write <path> [--allow-write <path>]... -- <program> [args]...
+//! gyr-confine --allow-write <path>... [--allow-connect <port>]... -- <program> [args]...
 //! ```
 
 use std::process::ExitCode;
@@ -17,7 +17,10 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let Some(request) = Request::parse(&arguments) else {
-        eprintln!("gyr-confine: usage: gyr-confine --allow-write <path>... -- <program> [args]...");
+        eprintln!(
+            "gyr-confine: usage: gyr-confine --allow-write <path>... [--allow-connect <port>]... \
+             -- <program> [args]..."
+        );
         return ExitCode::from(64);
     };
 
@@ -33,6 +36,8 @@ fn main() -> ExitCode {
 #[derive(Debug)]
 struct Request {
     writable: Vec<String>,
+    /// TCP ports a connect is allowed to. None by default.
+    connect: Vec<u16>,
     program: String,
     arguments: Vec<String>,
 }
@@ -40,10 +45,12 @@ struct Request {
 impl Request {
     fn parse(arguments: &[String]) -> Option<Self> {
         let mut writable = Vec::new();
+        let mut connect = Vec::new();
         let mut rest = arguments.iter();
         loop {
             match rest.next()?.as_str() {
                 "--allow-write" => writable.push(rest.next()?.clone()),
+                "--allow-connect" => connect.push(rest.next()?.parse().ok()?),
                 "--" => break,
                 _ => return None,
             }
@@ -51,6 +58,7 @@ impl Request {
         let program = rest.next()?.clone();
         Some(Self {
             writable,
+            connect,
             program,
             arguments: rest.cloned().collect(),
         })
@@ -72,6 +80,7 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
     use landlock::AccessNet;
     use landlock::CompatLevel;
     use landlock::Compatible;
+    use landlock::NetPort;
     use landlock::PathBeneath;
     use landlock::PathFd;
     use landlock::Ruleset;
@@ -103,13 +112,25 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
         .map_err(|error| format!("cannot allow reads: {error}"))?;
 
     for path in &request.writable {
+        // A file takes only the rights a file can have; asking for directory
+        // rights on one is an error.
+        let access = if std::path::Path::new(path).is_file() {
+            AccessFs::from_file(abi)
+        } else {
+            AccessFs::from_all(abi)
+        };
         let handle = PathFd::new(path).map_err(|error| format!("cannot open {path}: {error}"))?;
         ruleset = ruleset
-            .add_rule(PathBeneath::new(handle, AccessFs::from_all(abi)))
+            .add_rule(PathBeneath::new(handle, access))
             .map_err(|error| format!("cannot allow writes under {path}: {error}"))?;
     }
+    for port in &request.connect {
+        ruleset = ruleset
+            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+            .map_err(|error| format!("cannot allow connecting to port {port}: {error}"))?;
+    }
 
-    // No network rule is added, so bind and connect are denied for TCP.
+    // Bind is never allowed, and connect only to the ports named.
     let status = ruleset
         .restrict_self()
         .map_err(|error| format!("cannot restrict this process: {error}"))?;
@@ -136,9 +157,10 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
         .collect::<Vec<_>>()
         .join(" ");
     Err(format!(
-        "there is no Landlock on {}, so `{command}` was not run and {} write path(s) were not \
-         applied; gyr-confine is a Linux binary",
+        "there is no Landlock on {}, so `{command}` was not run and {} write path(s) and {} \
+         port(s) were not applied; gyr-confine is a Linux binary",
         std::env::consts::OS,
-        request.writable.len()
+        request.writable.len(),
+        request.connect.len()
     ))
 }
