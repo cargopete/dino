@@ -44,6 +44,27 @@ pub const CREDENTIAL_PATHS: &[&str] = &[
     "Library/Keychains",
 ];
 
+/// Workspace paths that other programs run later, unconfined: on the next
+/// commit, build or `cd`. Processes may never write them; the file tools still
+/// may, with the approval that names the path.
+pub const EXECUTABLE_CONFIG: &[&str] = &[
+    ".git/hooks",
+    ".git/config",
+    ".cargo/config.toml",
+    ".cargo/config",
+    "rust-toolchain.toml",
+    "rust-toolchain",
+    ".envrc",
+    ".vscode",
+];
+
+/// The user's protected paths followed by [`EXECUTABLE_CONFIG`].
+fn with_executable_config(protected: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut all = protected.to_vec();
+    all.extend(EXECUTABLE_CONFIG.iter().map(std::path::PathBuf::from));
+    all
+}
+
 #[derive(Debug, Error)]
 pub enum SandboxError {
     #[error("no sandbox is available on this platform: {0}")]

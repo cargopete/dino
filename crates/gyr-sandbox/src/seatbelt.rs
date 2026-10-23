@@ -77,7 +77,11 @@ impl Seatbelt {
         // /tmp are symlinks on macOS.
         let home = home.and_then(|home| std::fs::canonicalize(home).ok());
         Ok(Self {
-            profile: profile_for(&root, protected, home.as_deref())?,
+            profile: profile_for(
+                &root,
+                &crate::with_executable_config(protected),
+                home.as_deref(),
+            )?,
             temp_dir,
             protected: protected.len(),
             credentials_denied: home.is_some(),
@@ -102,7 +106,10 @@ impl Sandbox for Seatbelt {
         } else {
             ""
         };
-        format!("workspace (seatbelt: writes confined{protected}{credentials}, network denied)")
+        format!(
+            "workspace (seatbelt: writes confined{protected}, executable config \
+             protected{credentials}, network denied)"
+        )
     }
 
     fn confines_writes(&self) -> bool {
@@ -114,7 +121,7 @@ impl Sandbox for Seatbelt {
     }
 
     fn protects_paths(&self) -> bool {
-        self.protected > 0
+        true
     }
 
     fn temp_dir(&self) -> Option<&Path> {
@@ -303,6 +310,45 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&allowed.stdout), "fine");
         assert!(sandbox.label().contains("credential reads denied"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_process_cannot_write_config_that_runs_outside_the_sandbox_later() {
+        let nested = std::process::Command::new(SANDBOX_EXEC)
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|status| !status.success());
+        if nested {
+            eprintln!("skipped: already inside a sandbox");
+            return;
+        }
+        let workspace = std::env::temp_dir().join(format!("gyr-execcfg-{}", std::process::id()));
+        std::fs::create_dir_all(workspace.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let sandbox = Seatbelt::new(&workspace).unwrap();
+        let root = std::fs::canonicalize(&workspace).unwrap();
+
+        let touch = |relative: &str| {
+            let wrapped = sandbox
+                .wrap(
+                    "/usr/bin/touch",
+                    &[root.join(relative).display().to_string()],
+                )
+                .unwrap();
+            std::process::Command::new(&wrapped.program)
+                .args(&wrapped.arguments)
+                .status()
+                .unwrap()
+                .success()
+        };
+
+        assert!(touch("src/main.rs"));
+        for path in [".git/hooks/pre-commit", ".git/config", ".envrc"] {
+            assert!(!touch(path), "{path} was writable");
+        }
+        assert!(sandbox.label().contains("executable config protected"));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[cfg(target_os = "macos")]

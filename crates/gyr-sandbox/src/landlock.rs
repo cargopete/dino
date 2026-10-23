@@ -26,6 +26,8 @@ pub struct Landlock {
     writable: PathBuf,
     temp_dir: PathBuf,
     protected: Vec<PathBuf>,
+    /// How many of `protected` the user chose, ahead of the executable config.
+    chosen: usize,
 }
 
 impl Landlock {
@@ -48,7 +50,8 @@ impl Landlock {
     /// As [`Landlock::new`], and [`SandboxError::Profile`] for a protected
     /// path that is absolute or climbs out with `..`.
     pub fn protecting(workspace: &Path, protected: &[PathBuf]) -> Result<Self, SandboxError> {
-        let protected = restore::checked(protected)?;
+        let chosen = protected.len();
+        let protected = restore::checked(&crate::with_executable_config(protected))?;
         let helper = find_helper()?;
         let writable = std::fs::canonicalize(workspace).map_err(|error| {
             SandboxError::Profile(format!(
@@ -68,6 +71,7 @@ impl Landlock {
             writable,
             temp_dir,
             protected,
+            chosen,
         })
     }
 }
@@ -80,17 +84,16 @@ impl Sandbox for Landlock {
     /// Seatbelt profile denies everything. Labelling both "network denied"
     /// would make the weaker one wear the stronger one's clothes.
     fn label(&self) -> String {
-        match self.protected.len() {
-            // Landlock grants by allow-list, so it cannot carve credentials out
-            // of a readable home. Said here rather than implied by Seatbelt's label.
-            0 => "workspace (landlock: writes confined, TCP denied, credential reads not \
-                  denied)"
-                .to_owned(),
-            count => format!(
-                "workspace (landlock: writes confined, {count} path(s) restored after each \
-                 process, TCP denied, credential reads not denied)"
-            ),
-        }
+        let chosen = match self.chosen {
+            0 => String::new(),
+            count => format!(", {count} path(s)"),
+        };
+        // Landlock grants by allow-list, so it cannot carve credentials out of a
+        // readable home. Said here rather than implied by Seatbelt's label.
+        format!(
+            "workspace (landlock: writes confined, executable config{chosen} restored after \
+             each process, TCP denied, credential reads not denied)"
+        )
     }
 
     fn confines_writes(&self) -> bool {
