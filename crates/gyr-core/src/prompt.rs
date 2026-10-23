@@ -71,6 +71,9 @@ Tool discipline:
 - `exec` runs one program with one argument vector. There is no shell: no pipes,
   no redirection, no globbing, no `&&`. Use a program's own flags instead of a
   pipeline, and prefer `read` and `search` over `cat` and `grep`.
+- `shell` runs one command line through `sh -c`, for when a pipe, redirect, glob
+  or `&&` is genuinely needed. Every distinct line is approved separately, so
+  prefer `exec` for a single program.
 - If the task cannot be done as asked, because the request contradicts itself
   or the tests and code it must keep, call `report_blocker` with the evidence.
   Do not change a test or the spec to make the two agree.

@@ -40,6 +40,15 @@ necessary rather than merely familiar, the answer is a designed one, and the
 evidence for it should come from an eval corpus rather than from an afternoon's
 irritation.
 
+**Amended 2026-10-23.** Answered by a change of scope rather than by the
+corpus. Gyrfalcon is now also a daily agent for its author's own repositories,
+not all of them Rust, where `npm run`, `&&` chains and `| tail` are the normal
+idiom and have no flag to stand in for them. A `shell` tool now runs one line
+through `sh -c` beside `exec`. The audit concern is met as far as it can be: the
+line is shown whole in the approval prompt, a session rule matches that exact
+line and nothing broader, and the sandbox is the boundary, as above. The system
+prompt still prefers `exec`.
+
 ## 3. No list of blessed binaries
 
 An allow-list of permitted programs is the obvious safety feature and it is not

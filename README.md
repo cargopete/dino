@@ -54,13 +54,14 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Nine tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Ten tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
   ambiguous edit, or one to a file that changed since the model last saw it.
   `write_file` creates a file, or replaces one the model has read. `exec` runs
-  one program with one argument vector, no shell. `cargo` runs a closed set of
+  one program with one argument vector, no shell; `shell` runs one command line
+  through `sh -c` in the same sandbox, approved line by line. `cargo` runs a closed set of
   subcommands and returns parsed diagnostics, so an `E0308` arrives as a level,
   a code, a file, a line and a column rather than as a page of compiler output.
   `report_blocker` lets the model stop and say a task contradicts itself,
@@ -178,7 +179,7 @@ and is written into the session log. Windows is not a target.
 
 ### What does not exist yet
 
-Shells and pipelines. Context relief for OpenAI, whose server-side continuation
+Context relief for OpenAI, whose server-side continuation
 keeps no local history to reduce, and which wants a live credential to verify
 rather than merely to write. Summarising compaction. Rollback: the diagnostic
 gate refused rather than reverting, because a shadow copy of the workspace is a
