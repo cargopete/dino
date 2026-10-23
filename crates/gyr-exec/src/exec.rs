@@ -257,28 +257,28 @@ fn plain_words(line: &str) -> Option<Vec<String>> {
 }
 
 #[derive(Debug, Serialize)]
-struct ExecOutput {
-    command: String,
-    exit_code: Option<i32>,
-    timed_out: bool,
+pub(crate) struct ExecOutput {
+    pub(crate) command: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) timed_out: bool,
     /// Kept apart from stderr. Merging them loses which stream said what, and a
     /// tool whose output cannot tell a result from a warning teaches a model to
     /// guess.
-    stdout: String,
-    stderr: String,
-    truncated: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) truncated: bool,
     /// Protected paths this command changed, which have been put back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    restored_protected_paths: Vec<String>,
+    pub(crate) restored_protected_paths: Vec<String>,
 }
 
-fn json_output<T: Serialize>(value: &T) -> Result<ToolOutput, ToolError> {
+pub(crate) fn json_output<T: Serialize>(value: &T) -> Result<ToolOutput, ToolError> {
     serde_json::to_string(value)
         .map(ToolOutput::success)
         .map_err(|error| ToolError::new(format!("cannot encode exec output: {error}")))
 }
 
-fn capped(value: &str, max_bytes: usize) -> String {
+pub(crate) fn capped(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
     }
