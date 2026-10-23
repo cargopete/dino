@@ -52,6 +52,15 @@ needs one of those paths is wrong to read it. Landlock grants by allow-list and
 cannot carve a hole out of a readable home, so on Linux the label says
 `credential reads not denied` rather than borrowing Seatbelt's words.
 
+**Amended 2026-10-23, writes.** Confining writes to the workspace was not
+enough on its own. Inside the workspace are files that other programs execute
+later and unconfined: git hooks and config, Cargo config, the toolchain file,
+`.envrc`, editor tasks. A confined process that wrote one escaped without ever
+breaking the sandbox. `EXECUTABLE_CONFIG` in `gyr-sandbox` is now protected for
+every process, by Seatbelt's deny or Landlock's restore, in addition to any
+user-protected paths. The file tools are not restricted, because their writes
+already pass an approval that names the path.
+
 ## 3. The seam
 
 A new `gyr-sandbox` crate owns one trait:

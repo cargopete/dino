@@ -159,6 +159,13 @@ it restored. That undoes a write rather than preventing it: until the process
 exits, what it wrote is there. `gyr` says which kind of protection is in force
 when a session starts.
 
+Some paths are protected from processes whatever the configuration says:
+`.git/hooks`, `.git/config`, `.cargo/config.toml`, `rust-toolchain.toml`,
+`.envrc` and `.vscode`. Other programs run those later, outside the sandbox, on
+the next commit, build or `cd`, so a build script that wrote one would have
+escaped containment without breaking it. The file tools may still edit them,
+under an approval that names the path.
+
 On every other platform the sandbox is unimplemented and Gyrfalcon refuses to run
 any process rather than quietly running it unconfined. `--sandbox none` remains
 available, is never the default, appears in the approval prompt as `unconfined`,
