@@ -101,7 +101,7 @@ impl AnthropicSession {
         })?;
 
         Ok(Self {
-            client: Client::new(),
+            client: crate::http_client()?,
             endpoint,
             config,
             history: Arc::new(Mutex::new(Vec::new())),

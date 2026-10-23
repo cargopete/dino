@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_stream::try_stream;
 use futures_util::StreamExt;
+use gyr_protocol::ChatServer;
 use gyr_protocol::ModelEvent;
 use gyr_protocol::ModelProfile;
 use gyr_protocol::ProviderKind;
@@ -52,10 +53,10 @@ pub struct QwenConfig {
     pub enable_thinking: Option<bool>,
     pub preserve_thinking: bool,
     pub retry: RetryPolicy,
-    /// Most reasoning tokens per turn, through vLLM's `thinking_token_budget`.
-    /// Measured on vLLM 0.32 with Qwen3.8 27B: reasoning stops one token short
-    /// of the budget and the model still answers. Servers that do not know the
-    /// field ignore it.
+    /// Most reasoning tokens per turn: vLLM's `thinking_token_budget`, or
+    /// `DashScope`'s `thinking_budget`. Measured on vLLM 0.32 with Qwen3.8 27B:
+    /// reasoning stops one token short of the budget and the model still
+    /// answers.
     pub thinking_budget: Option<u32>,
 }
 
@@ -128,7 +129,7 @@ impl QwenSession {
         })?;
 
         Ok(Self {
-            client: Client::new(),
+            client: crate::http_client()?,
             endpoint,
             config,
             history: Arc::new(Mutex::new(Vec::new())),
@@ -214,7 +215,9 @@ impl QwenSession {
         // Reasoning is most of what a thinking model writes, so replaying it
         // all would fill a self-hosted context window in a few turns. It goes
         // back only when the profile asks the template to preserve it.
-        let replay_reasoning = matches!(self.config.profile.reasoning, ReasoningSupport::Toggle)
+        let vllm = self.config.profile.chat_server == ChatServer::Vllm;
+        let replay_reasoning = vllm
+            && matches!(self.config.profile.reasoning, ReasoningSupport::Toggle)
             && self.config.preserve_thinking;
         messages.extend(history.iter().map(|message| {
             let mut message = message.clone();
@@ -235,6 +238,41 @@ impl QwenSession {
         if let Some(max_tokens) = self.config.max_output_tokens {
             body.insert("max_tokens".into(), json!(max_tokens));
         }
+        match self.config.profile.chat_server {
+            ChatServer::Vllm => self.insert_vllm_controls(&mut body),
+            ChatServer::DashScope => self.insert_dashscope_controls(&mut body),
+        }
+        if !self.config.tools.is_empty() {
+            let tools = self
+                .config
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            body.insert("tools".into(), Value::Array(tools));
+            body.insert("tool_choice".into(), json!("auto"));
+            // An adapter may expose less than a model can do and never more,
+            // per RFC-0001 section 5. Asking a profile that says no for
+            // parallel calls would be asking for more.
+            body.insert(
+                "parallel_tool_calls".into(),
+                json!(self.config.profile.parallel_tool_calls),
+            );
+        }
+
+        Ok(body)
+    }
+
+    fn insert_vllm_controls(&self, body: &mut serde_json::Map<String, Value>) {
         if let Some(budget) = self.config.thinking_budget {
             body.insert("thinking_token_budget".into(), json!(budget));
         }
@@ -268,33 +306,6 @@ impl QwenSession {
                 body.insert("repetition_penalty".into(), json!(repetition_penalty));
             }
         }
-        if !self.config.tools.is_empty() {
-            let tools = self
-                .config
-                .tools
-                .iter()
-                .map(|tool| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema,
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-            body.insert("tools".into(), Value::Array(tools));
-            body.insert("tool_choice".into(), json!("auto"));
-            // An adapter may expose less than a model can do and never more,
-            // per RFC-0001 section 5. Asking a profile that says no for
-            // parallel calls would be asking for more.
-            body.insert(
-                "parallel_tool_calls".into(),
-                json!(self.config.profile.parallel_tool_calls),
-            );
-        }
-
         if matches!(self.config.profile.reasoning, ReasoningSupport::Toggle) {
             let mut template = serde_json::Map::new();
             if let Some(enable_thinking) = self.config.enable_thinking {
@@ -307,8 +318,15 @@ impl QwenSession {
                 body.insert("chat_template_kwargs".into(), Value::Object(template));
             }
         }
+    }
 
-        Ok(body)
+    fn insert_dashscope_controls(&self, body: &mut serde_json::Map<String, Value>) {
+        if let Some(budget) = self.config.thinking_budget {
+            body.insert("thinking_budget".into(), json!(budget));
+        }
+        if let Some(enable_thinking) = self.config.enable_thinking {
+            body.insert("enable_thinking".into(), json!(enable_thinking));
+        }
     }
 }
 
@@ -1138,6 +1156,39 @@ mod tests {
     }
 
     #[test]
+    fn dashscope_takes_thinking_controls_at_the_top_level_and_no_vllm_extensions() {
+        let profile = crate::builtin_profile("qwen3.7-plus").unwrap();
+        let mut config = QwenConfig::new("https://coding-intl.dashscope.aliyuncs.com/v1", profile);
+        config.enable_thinking = Some(false);
+        config.thinking_budget = Some(4_096);
+        let session = QwenSession::new(config).unwrap();
+        session.history.lock().unwrap().push(ChatMessage {
+            role: Role::Assistant,
+            content: Some("reading".into()),
+            reasoning_content: Some("the bug is in wrap".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+        let body = session.request_body(&[]).unwrap();
+
+        assert_eq!(body["model"], "qwen3.7-plus");
+        assert_eq!(body["enable_thinking"], false);
+        assert_eq!(body["thinking_budget"], 4_096);
+        for vllm_only in [
+            "chat_template_kwargs",
+            "thinking_token_budget",
+            "top_k",
+            "min_p",
+            "repetition_penalty",
+        ] {
+            assert!(!body.contains_key(vllm_only), "sent {vllm_only}");
+        }
+        let assistant = &body["messages"][0];
+        assert_eq!(assistant["role"], "assistant");
+        assert!(assistant.get("reasoning_content").is_none());
+    }
+
+    #[test]
     fn reasoning_is_replayed_only_when_the_profile_preserves_thinking() {
         let replayed = |key: &str| {
             let profile = crate::builtin_profile(key).unwrap();
@@ -1278,7 +1329,7 @@ mod tests {
         );
     }
 
-    /// Answers one request with `body` as JSON, and returns the request line.
+    /// Answers one request with `body` as JSON, and returns the request head.
     async fn serve_json_once(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -1296,11 +1347,7 @@ mod tests {
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&request)
-                .lines()
-                .next()
-                .unwrap()
-                .to_owned()
+            String::from_utf8_lossy(&request).into_owned()
         });
         (base, server)
     }
@@ -1423,7 +1470,24 @@ mod tests {
         session.discover_limits().await.unwrap();
 
         assert_eq!(session.profile().context_window_tokens, Some(65_536));
-        assert_eq!(server.await.unwrap(), "GET /v1/models HTTP/1.1");
+        assert!(
+            server
+                .await
+                .unwrap()
+                .starts_with("GET /v1/models HTTP/1.1\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_name_their_client() {
+        let (base, server) = serve_json_once(r#"{"object":"list","data":[]}"#).await;
+        let profile = crate::builtin_profile("qwen3.7-plus").unwrap();
+        let mut session = QwenSession::new(QwenConfig::new(base, profile)).unwrap();
+
+        session.discover_limits().await.unwrap();
+
+        let head = server.await.unwrap().to_ascii_lowercase();
+        assert!(head.contains("\r\nuser-agent: gyr/"), "{head}");
     }
 
     #[tokio::test]

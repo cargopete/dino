@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use futures_core::Stream;
+use gyr_protocol::ChatServer;
 use gyr_protocol::ModelEvent;
 use gyr_protocol::ModelProfile;
 use gyr_protocol::ProfileStatus;
@@ -254,6 +255,15 @@ pub enum ModelError {
     Configuration(String),
 }
 
+/// One HTTP client for every provider. Alibaba's Coding Plan refuses a request
+/// that carries no User-Agent, and reqwest sends none by default.
+pub(crate) fn http_client() -> Result<reqwest::Client, ModelError> {
+    reqwest::Client::builder()
+        .user_agent(concat!("gyr/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| ModelError::Configuration(format!("HTTP client: {error}")))
+}
+
 /// The model used when none is selected. Open weights, so anyone can serve it.
 pub const DEFAULT_PROFILE: &str = "qwen3.8-27b";
 
@@ -278,6 +288,7 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         qwen_3_6_27b(),
         qwen_3_6_35b_a3b(),
         qwen_3_8_27b(),
+        qwen_3_7_plus(),
         qwen3_8b(),
     ]
 }
@@ -311,6 +322,7 @@ fn terra() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
+        chat_server: ChatServer::Vllm,
     }
 }
 
@@ -335,6 +347,7 @@ fn claude_opus() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
+        chat_server: ChatServer::Vllm,
     }
 }
 
@@ -364,6 +377,7 @@ fn claude_sonnet() -> ModelProfile {
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
+        chat_server: ChatServer::Vllm,
     }
 }
 
@@ -435,6 +449,7 @@ fn qwen_coder(
         tool_call_parser: Some("qwen3_coder".into()),
         reasoning_parser: None,
         sampling,
+        chat_server: ChatServer::Vllm,
     }
 }
 
@@ -465,6 +480,29 @@ fn qwen_3_8_27b() -> ModelProfile {
         tool_call_parser: Some("qwen3_coder".into()),
         reasoning_parser: Some("qwen3".into()),
         sampling: None,
+        chat_server: ChatServer::Vllm,
+    }
+}
+
+/// Alibaba's hosted Qwen3.7-Plus, as Model Studio and its Coding Plan serve it.
+/// **Not measured.** Alibaba publishes no window we have checked, so this is a
+/// floor; sampling is left to the server.
+fn qwen_3_7_plus() -> ModelProfile {
+    ModelProfile {
+        key: "qwen3.7-plus".into(),
+        provider_model: "qwen3.7-plus".into(),
+        display_name: "Qwen3.7-Plus (Alibaba Model Studio)".into(),
+        provider: ProviderKind::Qwen,
+        status: ProfileStatus::Development,
+        context_window_tokens: Some(262_144),
+        max_output_tokens: None,
+        reasoning: ReasoningSupport::Toggle,
+        parallel_tool_calls: true,
+        image_input: true,
+        tool_call_parser: None,
+        reasoning_parser: None,
+        sampling: None,
+        chat_server: ChatServer::DashScope,
     }
 }
 
@@ -503,6 +541,7 @@ fn qwen3_8b() -> ModelProfile {
             presence_penalty: Some(0.0),
             repetition_penalty: Some(1.0),
         }),
+        chat_server: ChatServer::Vllm,
     }
 }
 
@@ -528,6 +567,7 @@ fn qwen_3_6(key: &str, provider_model: &str, display_name: &str) -> ModelProfile
             presence_penalty: Some(0.0),
             repetition_penalty: Some(1.0),
         }),
+        chat_server: ChatServer::Vllm,
     }
 }
 
@@ -573,14 +613,15 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 11);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 
     #[test]
     fn only_self_served_profiles_name_server_parsers() {
         for profile in builtin_profiles() {
-            let served = profile.provider == ProviderKind::Qwen;
+            let served =
+                profile.provider == ProviderKind::Qwen && profile.chat_server == ChatServer::Vllm;
             assert_eq!(
                 profile.tool_call_parser.is_some(),
                 served,
@@ -597,6 +638,7 @@ mod tests {
             .iter()
             .filter(|profile| {
                 profile.provider == ProviderKind::Qwen
+                    && profile.chat_server == ChatServer::Vllm
                     && !matches!(profile.key.as_str(), "qwen3-8b" | "qwen3.8-27b")
             })
             .collect::<Vec<_>>();

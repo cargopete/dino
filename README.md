@@ -245,6 +245,7 @@ substring. An adapter may expose less than a model can do and never more.
 | `qwen3.6-27b` | Qwen Chat Completions | `Qwen/Qwen3.6-27B` | development |
 | `qwen3.6-35b-a3b` | Qwen Chat Completions | `Qwen/Qwen3.6-35B-A3B` | development |
 | `qwen3-8b` | Qwen Chat Completions | `qwen3:8b` | development, not a coding target |
+| `qwen3.7-plus` | Qwen Chat Completions (DashScope) | `qwen3.7-plus` | development, hosted |
 
 `supported` means the corpus has passed against a live endpoint, which so far is
 true of the two Claude profiles and nothing else. The rest have passed the wire
@@ -261,6 +262,15 @@ Qwen's reference serving stacks are vLLM and SGLang. Ollama and other local
 runtimes may follow once they pass the same conformance suite. `qwen3-8b` is
 present so the loop can be driven by real inference on a laptop; it is not a
 coding target and never will be.
+
+`qwen3.7-plus` is Alibaba's hosted model, for anyone without a GPU. It speaks
+DashScope's dialect: thinking controls at the top level, no vLLM extensions,
+sampling left to Alibaba. A personal Token Plan serves it at
+`https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`, with
+the plan-specific key (`sk-sp-...`) in `QWEN_API_KEY`. The older Coding Plan
+uses `https://coding-intl.dashscope.aliyuncs.com/v1` and allows interactive
+sessions only, which rules out `gyr run` and `gyr eval`. Driven live on
+2026-10-23; not yet through the corpus.
 
 ## Using it
 
