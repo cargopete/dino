@@ -124,15 +124,19 @@ impl Layers {
 }
 
 fn user_config_path() -> Option<PathBuf> {
+    user_dir().map(|dir| dir.join("config.toml"))
+}
+
+/// The user's own instructions, read into every interactive session.
+pub fn user_instructions_path() -> Option<PathBuf> {
+    user_dir().map(|dir| dir.join("instructions.md"))
+}
+
+fn user_dir() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(base).join("gyr").join("config.toml"));
+        return Some(PathBuf::from(base).join("gyr"));
     }
-    std::env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join(".config")
-            .join("gyr")
-            .join("config.toml")
-    })
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("gyr"))
 }
 
 fn read(path: &Path) -> Result<FileConfig> {
