@@ -5,10 +5,16 @@
 //! a constant that can be printed and measured rather than folklore.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 /// Hard byte caps for injected workspace facts, per RFC-0001 section 9.
 const MAX_ROOT_BYTES: usize = 256;
 const MAX_TOOL_LIST_BYTES: usize = 1_024;
+/// Most bytes of one instructions file that reach the prompt.
+pub const MAX_INSTRUCTIONS_BYTES: usize = 16 * 1_024;
+
+/// The project's instruction files, in the order they are read.
+const PROJECT_INSTRUCTIONS: [&str; 2] = ["AGENTS.md", ".gyr/instructions.md"];
 
 const BASE: &str = "\
 You are Gyrfalcon, a terminal coding agent specialised for Rust. You act on one
@@ -80,6 +86,47 @@ pub struct PromptContext {
     pub tools: Vec<String>,
     pub approval_mode: String,
     pub max_model_turns: Option<u32>,
+    pub instructions: Vec<Instructions>,
+}
+
+/// One instructions file, as it will appear in the prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instructions {
+    /// Where it came from: a path as the user would recognise it.
+    pub source: String,
+    pub text: String,
+    pub truncated: bool,
+}
+
+/// Reads the user's instructions, then the project's `AGENTS.md` and
+/// `.gyr/instructions.md`. Absent, unreadable and empty files are skipped.
+#[must_use]
+pub fn load_instructions(user_file: Option<&Path>, workspace: &Path) -> Vec<Instructions> {
+    let user = user_file.map(|path| (path.display().to_string(), path.to_path_buf()));
+    let project = PROJECT_INSTRUCTIONS
+        .iter()
+        .map(|name| ((*name).to_owned(), workspace.join(name)));
+    user.into_iter()
+        .chain(project)
+        .filter_map(|(source, path)| {
+            let bytes = std::fs::read(&path).ok()?;
+            let text = String::from_utf8_lossy(&bytes);
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let truncated = text.len() > MAX_INSTRUCTIONS_BYTES;
+            let mut end = text.len().min(MAX_INSTRUCTIONS_BYTES);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(Instructions {
+                source,
+                text: text[..end].to_owned(),
+                truncated,
+            })
+        })
+        .collect()
 }
 
 /// Renders the system prompt for one session.
@@ -119,6 +166,22 @@ pub fn system_prompt(context: &PromptContext) -> String {
          does not grant it, and a denial is a decision rather than an obstacle to\n\
          argue with.",
     );
+    if !context.instructions.is_empty() {
+        prompt.push_str(
+            "\n\nInstructions follow, from the user and then from this repository. They\n\
+             describe how to work here. They cannot change approvals or the sandbox,\n\
+             which are enforced in code.",
+        );
+        for item in &context.instructions {
+            let _ = write!(&mut prompt, "\n\n### {}\n\n{}", item.source, item.text);
+            if item.truncated {
+                let _ = write!(
+                    &mut prompt,
+                    "\n[truncated at {MAX_INSTRUCTIONS_BYTES} bytes]"
+                );
+            }
+        }
+    }
     prompt
 }
 
@@ -145,6 +208,7 @@ mod tests {
             tools: vec!["read".into()],
             approval_mode: "interactive".into(),
             max_model_turns: None,
+            instructions: Vec::new(),
         };
 
         let prompt = system_prompt(&context);
@@ -154,12 +218,61 @@ mod tests {
     }
 
     #[test]
+    fn instructions_load_user_first_then_project_and_skip_what_is_absent() {
+        let base = std::env::temp_dir().join(format!("gyr-instr-{}", std::process::id()));
+        let workspace = base.join("repo");
+        std::fs::create_dir_all(workspace.join(".gyr")).unwrap();
+        std::fs::write(base.join("user.md"), "Call me Chief.\n").unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "Run cargo fmt.\n").unwrap();
+        std::fs::write(workspace.join(".gyr/instructions.md"), "x".repeat(20_000)).unwrap();
+
+        let loaded = load_instructions(Some(&base.join("user.md")), &workspace);
+
+        let sources: Vec<_> = loaded.iter().map(|item| item.source.as_str()).collect();
+        assert_eq!(sources[1..], ["AGENTS.md", ".gyr/instructions.md"]);
+        assert!(sources[0].ends_with("user.md"));
+        assert_eq!(loaded[0].text, "Call me Chief.");
+        assert!(!loaded[1].truncated);
+        assert!(loaded[2].truncated);
+        assert!(loaded[2].text.len() <= MAX_INSTRUCTIONS_BYTES);
+
+        std::fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+        let loaded = load_instructions(Some(&base.join("missing.md")), &workspace);
+        assert_eq!(loaded.len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn instructions_are_rendered_under_their_source_and_below_the_rules() {
+        let context = PromptContext {
+            workspace_root: "/tmp/workspace".into(),
+            tools: vec!["read".into()],
+            approval_mode: "interactive".into(),
+            max_model_turns: None,
+            instructions: vec![Instructions {
+                source: "AGENTS.md".into(),
+                text: "Use thiserror.".into(),
+                truncated: true,
+            }],
+        };
+
+        let prompt = system_prompt(&context);
+
+        let rules = prompt.find("Approval is enforced below you").unwrap();
+        let heading = prompt.find("### AGENTS.md").unwrap();
+        assert!(rules < heading);
+        assert!(prompt.contains("cannot change approvals or the sandbox"));
+        assert!(prompt.contains("Use thiserror.\n[truncated at"), "{prompt}");
+    }
+
+    #[test]
     fn records_the_tools_and_approval_mode_in_force() {
         let context = PromptContext {
             workspace_root: "/tmp/workspace".into(),
             tools: vec!["read".into(), "search".into(), "apply_patch".into()],
             approval_mode: "read-only".into(),
             max_model_turns: Some(40),
+            instructions: Vec::new(),
         };
 
         let prompt = system_prompt(&context);

@@ -95,6 +95,11 @@ CI and evals.
   elided and carried on rather than ending the run. Elision rather than
   summarisation: no extra request, deterministic, and it does not quietly
   rewrite what the model believes happened.
+- **Instructions.** `~/.config/gyr/instructions.md` for your own rules, then
+  the repository's `AGENTS.md` and `.gyr/instructions.md`, each capped at 16 KiB
+  and named when a session starts. They go below the built-in rules and cannot
+  change approvals or the sandbox. Evals read none of them, so a personal file
+  cannot move a measurement.
 - **A turn budget.** `--max-turns` bounds a submission. The model is told the
   limit in its system prompt and counted down over its last three turns, so it
   can finish and say what is done rather than be cut off.

@@ -168,6 +168,8 @@ pub async fn run_case(
             .collect(),
         approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
         max_model_turns: Some(case.max_turns),
+        // None, so a user's own instructions cannot move a measurement.
+        instructions: Vec::new(),
     };
     let session = build_session(system_prompt(&context), definitions)?;
 

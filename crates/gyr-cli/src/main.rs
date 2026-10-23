@@ -272,7 +272,34 @@ fn prompt_context(
             .collect(),
         approval_mode: mode.label().to_owned(),
         max_model_turns,
+        instructions: gyr_core::prompt::load_instructions(
+            settings::user_instructions_path().as_deref(),
+            workspace,
+        ),
     }
+}
+
+/// Names the instruction files a session read, so they are never a surprise.
+fn announce_instructions(context: &PromptContext) {
+    if context.instructions.is_empty() {
+        return;
+    }
+    let sources = context
+        .instructions
+        .iter()
+        .map(|item| {
+            if item.truncated {
+                format!("{} (truncated)", item.source)
+            } else {
+                item.source.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "{}",
+        style::paint(style::FAINT, &format!("instructions: {sources}"))
+    );
 }
 
 /// Everything a submission needs, assembled once.
@@ -323,6 +350,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         &definitions,
         Some(settings.max_turns.get()),
     );
+    announce_instructions(&context);
     let mut model = config::build_session(&settings, system_prompt(&context), definitions)?;
 
     let log = JsonlSessionLog::create(
