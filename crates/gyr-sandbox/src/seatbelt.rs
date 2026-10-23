@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::CREDENTIAL_PATHS;
 use crate::Sandbox;
 use crate::SandboxError;
 use crate::WrappedCommand;
@@ -22,6 +23,7 @@ pub struct Seatbelt {
     profile: String,
     temp_dir: PathBuf,
     protected: usize,
+    credentials_denied: bool,
 }
 
 impl Seatbelt {
@@ -43,6 +45,16 @@ impl Seatbelt {
     ///
     /// As [`Seatbelt::new`].
     pub fn protecting(workspace: &Path, protected: &[PathBuf]) -> Result<Self, SandboxError> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        Self::confining(workspace, protected, home.as_deref())
+    }
+
+    /// As [`Seatbelt::protecting`], denying credential reads beneath `home`.
+    fn confining(
+        workspace: &Path,
+        protected: &[PathBuf],
+        home: Option<&Path>,
+    ) -> Result<Self, SandboxError> {
         if !Path::new(SANDBOX_EXEC).is_file() {
             return Err(SandboxError::Unavailable(format!(
                 "{SANDBOX_EXEC} is not present"
@@ -61,10 +73,14 @@ impl Seatbelt {
                 temp_dir.display()
             ))
         })?;
+        // Canonical, because Seatbelt matches the resolved path and /var and
+        // /tmp are symlinks on macOS.
+        let home = home.and_then(|home| std::fs::canonicalize(home).ok());
         Ok(Self {
-            profile: profile_for(&root, protected)?,
+            profile: profile_for(&root, protected, home.as_deref())?,
             temp_dir,
             protected: protected.len(),
+            credentials_denied: home.is_some(),
         })
     }
 
@@ -77,12 +93,16 @@ impl Seatbelt {
 
 impl Sandbox for Seatbelt {
     fn label(&self) -> String {
-        match self.protected {
-            0 => "workspace (seatbelt: writes confined, network denied)".to_owned(),
-            count => format!(
-                "workspace (seatbelt: writes confined, {count} path(s) protected, network denied)"
-            ),
-        }
+        let protected = match self.protected {
+            0 => String::new(),
+            count => format!(", {count} path(s) protected"),
+        };
+        let credentials = if self.credentials_denied {
+            ", credential reads denied"
+        } else {
+            ""
+        };
+        format!("workspace (seatbelt: writes confined{protected}{credentials}, network denied)")
     }
 
     fn confines_writes(&self) -> bool {
@@ -113,9 +133,13 @@ impl Sandbox for Seatbelt {
 
 /// Renders the profile for one canonical root.
 ///
-/// Reads are allowed everywhere on purpose. See RFC-0009 section 2 for why an
-/// allow-list was rejected rather than guessed at.
-fn profile_for(root: &Path, protected: &[PathBuf]) -> Result<String, SandboxError> {
+/// Reads are allowed everywhere but the credential paths under `home`. See
+/// RFC-0009 section 2 for why an allow-list was rejected rather than guessed at.
+fn profile_for(
+    root: &Path,
+    protected: &[PathBuf],
+    home: Option<&Path>,
+) -> Result<String, SandboxError> {
     let mut profile = String::from(
         "(version 1)\n\
          (deny default)\n\
@@ -126,6 +150,17 @@ fn profile_for(root: &Path, protected: &[PathBuf]) -> Result<String, SandboxErro
          (allow mach-lookup)\n\
          (allow signal (target self))\n",
     );
+    // After the read allow, because the last matching rule wins.
+    if let Some(home) = home {
+        for credential in CREDENTIAL_PATHS {
+            let path = home.join(credential);
+            let path = path
+                .to_str()
+                .ok_or_else(|| SandboxError::Profile("home directory is not valid UTF-8".into()))?;
+            writeln!(profile, "(deny file-read* (subpath \"{}\"))", escape(path)?)
+                .expect("writing to a String cannot fail");
+        }
+    }
     for device in WRITABLE_DEVICES {
         writeln!(profile, "(allow file-write* (literal \"{device}\"))")
             .expect("writing to a String cannot fail");
@@ -201,7 +236,7 @@ mod tests {
 
     #[test]
     fn the_profile_denies_by_default_and_writes_only_to_the_root() {
-        let profile = profile_for(Path::new("/tmp/workspace"), &[]).unwrap();
+        let profile = profile_for(Path::new("/tmp/workspace"), &[], None).unwrap();
 
         assert!(profile.starts_with("(version 1)\n(deny default)\n"));
         assert!(profile.contains("(allow file-read*)"));
@@ -216,7 +251,8 @@ mod tests {
 
     #[test]
     fn protected_paths_are_denied_after_the_workspace_is_allowed() {
-        let profile = profile_for(Path::new("/tmp/workspace"), &[PathBuf::from("tests")]).unwrap();
+        let profile =
+            profile_for(Path::new("/tmp/workspace"), &[PathBuf::from("tests")], None).unwrap();
 
         let allow = profile
             .find(r#"(allow file-write* (subpath "/tmp/workspace"))"#)
@@ -225,6 +261,48 @@ mod tests {
             .find(r#"(deny file-write* (subpath "/tmp/workspace/tests"))"#)
             .unwrap();
         assert!(allow < deny, "the deny must come last to win");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn credentials_under_home_cannot_be_read_but_the_rest_of_home_can() {
+        // macOS will not apply a sandbox inside another, so under gyr's own
+        // every read would fail and the denials below would pass for nothing.
+        let nested = std::process::Command::new(SANDBOX_EXEC)
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|status| !status.success());
+        if nested {
+            eprintln!("skipped: already inside a sandbox");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("gyr-cred-{}", std::process::id()));
+        let home = base.join("home");
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join(".config/gyr")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "secret").unwrap();
+        std::fs::write(home.join(".config/gyr/env"), "secret").unwrap();
+        std::fs::write(home.join(".gitconfig"), "fine").unwrap();
+        let sandbox = Seatbelt::confining(&workspace, &[], Some(&home)).unwrap();
+
+        let cat = |path: &Path| {
+            let wrapped = sandbox
+                .wrap("/bin/cat", &[path.display().to_string()])
+                .unwrap();
+            std::process::Command::new(&wrapped.program)
+                .args(&wrapped.arguments)
+                .output()
+                .unwrap()
+        };
+
+        assert!(!cat(&home.join(".ssh/id_ed25519")).status.success());
+        assert!(!cat(&home.join(".config/gyr/env")).status.success());
+        let allowed = cat(&home.join(".gitconfig"));
+        assert_eq!(String::from_utf8_lossy(&allowed.stdout), "fine");
+        assert!(sandbox.label().contains("credential reads denied"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(target_os = "macos")]

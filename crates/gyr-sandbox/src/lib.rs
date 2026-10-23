@@ -4,11 +4,11 @@
 //! no async runtime and the process layer keeps sole responsibility for
 //! spawning, capping and killing.
 //!
-//! What this contains is writes outside the workspace, and the network. What it
-//! does not contain is reads. A sandboxed build script may learn a secret; it
-//! cannot write it down outside the workspace or transmit it. That is the whole
-//! guarantee, and RFC-0009 section 2 explains why a narrower read profile was
-//! rejected rather than attempted badly.
+//! What this contains is writes outside the workspace, and the network. Reads
+//! are open, except the known credential locations in [`CREDENTIAL_PATHS`] where
+//! the platform can deny them: a process's output is sent to the model, so with
+//! a hosted model a secret that is read has been transmitted. RFC-0009 section
+//! 2 explains why a general read allow-list was rejected.
 
 mod landlock;
 mod restore;
@@ -22,6 +22,27 @@ use thiserror::Error;
 pub use crate::landlock::Landlock;
 pub use crate::restore::Snapshot;
 pub use crate::seatbelt::Seatbelt;
+
+/// Home-relative paths that hold credentials, denied to confined reads.
+pub const CREDENTIAL_PATHS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".netrc",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    ".docker/config.json",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".config/gh",
+    ".config/gyr",
+    ".config/gcloud",
+    ".config/git/credentials",
+    "Library/Keychains",
+];
 
 #[derive(Debug, Error)]
 pub enum SandboxError {
