@@ -272,6 +272,7 @@ fn prompt_context(
             .collect(),
         approval_mode: mode.label().to_owned(),
         max_model_turns,
+        git: gyr_core::git::GitSnapshot::take(workspace),
         instructions: gyr_core::prompt::load_instructions(
             settings::user_instructions_path().as_deref(),
             workspace,

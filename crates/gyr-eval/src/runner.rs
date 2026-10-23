@@ -168,6 +168,7 @@ pub async fn run_case(
             .collect(),
         approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
         max_model_turns: Some(case.max_turns),
+        git: None,
         // None, so a user's own instructions cannot move a measurement.
         instructions: Vec::new(),
     };
