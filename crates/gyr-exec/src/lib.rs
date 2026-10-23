@@ -7,8 +7,10 @@
 mod exec;
 mod github;
 pub mod process;
+mod shell;
 
 pub use crate::exec::ExecLimits;
 pub use crate::exec::ExecTool;
 pub use crate::github::GithubLimits;
 pub use crate::github::GithubTool;
+pub use crate::shell::ShellTool;

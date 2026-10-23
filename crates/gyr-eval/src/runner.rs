@@ -21,6 +21,7 @@ use gyr_exec::ExecLimits;
 use gyr_exec::ExecTool;
 use gyr_exec::GithubLimits;
 use gyr_exec::GithubTool;
+use gyr_exec::ShellTool;
 use gyr_model::ModelSession;
 use gyr_protocol::ToolAction;
 use gyr_protocol::ToolCall;
@@ -273,6 +274,10 @@ pub fn session_tools(
         Box::new(gyr_core::blocker::BlockerTool),
         Box::new(
             ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
+        ),
+        Box::new(
+            ShellTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
+                .map_err(setup)?,
         ),
     ];
     if options.github {
