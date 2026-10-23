@@ -81,10 +81,14 @@ impl Sandbox for Landlock {
     /// would make the weaker one wear the stronger one's clothes.
     fn label(&self) -> String {
         match self.protected.len() {
-            0 => "workspace (landlock: writes confined, TCP denied)".to_owned(),
+            // Landlock grants by allow-list, so it cannot carve credentials out
+            // of a readable home. Said here rather than implied by Seatbelt's label.
+            0 => "workspace (landlock: writes confined, TCP denied, credential reads not \
+                  denied)"
+                .to_owned(),
             count => format!(
                 "workspace (landlock: writes confined, {count} path(s) restored after each \
-                 process, TCP denied)"
+                 process, TCP denied, credential reads not denied)"
             ),
         }
     }

@@ -41,6 +41,17 @@ configuration; an allow-list would have been guesswork with a failure mode of
 mysterious build errors, and guesswork dressed as a security boundary is worse
 than an honest wide one.
 
+**Amended 2026-10-23.** The guarantee above assumed the model ran locally. A
+process's output becomes a tool result, and a tool result is sent to the
+provider, so with a hosted model a secret that is read *has* been transmitted.
+Seatbelt now denies reads beneath a fixed list of credential locations in the
+home directory (`CREDENTIAL_PATHS` in `gyr-sandbox`): `~/.ssh`, `~/.aws`,
+`~/.config/gh`, `~/.config/gyr` and the like. That is a denylist of known
+secrets, not the allow-list rejected above, and it fails safe: a build that
+needs one of those paths is wrong to read it. Landlock grants by allow-list and
+cannot carve a hole out of a readable home, so on Linux the label says
+`credential reads not denied` rather than borrowing Seatbelt's words.
+
 ## 3. The seam
 
 A new `gyr-sandbox` crate owns one trait:
