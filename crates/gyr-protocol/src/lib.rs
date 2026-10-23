@@ -62,6 +62,17 @@ pub enum ProfileStatus {
     Development,
 }
 
+/// Whose extensions a Chat Completions request may carry. They overlap only in
+/// the standard fields; each puts thinking controls somewhere the other ignores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatServer {
+    #[default]
+    Vllm,
+    /// Alibaba Model Studio, including its Coding Plan.
+    DashScope,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelProfile {
     /// Stable Gyrfalcon configuration key.
@@ -79,6 +90,8 @@ pub struct ModelProfile {
     pub tool_call_parser: Option<String>,
     pub reasoning_parser: Option<String>,
     pub sampling: Option<SamplingDefaults>,
+    #[serde(default)]
+    pub chat_server: ChatServer,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

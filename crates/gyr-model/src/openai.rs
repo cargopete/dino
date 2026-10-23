@@ -90,7 +90,7 @@ impl OpenAiSession {
         })?;
 
         Ok(Self {
-            client: Client::new(),
+            client: crate::http_client()?,
             endpoint,
             config,
             previous_response_id: Arc::new(Mutex::new(None)),
