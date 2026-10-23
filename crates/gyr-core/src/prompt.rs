@@ -86,6 +86,7 @@ pub struct PromptContext {
     pub tools: Vec<String>,
     pub approval_mode: String,
     pub max_model_turns: Option<u32>,
+    pub git: Option<crate::git::GitSnapshot>,
     pub instructions: Vec<Instructions>,
 }
 
@@ -161,6 +162,9 @@ pub fn system_prompt(context: &PromptContext) -> String {
              you will be told how many remain; finish and summarise rather than be cut off."
         );
     }
+    if let Some(git) = &context.git {
+        prompt.push_str(&git.render());
+    }
     prompt.push_str(
         "\nApproval is enforced below you, in code. Asking for permission in prose\n\
          does not grant it, and a denial is a decision rather than an obstacle to\n\
@@ -208,6 +212,7 @@ mod tests {
             tools: vec!["read".into()],
             approval_mode: "interactive".into(),
             max_model_turns: None,
+            git: None,
             instructions: Vec::new(),
         };
 
@@ -249,6 +254,7 @@ mod tests {
             tools: vec!["read".into()],
             approval_mode: "interactive".into(),
             max_model_turns: None,
+            git: None,
             instructions: vec![Instructions {
                 source: "AGENTS.md".into(),
                 text: "Use thiserror.".into(),
@@ -272,6 +278,7 @@ mod tests {
             tools: vec!["read".into(), "search".into(), "apply_patch".into()],
             approval_mode: "read-only".into(),
             max_model_turns: Some(40),
+            git: None,
             instructions: Vec::new(),
         };
 
