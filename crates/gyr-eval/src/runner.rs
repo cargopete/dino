@@ -19,6 +19,8 @@ use gyr_core::session::SessionId;
 use gyr_core::session::SessionMeta;
 use gyr_exec::ExecLimits;
 use gyr_exec::ExecTool;
+use gyr_exec::GithubLimits;
+use gyr_exec::GithubTool;
 use gyr_model::ModelSession;
 use gyr_protocol::ToolAction;
 use gyr_protocol::ToolCall;
@@ -81,6 +83,9 @@ pub struct ToolOptions {
     pub protected: Vec<std::path::PathBuf>,
     /// How many Cargo diagnostics the model is shown, in place of the default.
     pub max_diagnostics: Option<usize>,
+    /// Offer the read-only `github` tool. Off for evals, which must not depend
+    /// on the network.
+    pub github: bool,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -149,6 +154,7 @@ pub async fn run_case(
             &ToolOptions {
                 protected: case.protected.clone(),
                 max_diagnostics: variant.max_diagnostics,
+                github: false,
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -267,6 +273,11 @@ pub fn session_tools(
             ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
         ),
     ];
+    if options.github {
+        runtimes.push(Box::new(
+            GithubTool::new(workspace, GithubLimits::default()).map_err(setup)?,
+        ));
+    }
     if workspace.join("Cargo.toml").is_file() {
         // The gate is deliberately absent. RFC-0011 section 13.
         runtimes.push(Box::new(

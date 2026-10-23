@@ -359,6 +359,12 @@ pub fn describe_call(call: &ToolCall) -> String {
                 .map_or_else(String::new, |filter| format!(" {filter}"));
             format!("{command}{package}{filter}")
         }),
+        "github" => argument_string(&call.arguments, "command").map(|command| {
+            match call.arguments.get("number").and_then(Value::as_u64) {
+                Some(number) => format!("{command} #{number}"),
+                None => command,
+            }
+        }),
         _ => None,
     };
     match detail {

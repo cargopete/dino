@@ -5,7 +5,10 @@
 //! three could come to differ.
 
 mod exec;
+mod github;
 pub mod process;
 
 pub use crate::exec::ExecLimits;
 pub use crate::exec::ExecTool;
+pub use crate::github::GithubLimits;
+pub use crate::github::GithubTool;

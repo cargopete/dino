@@ -222,7 +222,14 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let profile = config::resolve_profile(args.model.as_deref())?;
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let sandbox = config::build_sandbox(args.sandbox, &workspace, &[])?;
-    let tools = tool_set(&workspace, sandbox, &gyr_eval::ToolOptions::default())?;
+    let tools = tool_set(
+        &workspace,
+        sandbox,
+        &gyr_eval::ToolOptions {
+            github: gyr_exec::GithubTool::available(),
+            ..gyr_eval::ToolOptions::default()
+        },
+    )?;
     let context = prompt_context(
         &workspace,
         ApprovalMode::Interactive,
@@ -306,6 +313,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         &gyr_eval::ToolOptions {
             protected: settings.protected.clone(),
             max_diagnostics: settings.max_diagnostics,
+            github: gyr_exec::GithubTool::available(),
         },
     )?;
     let definitions = tools.definitions();
