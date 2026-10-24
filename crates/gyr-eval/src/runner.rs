@@ -281,6 +281,21 @@ pub fn session_tools(
     sandbox: Arc<dyn Sandbox>,
     options: &ToolOptions,
 ) -> Result<ToolSet, EvalError> {
+    session_tools_with(workspace, sandbox, options, Vec::new())
+}
+
+/// As [`session_tools`], with runtimes built elsewhere, such as connected MCP
+/// servers, added after the built-in tools.
+///
+/// # Errors
+///
+/// As [`session_tools`], and when an extra runtime reuses a tool name.
+pub fn session_tools_with(
+    workspace: &Path,
+    sandbox: Arc<dyn Sandbox>,
+    options: &ToolOptions,
+    extra: Vec<Box<dyn ToolRuntime>>,
+) -> Result<ToolSet, EvalError> {
     let setup = |error: gyr_core::ToolError| EvalError::Setup(error.to_string());
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         file_tools(workspace, options, &sandbox)?,
@@ -328,6 +343,7 @@ pub fn session_tools(
             .map_err(setup)?,
         ));
     }
+    runtimes.extend(extra);
     ToolSet::new(runtimes).map_err(setup)
 }
 

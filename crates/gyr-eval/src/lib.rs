@@ -23,6 +23,7 @@ pub use crate::runner::Variant;
 pub use crate::runner::build_check;
 pub use crate::runner::run_case;
 pub use crate::runner::session_tools;
+pub use crate::runner::session_tools_with;
 
 #[derive(Debug, Error)]
 pub enum EvalError {

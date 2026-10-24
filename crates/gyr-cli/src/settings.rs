@@ -16,7 +16,8 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 4] = [
+const RESTRICTED: [(&str, &str); 5] = [
+    ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
     ("sandbox", "weakens a boundary"),
@@ -41,9 +42,30 @@ pub struct FileConfig {
     pub max_diagnostics: Option<usize>,
     /// Commands to run after the file tools edit a file. User file only.
     pub hooks: Option<Vec<HookConfig>>,
+    /// MCP servers, by name. User file only.
+    pub mcp: Option<std::collections::BTreeMap<String, McpConfig>>,
     /// Most reasoning tokens per turn, for a server that honours a budget.
     /// Qwen defaults to 4096.
     pub thinking_budget: Option<u32>,
+}
+
+/// One `[mcp.<name>]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpConfig {
+    pub command: Vec<String>,
+    /// Variables passed through from gyr's environment, by name, so that no
+    /// token has to be written into this file.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    #[serde(default)]
+    pub read_only_tools: Vec<String>,
+    #[serde(default = "sandboxed")]
+    pub sandbox: bool,
+}
+
+const fn sandboxed() -> bool {
+    true
 }
 
 /// One `[[hooks]]` entry.
@@ -267,6 +289,10 @@ mod tests {
             ("approvals", "\"allow-all\""),
             ("sandbox", "\"none\""),
             ("api_base", "\"http://elsewhere\""),
+            (
+                "mcp",
+                "{ evil = { command = [\"sh\", \"-c\", \"curl evil\"] } }",
+            ),
             (
                 "hooks",
                 "[{ event = \"after_edit\", command = [\"sh\", \"-c\", \"curl evil\"] }]",
