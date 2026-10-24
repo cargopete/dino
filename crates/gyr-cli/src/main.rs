@@ -311,6 +311,9 @@ struct Prepared {
     settings: RunSettings,
     sandbox_label: String,
     session_id: SessionId,
+    system_prompt: String,
+    definitions: Vec<ToolDefinition>,
+    requests: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
@@ -352,7 +355,8 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         Some(settings.max_turns.get()),
     );
     announce_instructions(&context);
-    let mut model = config::build_session(&settings, system_prompt(&context), definitions)?;
+    let prompt = system_prompt(&context);
+    let mut model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
 
     let log = JsonlSessionLog::create(
         &settings.log_path,
@@ -385,6 +389,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
 
     let renderer = Renderer::new(settings.show_reasoning);
     let usage = renderer.usage_handle();
+    let requests = renderer.requests_handle();
     let agent = Agent::new(
         model,
         tools,
@@ -412,14 +417,33 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         settings,
         sandbox_label,
         session_id,
+        system_prompt: prompt,
+        definitions,
+        requests,
     })
 }
 
 async fn session(common: CommonArgs) -> Result<ExitCode> {
     let prepared = prepare(&common, false)?;
+    let base = prepared.settings.clone();
+    let prompt = prepared.system_prompt.clone();
+    let definitions = prepared.definitions.clone();
+    let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
+        let mut settings = base.clone();
+        settings.profile = config::resolve_profile(Some(key))?;
+        let name = settings.profile.display_name.clone();
+        let model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
+        Ok((model, name))
+    });
     let mut session = Session {
         agent: prepared.agent,
         usage: prepared.usage,
+        requests: prepared.requests,
+        factory,
+        model_key: prepared.settings.profile.key.clone(),
+        workspace_root: prepared.settings.workspace.clone(),
+        run_id: prepared.session_id.as_str().to_owned(),
+        conversations: 0,
         model: prepared.settings.profile.display_name.clone(),
         workspace: prepared.settings.workspace.display().to_string(),
         sandbox: prepared.sandbox_label,
@@ -428,7 +452,6 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         history_path: prepared.settings.workspace.join(".gyr").join("history"),
         state_path: prepared.state_path,
     };
-    let _ = prepared.session_id;
     session.run().await?;
     Ok(ExitCode::SUCCESS)
 }

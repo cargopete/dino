@@ -73,6 +73,11 @@ enum Input {
     Submit(String),
     Help,
     Status,
+    Clear,
+    Diff,
+    Cost,
+    Model(Option<String>),
+    Resume(Option<String>),
     Log,
     Exit,
     Unknown(String),
@@ -102,10 +107,18 @@ fn parse(line: &str) -> Input {
         return submission();
     }
     // A known command word wins over whatever follows it, as in any shell.
-    // None of these take arguments, so trailing words are ignored.
+    let argument = rest[word.len()..]
+        .split_whitespace()
+        .next()
+        .map(str::to_owned);
     match word {
         "help" | "h" | "?" => Input::Help,
         "status" => Input::Status,
+        "clear" => Input::Clear,
+        "diff" => Input::Diff,
+        "cost" => Input::Cost,
+        "model" => Input::Model(argument),
+        "resume" => Input::Resume(argument),
         "log" => Input::Log,
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
@@ -114,10 +127,20 @@ fn parse(line: &str) -> Input {
     }
 }
 
+/// Builds a fresh model session for a profile key, with its display name.
+pub type SessionFactory<S> = Box<dyn Fn(&str) -> Result<(S, String)>>;
+
 /// Everything a session needs that does not change between submissions.
 pub struct Session<S> {
     pub agent: Agent<S, ToolSet>,
     pub usage: Arc<Mutex<TokenUsage>>,
+    pub requests: Arc<std::sync::atomic::AtomicU64>,
+    pub factory: SessionFactory<S>,
+    pub model_key: String,
+    pub workspace_root: std::path::PathBuf,
+    pub run_id: String,
+    /// Conversations started in this process after the first, for state names.
+    pub conversations: u32,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -181,6 +204,16 @@ where
             Input::Exit => return Ok(true),
             Input::Help => print!("{}", help()),
             Input::Status => println!("{}", self.banner()),
+            Input::Clear => {
+                let key = self.model_key.clone();
+                self.start_conversation(&key);
+            }
+            Input::Model(None) => print!("{}", self.models()),
+            Input::Model(Some(key)) => self.start_conversation(&key),
+            Input::Resume(None) => print!("{}", self.saved()),
+            Input::Resume(Some(id)) => self.resume(&id),
+            Input::Diff => print!("{}", diff(&self.workspace_root)),
+            Input::Cost => println!("{}", self.cost()),
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Unknown(name) => println!(
                 "{}",
@@ -234,6 +267,127 @@ where
         }
     }
 
+    /// A new, empty conversation on `key`. The previous one stays saved and
+    /// can be resumed by its id.
+    fn start_conversation(&mut self, key: &str) {
+        match (self.factory)(key) {
+            Ok((session, name)) => {
+                self.agent.replace_session(session);
+                self.conversations += 1;
+                let id = format!("{}-{}", self.run_id, self.conversations);
+                // An empty conversation is never written, so there may be nothing to name.
+                let previous = self.state_path.is_file().then(|| self.current_id());
+                self.state_path = gyr_core::resume::state_path(&self.workspace_root, &id);
+                key.clone_into(&mut self.model_key);
+                self.model = name;
+                let note = previous.map_or_else(String::new, |previous| {
+                    format!(" The last one is /resume {previous}.")
+                });
+                println!(
+                    "{}",
+                    style::paint(
+                        FAINT,
+                        &format!("  new conversation on {}.{note}", self.model)
+                    )
+                );
+            }
+            Err(error) => println!("{}", style::paint(style::WARN, &format!("  {error}"))),
+        }
+    }
+
+    fn resume(&mut self, id: &str) {
+        let path = gyr_core::resume::state_path(&self.workspace_root, id);
+        let restored = gyr_core::resume::load(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|state| {
+                let (mut session, name) = (self.factory)(&state.model_key)?;
+                session.restore_state(&state)?;
+                Ok((session, name, state.model_key))
+            });
+        match restored {
+            Ok((session, name, key)) => {
+                self.agent.replace_session(session);
+                self.state_path = path;
+                self.model_key = key;
+                self.model = name;
+                println!(
+                    "{}",
+                    style::paint(FAINT, &format!("  resumed {id} on {}", self.model))
+                );
+            }
+            Err(error) => println!("{}", style::paint(style::WARN, &format!("  {error}"))),
+        }
+    }
+
+    fn current_id(&self) -> String {
+        self.state_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".state.json"))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn models(&self) -> String {
+        let mut block = String::new();
+        for profile in gyr_model::builtin_profiles() {
+            let marker = if profile.key == self.model_key {
+                "›"
+            } else {
+                " "
+            };
+            let _ = writeln!(
+                &mut block,
+                "  {marker} {}  {}",
+                style::paint(SLATE, &format!("{:<24}", profile.key)),
+                style::paint(MUTED, &profile.display_name)
+            );
+        }
+        block.push_str(&style::paint(
+            FAINT,
+            "  /model <key> starts a new conversation on that model.\n",
+        ));
+        block
+    }
+
+    fn saved(&self) -> String {
+        let saved = match gyr_core::resume::recent(&self.workspace_root) {
+            Ok(saved) if saved.is_empty() => return "  nothing saved yet\n".to_owned(),
+            Ok(saved) => saved,
+            Err(error) => return format!("  {error}\n"),
+        };
+        let current = self.current_id();
+        let now = std::time::SystemTime::now();
+        let mut block = String::new();
+        for item in saved.iter().take(10) {
+            let age = now
+                .duration_since(item.modified)
+                .map_or_else(|_| "now".to_owned(), |age| describe_age(age.as_secs()));
+            let model = gyr_core::resume::load(&item.path)
+                .map_or_else(|_| "?".to_owned(), |state| state.model_key);
+            let marker = if item.id == current { "›" } else { " " };
+            let _ = writeln!(
+                &mut block,
+                "  {marker} {}  {}",
+                style::paint(SLATE, &format!("{:<22}", item.id)),
+                style::paint(MUTED, &format!("{age:>8} ago  {model}"))
+            );
+        }
+        block
+    }
+
+    fn cost(&self) -> String {
+        let usage = self
+            .usage
+            .lock()
+            .map_or_else(|_| TokenUsage::default(), |total| *total);
+        let requests = self.requests.load(std::sync::atomic::Ordering::Relaxed);
+        status_block(&[
+            ("requests", requests.to_string()),
+            ("tokens", describe_usage(usage)),
+        ])
+    }
+
     fn banner(&self) -> String {
         let usage = self
             .usage
@@ -251,10 +405,68 @@ where
     }
 }
 
+fn describe_age(seconds: u64) -> String {
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..86_400 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// `git diff --stat` against HEAD, and how many files git does not track.
+fn diff(workspace: &std::path::Path) -> String {
+    let git = |arguments: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(arguments)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let Some(stat) = git(&["diff", "--stat", "HEAD"]) else {
+        return "  not a git repository, or nothing committed yet\n".to_owned();
+    };
+    let untracked = git(&["status", "--porcelain"])
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with("??"))
+        .count();
+    let mut block = if stat.trim().is_empty() {
+        "  no changes to tracked files\n".to_owned()
+    } else {
+        stat.lines().fold(String::new(), |mut block, line| {
+            let _ = writeln!(&mut block, "  {line}");
+            block
+        })
+    };
+    if untracked > 0 {
+        let _ = writeln!(&mut block, "  {untracked} untracked file(s)");
+    }
+    block
+}
+
 fn help() -> String {
     let rows = [
         ("/help", "these commands"),
         ("/status", "model, workspace, containment, approvals, log"),
+        (
+            "/clear",
+            "start a new conversation; the old one stays resumable",
+        ),
+        (
+            "/model",
+            "list models; /model <key> switches, in a new conversation",
+        ),
+        (
+            "/resume",
+            "list saved conversations; /resume <id> continues one",
+        ),
+        ("/diff", "what has changed in the working tree"),
+        ("/cost", "requests and tokens so far"),
         ("/log", "the path of this session's log"),
         ("/exit", "leave; Ctrl-D does the same"),
     ];
@@ -309,6 +521,23 @@ mod tests {
         assert_eq!(parse("/exit"), Input::Exit);
         assert_eq!(parse("/q"), Input::Exit);
         assert_eq!(parse("/nonsense"), Input::Unknown("nonsense".into()));
+    }
+
+    #[test]
+    fn session_commands_take_at_most_one_word() {
+        assert_eq!(parse("/clear"), Input::Clear);
+        assert_eq!(parse("/diff"), Input::Diff);
+        assert_eq!(parse("/cost"), Input::Cost);
+        assert_eq!(parse("/model"), Input::Model(None));
+        assert_eq!(
+            parse("/model  claude-opus "),
+            Input::Model(Some("claude-opus".into()))
+        );
+        assert_eq!(parse("/resume"), Input::Resume(None));
+        assert_eq!(
+            parse("/resume 1a16-2"),
+            Input::Resume(Some("1a16-2".into()))
+        );
     }
 
     #[test]

@@ -44,6 +44,8 @@ pub struct Renderer {
     /// number the turn summary prints, rather than keeping a second tally that
     /// could disagree with it.
     usage: Arc<Mutex<TokenUsage>>,
+    /// Model responses, which is what a request-metered plan counts.
+    requests: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +62,14 @@ impl Renderer {
             show_reasoning,
             stream: Stream::Idle,
             usage: Arc::new(Mutex::new(TokenUsage::default())),
+            requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// A handle on the number of model responses, for `/cost`.
+    #[must_use]
+    pub fn requests_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.requests)
     }
 
     /// A handle on the running total, for `/status`.
@@ -99,6 +108,8 @@ impl Renderer {
                 self.stream_delta(Stream::Reasoning, text)
             }
             ModelEvent::Usage { usage } => {
+                self.requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Ok(mut total) = self.usage.lock() {
                     total.input_tokens += usage.input_tokens;
                     total.cached_input_tokens += usage.cached_input_tokens;

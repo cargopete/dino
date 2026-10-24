@@ -96,28 +96,49 @@ pub fn load(path: &Path) -> Result<SessionState, SinkError> {
 ///
 /// Returns [`SinkError`] when the sessions directory exists but cannot be read.
 pub fn most_recent(workspace: &Path) -> Result<Option<(String, PathBuf)>, SinkError> {
+    Ok(recent(workspace)?
+        .into_iter()
+        .next()
+        .map(|saved| (saved.id, saved.path)))
+}
+
+/// One saved conversation in a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    pub id: String,
+    pub path: PathBuf,
+    pub modified: std::time::SystemTime,
+}
+
+/// Every saved conversation in the workspace, newest first.
+///
+/// # Errors
+///
+/// Returns [`SinkError`] when the sessions directory exists but cannot be read.
+pub fn recent(workspace: &Path) -> Result<Vec<Saved>, SinkError> {
     let directory = workspace.join(".gyr").join("sessions");
     if !directory.is_dir() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let entries = std::fs::read_dir(&directory)
         .map_err(|error| SinkError::new(format!("cannot read {}: {error}", directory.display())))?;
 
-    let mut best: Option<(std::time::SystemTime, String, PathBuf)> = None;
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some(id) = name.strip_suffix(".state.json") else {
-            continue;
-        };
-        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(when, _, _)| modified > *when) {
-            best = Some((modified, id.to_owned(), path));
-        }
-    }
-    Ok(best.map(|(_, id, path)| (id, path)))
+    let mut saved: Vec<Saved> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".state.json")?
+                .to_owned();
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()?;
+            Some(Saved { id, path, modified })
+        })
+        .collect();
+    saved.sort_by_key(|item| std::cmp::Reverse(item.modified));
+    Ok(saved)
 }
