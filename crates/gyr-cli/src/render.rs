@@ -176,7 +176,7 @@ impl EventSink for Renderer {
             // The person's own words, in the person's colour.
             AgentEvent::Submitted { text } => {
                 self.break_stream()?;
-                write_out(&style::paint(RUST, &format!("\n› {text}\n")))
+                submitted(text)
             }
             AgentEvent::Model { event, .. } => self.model_event(event),
             AgentEvent::ToolDecided {
@@ -418,6 +418,19 @@ fn argument_string(arguments: &Value, key: &str) -> Option<String> {
 
 fn argument_number(arguments: &Value, key: &str) -> Option<u64> {
     arguments.get(key).and_then(Value::as_u64)
+}
+
+/// The first line of a submission and how many follow. Attachments, summaries
+/// and pastes can run to pages; the log keeps them whole.
+fn submitted(text: &str) -> Result<(), SinkError> {
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or_default();
+    let more = lines.count();
+    write_out(&style::paint(RUST, &format!("\n› {first}\n")))?;
+    if more > 0 {
+        write_out(&style::paint(FAINT, &format!("  (+{more} more lines)\n")))?;
+    }
+    Ok(())
 }
 
 /// The checklist itself, rather than a one-line summary of the call.
