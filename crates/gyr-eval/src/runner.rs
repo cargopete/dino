@@ -91,6 +91,8 @@ pub struct ToolOptions {
     pub github: bool,
     /// Offer `web_fetch`. Off for evals, for the same reason.
     pub web: bool,
+    /// After-edit hooks around the file tools. None in evals.
+    pub hooks: Vec<gyr_exec::Hook>,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -161,6 +163,7 @@ pub async fn run_case(
                 max_diagnostics: variant.max_diagnostics,
                 github: false,
                 web: false,
+                hooks: Vec::new(),
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -272,11 +275,7 @@ pub fn session_tools(
 ) -> Result<ToolSet, EvalError> {
     let setup = |error: gyr_core::ToolError| EvalError::Setup(error.to_string());
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
-        Box::new(
-            WorkspaceTools::new(workspace, ToolLimits::default())
-                .map_err(setup)?
-                .protecting(options.protected.clone()),
-        ),
+        file_tools(workspace, options, &sandbox)?,
         Box::new(gyr_core::blocker::BlockerTool),
         Box::new(
             ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
@@ -313,6 +312,26 @@ pub fn session_tools(
         ));
     }
     ToolSet::new(runtimes).map_err(setup)
+}
+
+/// The file tools, wrapped in the user's after-edit hooks when there are any.
+fn file_tools(
+    workspace: &Path,
+    options: &ToolOptions,
+    sandbox: &Arc<dyn Sandbox>,
+) -> Result<Box<dyn ToolRuntime>, EvalError> {
+    let tools = WorkspaceTools::new(workspace, ToolLimits::default())
+        .map_err(|error| EvalError::Setup(error.to_string()))?
+        .protecting(options.protected.clone());
+    if options.hooks.is_empty() {
+        return Ok(Box::new(tools));
+    }
+    Ok(Box::new(gyr_exec::AfterEdit::new(
+        Box::new(tools),
+        options.hooks.clone(),
+        workspace,
+        Arc::clone(sandbox),
+    )))
 }
 
 /// An agent for one unattended case: everything allowed, inside the sandbox.
