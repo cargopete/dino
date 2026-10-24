@@ -98,29 +98,37 @@ impl OpenAiSession {
     }
 
     fn request_body(&self, input: TurnInput) -> Result<Value, ModelError> {
-        let input = match input {
-            TurnInput::User { content } => json!([{
-                "role": "user",
-                "content": [{"type": "input_text", "text": content}],
-            }]),
-            TurnInput::ToolResults { results } => Value::Array(
-                results
-                    .into_iter()
-                    .map(|result| {
-                        let output = if result.output.is_error {
-                            format!("Tool error: {}", result.output.content)
-                        } else {
-                            result.output.content
-                        };
-                        json!({
-                            "type": "function_call_output",
-                            "call_id": result.call_id,
-                            "output": output,
+        let input =
+            match input {
+                TurnInput::User { content } => json!([{
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": content}],
+                }]),
+                TurnInput::UserWithImages { content, images } => {
+                    let mut parts = vec![json!({"type": "input_text", "text": content})];
+                    parts.extend(images.iter().map(
+                        |image| json!({"type": "input_image", "image_url": image.data_url()}),
+                    ));
+                    json!([{"role": "user", "content": parts}])
+                }
+                TurnInput::ToolResults { results } => Value::Array(
+                    results
+                        .into_iter()
+                        .map(|result| {
+                            let output = if result.output.is_error {
+                                format!("Tool error: {}", result.output.content)
+                            } else {
+                                result.output.content
+                            };
+                            json!({
+                                "type": "function_call_output",
+                                "call_id": result.call_id,
+                                "output": output,
+                            })
                         })
-                    })
-                    .collect(),
-            ),
-        };
+                        .collect(),
+                ),
+            };
         let previous_response_id = self
             .previous_response_id
             .lock()
