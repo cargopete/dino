@@ -91,6 +91,8 @@ pub struct ToolOptions {
     pub github: bool,
     /// Offer `web_fetch`. Off for evals, for the same reason.
     pub web: bool,
+    /// Skills offered through the `skill` tool. None in evals.
+    pub skills: Vec<gyr_core::skills::Skill>,
     /// Where `remember` writes. None in evals, which keep no memory.
     pub memory: Option<gyr_core::memory::MemoryFiles>,
     /// After-edit hooks around the file tools. None in evals.
@@ -167,6 +169,7 @@ pub async fn run_case(
                 web: false,
                 hooks: Vec::new(),
                 memory: None,
+                skills: Vec::new(),
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -184,6 +187,7 @@ pub async fn run_case(
         // None, so a user's own instructions cannot move a measurement.
         instructions: Vec::new(),
         memory: Vec::new(),
+        skills: Vec::new(),
     };
     let session = build_session(system_prompt(&context), definitions)?;
 
@@ -290,6 +294,11 @@ pub fn session_tools(
                 .map_err(setup)?,
         ),
     ];
+    if !options.skills.is_empty() {
+        runtimes.push(Box::new(gyr_core::skills::SkillTool::new(
+            options.skills.clone(),
+        )));
+    }
     if let Some(files) = &options.memory {
         runtimes.push(Box::new(gyr_core::memory::MemoryTool::new(files.clone())));
     }

@@ -10,6 +10,7 @@ use std::path::Path;
 /// Hard byte caps for injected workspace facts, per RFC-0001 section 9.
 const MAX_ROOT_BYTES: usize = 256;
 const MAX_TOOL_LIST_BYTES: usize = 1_024;
+const MAX_SKILL_LIST_BYTES: usize = 8 * 1_024;
 /// Most bytes of one instructions file that reach the prompt.
 pub const MAX_INSTRUCTIONS_BYTES: usize = 16 * 1_024;
 
@@ -100,6 +101,7 @@ pub struct PromptContext {
     pub git: Option<crate::git::GitSnapshot>,
     pub instructions: Vec<Instructions>,
     pub memory: Vec<Instructions>,
+    pub skills: Vec<crate::skills::Skill>,
 }
 
 /// One instructions file, as it will appear in the prompt.
@@ -213,6 +215,17 @@ pub fn system_prompt(context: &PromptContext) -> String {
             }
         }
     }
+    if !context.skills.is_empty() {
+        prompt.push_str(
+            "\n\nSkills are available. When one fits the task, load it with the `skill`\n\
+             tool before starting, and follow it:\n",
+        );
+        let mut listing = String::new();
+        for skill in &context.skills {
+            let _ = writeln!(&mut listing, "- {}: {}", skill.name, skill.description);
+        }
+        prompt.push_str(&cap(&listing, MAX_SKILL_LIST_BYTES));
+    }
     if !context.memory.is_empty() {
         prompt.push_str(
             "\n\nNotes kept with `remember` in earlier sessions follow. They may be out of\n\
@@ -251,6 +264,7 @@ mod tests {
             git: None,
             instructions: Vec::new(),
             memory: Vec::new(),
+            skills: Vec::new(),
         };
 
         let prompt = system_prompt(&context);
@@ -298,6 +312,7 @@ mod tests {
                 truncated: true,
             }],
             memory: Vec::new(),
+            skills: Vec::new(),
         };
 
         let prompt = system_prompt(&context);
@@ -319,6 +334,7 @@ mod tests {
             git: None,
             instructions: Vec::new(),
             memory: Vec::new(),
+            skills: Vec::new(),
         };
 
         let prompt = system_prompt(&context);
