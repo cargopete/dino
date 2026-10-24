@@ -493,10 +493,11 @@ where
     /// Runs one submission, cancellable on its own for its own lifetime.
     async fn submit(&mut self, text: String) {
         let text = self.with_attachments(text).await;
+        // The person's words first, so the transcript shows what they typed.
         let text = match self.carried.take() {
             Some(summary) => format!(
-                "Summary of this session so far, written before it was compacted:\n\n\
-                 {summary}\n\n---\n\n{text}"
+                "{text}\n\n---\n\nSummary of this session so far, written before it was \
+                 compacted:\n\n{summary}"
             ),
             None => text,
         };
