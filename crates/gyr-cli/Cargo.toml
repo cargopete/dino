@@ -18,6 +18,7 @@ name = "gyr-confine"
 path = "src/bin/gyr-confine.rs"
 
 [dependencies]
+base64.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 gyr-core.workspace = true

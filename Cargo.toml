@@ -24,6 +24,7 @@ anyhow = "1.0.100"
 async-stream = "0.3.6"
 clap = { version = "4.5.51", features = ["derive"] }
 futures-core = "0.3.31"
+base64 = "0.22.1"
 futures-util = "0.3.31"
 gyr-core = { path = "crates/gyr-core" }
 gyr-eval = { path = "crates/gyr-eval" }

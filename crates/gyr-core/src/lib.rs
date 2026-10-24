@@ -295,6 +295,8 @@ pub struct Agent<S, T> {
     // spent.
     turns_started: u32,
     sent_back: bool,
+    /// Images for the next submission's first turn.
+    pending_images: Vec<gyr_protocol::Image>,
 }
 
 impl<S, T> Agent<S, T>
@@ -316,6 +318,7 @@ where
             finish_check: None,
             turns_started: 0,
             sent_back: false,
+            pending_images: Vec::new(),
         }
     }
 
@@ -341,6 +344,21 @@ where
 
     pub fn session(&self) -> &S {
         &self.session
+    }
+
+    /// The first turn of a submission, carrying any attached images.
+    fn first_input(&mut self, content: String) -> TurnInput {
+        let images = std::mem::take(&mut self.pending_images);
+        if images.is_empty() {
+            TurnInput::User { content }
+        } else {
+            TurnInput::UserWithImages { content, images }
+        }
+    }
+
+    /// Sends these images with the next submission, after its text.
+    pub fn attach_images(&mut self, images: Vec<gyr_protocol::Image>) {
+        self.pending_images = images;
     }
 
     /// Swaps in another model session, for a new conversation or another
@@ -411,9 +429,7 @@ where
             },
             &mut events,
         )?;
-        let mut input = TurnInput::User {
-            content: user_message,
-        };
+        let mut input = self.first_input(user_message);
         let mut text = String::new();
         let mut seen_call_ids = HashSet::new();
         // Asked for before the window is read, because a self-hosted server

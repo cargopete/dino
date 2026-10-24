@@ -109,6 +109,48 @@ fn complete_at(line: &str, pos: usize, root: &std::path::Path) -> (usize, Vec<St
     (start, candidates)
 }
 
+/// Extensions read as images rather than as text, with their media types.
+const IMAGE_TYPES: [(&str, &str); 5] = [
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+];
+
+/// The most an attached image may weigh; providers refuse more.
+const MAX_IMAGE_BYTES: u64 = 5 * 1_024 * 1_024;
+
+fn image_type(path: &std::path::Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    IMAGE_TYPES
+        .iter()
+        .find(|(known, _)| *known == extension)
+        .map(|(_, media)| *media)
+}
+
+/// Images named as `@path`, which unlike text may sit outside the workspace:
+/// a screenshot is usually on the desktop, and the person named it.
+fn image_attachments(text: &str, root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    for word in text.split_whitespace() {
+        let Some(path) = word.strip_prefix('@') else {
+            continue;
+        };
+        let path = path.trim_end_matches([',', ';', ':', ')', '!', '?', '"', '\'']);
+        let resolved = match (path.strip_prefix("~/"), &home) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ if path.starts_with('/') => std::path::PathBuf::from(path),
+            _ => root.join(path),
+        };
+        if image_type(&resolved).is_some() && resolved.is_file() && !found.contains(&resolved) {
+            found.push(resolved);
+        }
+    }
+    found
+}
+
 /// Workspace-relative paths named as `@path` in `text` that exist, in order and
 /// once each. Anything else with an `@` in it, like an address, is left alone.
 fn attachments(text: &str, root: &std::path::Path) -> Vec<String> {
@@ -121,6 +163,9 @@ fn attachments(text: &str, root: &std::path::Path) -> Vec<String> {
         let path = path.trim_end_matches('/');
         let escapes = path.starts_with('/') || path.split('/').any(|part| part == "..");
         if path.is_empty() || escapes || found.iter().any(|seen| seen == path) {
+            continue;
+        }
+        if image_type(std::path::Path::new(path)).is_some() {
             continue;
         }
         if root.join(path).exists() {
@@ -339,7 +384,8 @@ where
     /// The text with each `@path` it names appended, read by the workspace's
     /// own `read` and `list` tools so the model sees exactly what those return,
     /// and the read counts as one before an edit.
-    async fn with_attachments(&self, text: String) -> String {
+    async fn with_attachments(&mut self, text: String) -> String {
+        let text = self.attach_images(text);
         let paths = attachments(&text, &self.workspace_root);
         if paths.is_empty() {
             return text;
@@ -379,6 +425,64 @@ where
                 ),
             }
         }
+        message
+    }
+
+    /// Hands any `@image` to the agent for the next turn, noting each in the
+    /// text, or says why it could not be sent.
+    fn attach_images(&mut self, text: String) -> String {
+        let paths = image_attachments(&text, &self.workspace_root);
+        if paths.is_empty() {
+            return text;
+        }
+        if !self.agent.session().profile().image_input {
+            println!(
+                "{}",
+                style::paint(
+                    style::WARN,
+                    &format!(
+                        "  {} does not take images, so none were attached",
+                        self.model
+                    )
+                )
+            );
+            return text;
+        }
+        let mut message = text;
+        let mut images = Vec::new();
+        for path in paths {
+            let shown = path.display();
+            let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
+            if size > MAX_IMAGE_BYTES {
+                println!(
+                    "{}",
+                    style::paint(
+                        style::WARN,
+                        &format!("  {shown} is over 5 MiB; not attached")
+                    )
+                );
+                continue;
+            }
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    use base64::Engine as _;
+                    images.push(gyr_protocol::Image {
+                        media_type: image_type(&path).unwrap_or("image/png").to_owned(),
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    });
+                    let _ = write!(&mut message, "\n\n[image attached: {shown}]");
+                    println!(
+                        "{}",
+                        style::paint(FAINT, &format!("  attached image {shown} ({size} bytes)"))
+                    );
+                }
+                Err(error) => println!(
+                    "{}",
+                    style::paint(style::WARN, &format!("  could not read {shown}: {error}"))
+                ),
+            }
+        }
+        self.agent.attach_images(images);
         message
     }
 
@@ -860,6 +964,29 @@ mod tests {
         );
 
         assert_eq!(found, ["src/lib.rs", "Cargo.toml", "src/bin"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn image_words_resolve_inside_or_outside_the_workspace() {
+        let root = scratch("images");
+        std::fs::write(root.join("shot.png"), b"\x89PNG").unwrap();
+        let outside = std::env::temp_dir().join(format!("gyr-outside-{}.jpg", std::process::id()));
+        std::fs::write(&outside, b"\xff\xd8").unwrap();
+
+        let text = format!(
+            "look at @shot.png and @{} but not @missing.png or @src/lib.rs",
+            outside.display()
+        );
+        let found = image_attachments(&text, &root);
+
+        assert_eq!(found, [root.join("shot.png"), outside.clone()]);
+        assert!(
+            !attachments(&text, &root)
+                .iter()
+                .any(|path| path == "shot.png")
+        );
+        let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&root);
     }
 

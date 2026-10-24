@@ -114,6 +114,23 @@ impl AnthropicSession {
                 role: Role::User,
                 content: vec![json!({"type": "text", "text": content})],
             },
+            TurnInput::UserWithImages { content, images } => AnthropicMessage {
+                role: Role::User,
+                content: images
+                    .into_iter()
+                    .map(|image| {
+                        json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image.media_type,
+                                "data": image.data,
+                            },
+                        })
+                    })
+                    .chain(std::iter::once(json!({"type": "text", "text": content})))
+                    .collect(),
+            },
             TurnInput::ToolResults { results } => AnthropicMessage {
                 role: Role::User,
                 content: results

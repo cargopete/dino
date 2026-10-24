@@ -141,8 +141,32 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnInput {
-    User { content: String },
-    ToolResults { results: Vec<ToolResult> },
+    User {
+        content: String,
+    },
+    /// A person's message with images, for a profile that accepts them.
+    UserWithImages {
+        content: String,
+        images: Vec<Image>,
+    },
+    ToolResults {
+        results: Vec<ToolResult>,
+    },
+}
+
+/// An image a person attached, encoded for the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    pub media_type: String,
+    /// Base64, without a data-URL prefix.
+    pub data: String,
+}
+
+impl Image {
+    #[must_use]
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

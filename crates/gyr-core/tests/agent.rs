@@ -863,7 +863,7 @@ async fn a_stream_that_keeps_breaking_fails_the_run() {
 fn last_result(input: &TurnInput) -> String {
     match input {
         TurnInput::ToolResults { results } => results.last().unwrap().output.content.clone(),
-        TurnInput::User { content } => content.clone(),
+        TurnInput::User { content } | TurnInput::UserWithImages { content, .. } => content.clone(),
     }
 }
 

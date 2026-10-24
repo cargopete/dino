@@ -140,6 +140,11 @@ impl QwenSession {
     fn pending_messages(input: TurnInput) -> Vec<ChatMessage> {
         match input {
             TurnInput::User { content } => vec![ChatMessage::user(content)],
+            TurnInput::UserWithImages { content, images } => {
+                let mut message = ChatMessage::user(content);
+                message.images = images.iter().map(gyr_protocol::Image::data_url).collect();
+                vec![message]
+            }
             TurnInput::ToolResults { results } => results
                 .into_iter()
                 .map(|result| {
@@ -231,7 +236,7 @@ impl QwenSession {
 
         let mut body = serde_json::Map::new();
         body.insert("model".into(), json!(self.config.profile.provider_model));
-        body.insert("messages".into(), json!(messages));
+        body.insert("messages".into(), with_image_parts(json!(messages)));
         body.insert("stream".into(), json!(true));
         body.insert("stream_options".into(), json!({ "include_usage": true }));
 
@@ -523,6 +528,9 @@ struct ChatMessage {
     content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
+    /// Data URLs of images a person attached, sent as content parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<ChatToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -543,6 +551,7 @@ impl ChatMessage {
             role,
             content: Some(content),
             reasoning_content: None,
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -553,10 +562,35 @@ impl ChatMessage {
             role: Role::Tool,
             content: Some(content),
             reasoning_content: None,
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id),
         }
     }
+}
+
+/// Rewrites each message carrying `images` into OpenAI-style content parts,
+/// the shape vLLM and `DashScope` both read.
+fn with_image_parts(mut messages: Value) -> Value {
+    for message in messages.as_array_mut().into_iter().flatten() {
+        let Some(fields) = message.as_object_mut() else {
+            continue;
+        };
+        let Some(Value::Array(images)) = fields.remove("images") else {
+            continue;
+        };
+        let text = fields
+            .remove("content")
+            .unwrap_or(Value::String(String::new()));
+        let mut parts = vec![json!({"type": "text", "text": text})];
+        parts.extend(
+            images
+                .into_iter()
+                .map(|url| json!({"type": "image_url", "image_url": {"url": url}})),
+        );
+        fields.insert("content".into(), Value::Array(parts));
+    }
+    messages
 }
 
 /// Hollows the long arguments of calls whose results are being elided.
@@ -753,6 +787,7 @@ impl QwenStreamParser {
             reasoning_content: (!self.reasoning.is_empty()).then(|| self.reasoning.clone()),
             tool_calls: wire_calls,
             tool_call_id: None,
+            images: Vec::new(),
         };
         Ok((events, assistant))
     }
@@ -880,6 +915,7 @@ mod tests {
                     },
                 }],
                 tool_call_id: None,
+                images: Vec::new(),
             },
             ChatMessage {
                 role: Role::Tool,
@@ -887,6 +923,7 @@ mod tests {
                 reasoning_content: None,
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call-1".into()),
+                images: Vec::new(),
             },
         ]);
 
@@ -917,6 +954,7 @@ mod tests {
                     reasoning_content: None,
                     tool_calls: Vec::new(),
                     tool_call_id: Some(format!("call-{index}")),
+                    images: Vec::new(),
                 });
             }
             // An assistant turn between them must survive untouched.
@@ -964,6 +1002,7 @@ mod tests {
                 },
             }],
             tool_call_id: None,
+            images: Vec::new(),
         };
         let result = |id: &str| ChatMessage::tool(id.into(), "wrote src/lib.rs".into());
         session.history.lock().unwrap().extend([
@@ -1156,6 +1195,31 @@ mod tests {
     }
 
     #[test]
+    fn images_go_out_as_content_parts_after_the_text() {
+        let profile = crate::builtin_profile("qwen3.7-plus").unwrap();
+        let session =
+            QwenSession::new(QwenConfig::new("http://127.0.0.1:8000/v1", profile)).unwrap();
+        let pending = QwenSession::pending_messages(TurnInput::UserWithImages {
+            content: "what is on screen?".into(),
+            images: vec![gyr_protocol::Image {
+                media_type: "image/png".into(),
+                data: "iVBORw0K".into(),
+            }],
+        });
+
+        let body = session.request_body(&pending).unwrap();
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": "what is on screen?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0K"}}
+            ])
+        );
+        assert!(body["messages"][0].get("images").is_none());
+    }
+
+    #[test]
     fn dashscope_takes_thinking_controls_at_the_top_level_and_no_vllm_extensions() {
         let profile = crate::builtin_profile("qwen3.7-plus").unwrap();
         let mut config = QwenConfig::new("https://coding-intl.dashscope.aliyuncs.com/v1", profile);
@@ -1168,6 +1232,7 @@ mod tests {
             reasoning_content: Some("the bug is in wrap".into()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            images: Vec::new(),
         });
         let body = session.request_body(&[]).unwrap();
 
@@ -1200,6 +1265,7 @@ mod tests {
                 reasoning_content: Some("the bug is in wrap".into()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                images: Vec::new(),
             });
             let body = session.request_body(&[]).unwrap();
             let assistant = body["messages"]
