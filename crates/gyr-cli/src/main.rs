@@ -258,6 +258,53 @@ fn tool_set(
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
+/// What must be true before the model may end its turn: the user's
+/// before-end-turn hooks, and for a run nobody watches, a clean build.
+fn finish_checks(
+    settings: &RunSettings,
+    sandbox: &Arc<dyn Sandbox>,
+    unattended: bool,
+) -> Result<Vec<Box<dyn gyr_core::FinishCheck>>> {
+    let mut checks: Vec<Box<dyn gyr_core::FinishCheck>> = Vec::new();
+    if !settings.end_turn_hooks.is_empty() {
+        checks.push(Box::new(gyr_exec::EndTurnHooks::new(
+            settings.end_turn_hooks.clone(),
+            &settings.workspace,
+            Arc::clone(sandbox),
+        )));
+    }
+    if unattended
+        && let Some(build) = gyr_eval::build_check(&settings.workspace, Arc::clone(sandbox))?
+    {
+        checks.push(Box::new(build));
+    }
+    Ok(checks)
+}
+
+/// What each session-start hook printed, as instructions under its command.
+fn start_hook_output(
+    settings: &RunSettings,
+    sandbox: &Arc<dyn Sandbox>,
+) -> Vec<gyr_core::prompt::Instructions> {
+    if settings.start_hooks.is_empty() {
+        return Vec::new();
+    }
+    let said = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(gyr_exec::run_start_hooks(
+            &settings.start_hooks,
+            &settings.workspace,
+            sandbox,
+        ))
+    });
+    said.into_iter()
+        .map(|(command, text)| gyr_core::prompt::Instructions {
+            source: format!("session_start: {command}"),
+            text,
+            truncated: false,
+        })
+        .collect()
+}
+
 /// Everything a person's session can call, MCP servers included.
 fn session_tool_set(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Result<ToolSet> {
     let mcp = connect_mcp(&settings.mcp, &settings.workspace, sandbox);
@@ -438,12 +485,15 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
     }
     let tools = session_tool_set(&settings, &sandbox)?;
     let definitions = tools.definitions();
-    let context = prompt_context(
+    let mut context = prompt_context(
         &settings.workspace,
         settings.mode,
         &definitions,
         Some(settings.max_turns.get()),
     );
+    context
+        .instructions
+        .extend(start_hook_output(&settings, &sandbox));
     announce_instructions(&context);
     let prompt = system_prompt(&context);
     let mut model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
@@ -494,14 +544,11 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         Arc::clone(&planning),
     ))
     .with_sink((renderer, log));
-    let check = if unattended {
-        gyr_eval::build_check(&settings.workspace, Arc::clone(&sandbox))?
+    let checks = finish_checks(&settings, &sandbox, unattended)?;
+    let agent = if checks.is_empty() {
+        agent
     } else {
-        None
-    };
-    let agent = match check {
-        Some(check) => agent.with_finish_check(check),
-        None => agent,
+        agent.with_finish_check(gyr_core::FirstUnfinished::new(checks))
     };
 
     Ok(Prepared {
@@ -641,8 +688,27 @@ struct Resolved {
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
     hooks: (Vec<gyr_exec::Hook>, Source),
+    end_turn_hooks: Vec<gyr_exec::Hook>,
+    start_hooks: Vec<gyr_exec::Hook>,
     mcp: Vec<gyr_exec::McpServer>,
     layers: Layers,
+}
+
+/// The user file's hooks for one event. A project file cannot set any.
+fn hooks_for(layers: &Layers, event: settings::HookEvent) -> Vec<gyr_exec::Hook> {
+    layers
+        .pick_user_only(|file| file.hooks.clone())
+        .map(|(hooks, _)| {
+            hooks
+                .into_iter()
+                .filter(|hook| hook.event == event)
+                .map(|hook| gyr_exec::Hook {
+                    command: hook.command,
+                    extension: hook.extension,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Applies RFC-0015's precedence: flag, environment, project file, user file,
@@ -723,20 +789,12 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
-        hooks: layers
-            .pick_user_only(|file| {
-                file.hooks.as_ref().map(|hooks| {
-                    hooks
-                        .iter()
-                        .filter(|hook| hook.event == settings::HookEvent::AfterEdit)
-                        .map(|hook| gyr_exec::Hook {
-                            command: hook.command.clone(),
-                            extension: hook.extension.clone(),
-                        })
-                        .collect()
-                })
-            })
-            .unwrap_or((Vec::new(), Source::Default)),
+        hooks: (
+            hooks_for(&layers, settings::HookEvent::AfterEdit),
+            Source::UserFile,
+        ),
+        end_turn_hooks: hooks_for(&layers, settings::HookEvent::BeforeEndTurn),
+        start_hooks: hooks_for(&layers, settings::HookEvent::SessionStart),
         mcp: layers
             .pick_user_only(|file| file.mcp.clone())
             .map(|(servers, _)| {
@@ -887,6 +945,8 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         protected: resolved.protected.0,
         max_diagnostics: resolved.max_diagnostics.0,
         hooks: resolved.hooks.0,
+        end_turn_hooks: resolved.end_turn_hooks,
+        start_hooks: resolved.start_hooks,
         mcp: resolved.mcp,
         thinking_budget: resolved.thinking_budget.0,
         show_reasoning: resolved.show_reasoning.0,

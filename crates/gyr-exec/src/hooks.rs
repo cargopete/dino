@@ -155,3 +155,90 @@ impl ToolRuntime for AfterEdit {
         })
     }
 }
+
+/// Commands that must pass before the model may end its turn. A failure sends
+/// it back once with the command's output, as a broken build does.
+pub struct EndTurnHooks {
+    hooks: Vec<Hook>,
+    root: PathBuf,
+    sandbox: Arc<dyn Sandbox>,
+}
+
+impl EndTurnHooks {
+    #[must_use]
+    pub fn new(hooks: Vec<Hook>, root: impl Into<PathBuf>, sandbox: Arc<dyn Sandbox>) -> Self {
+        Self {
+            hooks,
+            root: root.into(),
+            sandbox,
+        }
+    }
+}
+
+impl gyr_core::FinishCheck for EndTurnHooks {
+    fn unfinished(&self) -> gyr_core::CheckFuture<'_> {
+        Box::pin(async move {
+            for hook in &self.hooks {
+                let Some((program, arguments)) = hook.command.split_first() else {
+                    continue;
+                };
+                let execution = process::run(
+                    program,
+                    arguments,
+                    &self.root,
+                    self.sandbox.as_ref(),
+                    64 * 1_024,
+                    Duration::from_secs(300),
+                )
+                .await
+                .ok()?;
+                if execution.exit_code != Some(0) {
+                    let said = format!("{}{}", execution.stdout, execution.stderr);
+                    let code = execution
+                        .exit_code
+                        .map_or_else(|| "was killed".to_owned(), |code| format!("exited {code}"));
+                    return Some(format!(
+                        "The before_end_turn hook `{}` {code}:\n{}",
+                        hook.command.join(" "),
+                        capped(said.trim(), MAX_HOOK_OUTPUT_BYTES)
+                    ));
+                }
+            }
+            None
+        })
+    }
+}
+
+/// Runs each session-start hook once and returns what it printed, for the
+/// system prompt. A hook that fails says so in place of its output.
+pub async fn run_start_hooks(
+    hooks: &[Hook],
+    root: &std::path::Path,
+    sandbox: &Arc<dyn Sandbox>,
+) -> Vec<(String, String)> {
+    let mut said = Vec::new();
+    for hook in hooks {
+        let Some((program, arguments)) = hook.command.split_first() else {
+            continue;
+        };
+        let command = hook.command.join(" ");
+        let text = match process::run(
+            program,
+            arguments,
+            root,
+            sandbox.as_ref(),
+            64 * 1_024,
+            Duration::from_secs(60),
+        )
+        .await
+        {
+            Ok(execution) if execution.exit_code == Some(0) => {
+                capped(execution.stdout.trim(), 4 * 1_024)
+            }
+            Ok(execution) => format!("(failed with {:?})", execution.exit_code),
+            Err(error) => format!("(could not run: {error})"),
+        };
+        said.push((command, text));
+    }
+    said
+}

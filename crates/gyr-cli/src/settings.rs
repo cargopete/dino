@@ -83,6 +83,10 @@ pub struct HookConfig {
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
     AfterEdit,
+    /// Must pass before the model ends its turn, or it is sent back once.
+    BeforeEndTurn,
+    /// Runs once when a session starts; what it prints goes in the prompt.
+    SessionStart,
 }
 
 /// Which file a value came from, so `gyr config` can say.

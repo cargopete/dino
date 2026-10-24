@@ -138,3 +138,43 @@ async fn a_hook_for_another_extension_does_not_run() {
     assert!(!output.content.contains("hooks"), "{}", output.content);
     let _ = fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn a_failing_end_turn_hook_calls_the_work_unfinished() {
+    use gyr_core::FinishCheck;
+    use gyr_exec::EndTurnHooks;
+
+    let root = fixture("endturn");
+    let failing = EndTurnHooks::new(
+        vec![argv(&["sh", "-c", "echo 'clippy: 2 warnings' >&2; exit 1"])],
+        &root,
+        Arc::new(Unconfined),
+    );
+    let passing = EndTurnHooks::new(vec![argv(&["true"])], &root, Arc::new(Unconfined));
+
+    let unfinished = failing.unfinished().await.unwrap();
+    assert!(unfinished.contains("clippy: 2 warnings"), "{unfinished}");
+    assert!(unfinished.contains("exited 1"), "{unfinished}");
+    assert_eq!(passing.unfinished().await, None);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn start_hooks_report_their_output() {
+    let root = fixture("start");
+    let said = gyr_exec::run_start_hooks(
+        &[argv(&["sh", "-c", "echo today is tuesday"])],
+        &root,
+        &(Arc::new(Unconfined) as Arc<dyn gyr_sandbox::Sandbox>),
+    )
+    .await;
+
+    assert_eq!(
+        said,
+        [(
+            "sh -c echo today is tuesday".to_owned(),
+            "today is tuesday".to_owned()
+        )]
+    );
+    let _ = fs::remove_dir_all(&root);
+}
