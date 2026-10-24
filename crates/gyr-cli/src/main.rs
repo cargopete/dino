@@ -273,6 +273,7 @@ fn prompt_context(
         memory: memory_files(workspace)
             .map(|files| gyr_core::prompt::load_memory(&files))
             .unwrap_or_default(),
+        skills: skills(workspace),
         instructions: gyr_core::prompt::load_instructions(
             settings::user_instructions_path().as_deref(),
             workspace,
@@ -292,9 +293,20 @@ fn interactive_options(
         max_diagnostics,
         hooks,
         memory: memory_files(workspace),
+        skills: skills(workspace),
         github: gyr_exec::GithubTool::available(),
         web: true,
     }
+}
+
+/// The user's skills, then the repository's; the user's win a shared name.
+fn skills(workspace: &Path) -> Vec<gyr_core::skills::Skill> {
+    let mut dirs: Vec<PathBuf> = settings::user_dir()
+        .map(|dir| dir.join("skills"))
+        .into_iter()
+        .collect();
+    dirs.push(workspace.join(".gyr").join("skills"));
+    gyr_core::skills::discover(&dirs)
 }
 
 /// The user's memory file and this workspace's, beside the user config.
