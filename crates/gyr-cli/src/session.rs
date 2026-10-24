@@ -146,6 +146,7 @@ enum Input {
     Cost,
     Model(Option<String>),
     Resume(Option<String>),
+    Plan(Option<String>),
     Log,
     Exit,
     Unknown(String),
@@ -187,6 +188,9 @@ fn parse(line: &str) -> Input {
         "cost" => Input::Cost,
         "model" => Input::Model(argument),
         "resume" => Input::Resume(argument),
+        "plan" => {
+            Input::Plan(Some(rest[word.len()..].trim().to_owned()).filter(|task| !task.is_empty()))
+        }
         "log" => Input::Log,
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
@@ -194,6 +198,11 @@ fn parse(line: &str) -> Input {
         _ => submission(),
     }
 }
+
+/// Sent ahead of a planned task. The gate enforces it; this explains it.
+const PLAN_MODE: &str = "Plan mode. Investigate with read-only tools: read, search, list, \
+    github and web_fetch. Edits and processes are refused until the person accepts a plan. \
+    End with a short numbered plan, each step naming the files it touches, and stop there.";
 
 /// Builds a fresh model session for a profile key, with its display name.
 pub type SessionFactory<S> = Box<dyn Fn(&str) -> Result<(S, String)>>;
@@ -209,6 +218,10 @@ pub struct Session<S> {
     pub run_id: String,
     /// Conversations started in this process after the first, for state names.
     pub conversations: u32,
+    /// Shared with the approval policy: while set, nothing changes or runs.
+    pub planning: Arc<std::sync::atomic::AtomicBool>,
+    /// A plan has been proposed and the next line decides it.
+    pub awaiting_plan: bool,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -252,7 +265,13 @@ where
             match editor.readline(&prompt) {
                 Ok(line) => {
                     let _ = editor.add_history_entry(line.as_str());
-                    if self.handle(parse(&join_continuations(&line))).await? {
+                    let input = parse(&join_continuations(&line));
+                    let input = if self.awaiting_plan {
+                        self.decide_plan(input).await
+                    } else {
+                        input
+                    };
+                    if self.handle(input).await? {
                         break;
                     }
                 }
@@ -283,6 +302,15 @@ where
             Input::Resume(None) => print!("{}", self.saved()),
             Input::Resume(Some(id)) => self.resume(&id),
             Input::Diff => print!("{}", diff(&self.workspace_root)),
+            Input::Plan(None) => println!(
+                "{}",
+                style::paint(FAINT, "  /plan <task> plans it read-only, then asks you")
+            ),
+            Input::Plan(Some(task)) => {
+                self.set_planning(true);
+                self.submit(format!("{task}\n\n{PLAN_MODE}")).await;
+                Self::ask_about_plan();
+            }
             Input::Cost => println!("{}", self.cost()),
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Unknown(name) => println!(
@@ -380,6 +408,52 @@ where
             Ok(_) => {}
             Err(error) => {
                 println!("{}", style::paint(style::WARN, &format!("  {error}")));
+            }
+        }
+    }
+
+    fn set_planning(&mut self, planning: bool) {
+        self.planning
+            .store(planning, std::sync::atomic::Ordering::Relaxed);
+        self.awaiting_plan = planning;
+    }
+
+    fn ask_about_plan() {
+        println!(
+            "{}",
+            style::paint(
+                SLATE,
+                "  plan: [y] carry it out   [n] drop it   or type what to change"
+            )
+        );
+    }
+
+    /// Reads the line after a plan as the decision on it. Commands still work;
+    /// anything else is feedback, and the plan is revised in plan mode.
+    async fn decide_plan(&mut self, input: Input) -> Input {
+        let Input::Submit(text) = input else {
+            return input;
+        };
+        match text.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => {
+                self.set_planning(false);
+                Input::Submit("The plan is accepted. Carry it out, step by step.".to_owned())
+            }
+            "n" | "no" => {
+                self.set_planning(false);
+                println!(
+                    "{}",
+                    style::paint(FAINT, "  plan dropped; nothing was changed")
+                );
+                Input::Blank
+            }
+            _ => {
+                self.submit(format!(
+                    "{text}\n\n(Still in plan mode: revise the plan; do not change anything.)"
+                ))
+                .await;
+                Self::ask_about_plan();
+                Input::Blank
             }
         }
     }
@@ -582,6 +656,10 @@ fn help() -> String {
             "/resume",
             "list saved conversations; /resume <id> continues one",
         ),
+        (
+            "/plan",
+            "/plan <task>: plan read-only, then accept, revise or drop it",
+        ),
         ("/diff", "what has changed in the working tree"),
         ("/cost", "requests and tokens so far"),
         ("/log", "the path of this session's log"),
@@ -638,6 +716,15 @@ mod tests {
         assert_eq!(parse("/exit"), Input::Exit);
         assert_eq!(parse("/q"), Input::Exit);
         assert_eq!(parse("/nonsense"), Input::Unknown("nonsense".into()));
+    }
+
+    #[test]
+    fn plan_takes_the_rest_of_the_line_as_its_task() {
+        assert_eq!(
+            parse("/plan add a --json flag to gyr models"),
+            Input::Plan(Some("add a --json flag to gyr models".into()))
+        );
+        assert_eq!(parse("/plan"), Input::Plan(None));
     }
 
     #[test]

@@ -370,6 +370,9 @@ Inside a session: `/help`, `/status`, `/log`, `/exit`; `/clear` for a new
 conversation, `/model <key>` to switch model (in a new conversation, since
 history does not move between models), `/resume [id]` to list or continue a
 saved one, `/diff` for the working tree and `/cost` for requests and tokens.
+`/plan <task>` investigates read-only and ends in a numbered plan; edits and
+processes are refused below the model until you answer `y`, `n` drops it, and
+anything else is feedback for another round.
 Ctrl-C cancels the current
 turn and keeps the conversation; Ctrl-D leaves. Paste a stack trace and it
 arrives as one message; end a typed line with a backslash to carry on.

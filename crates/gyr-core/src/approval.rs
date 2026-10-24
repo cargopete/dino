@@ -59,6 +59,35 @@ impl ApprovalPolicy for AllowAll {
     }
 }
 
+/// Refuses changes and processes while a plan is being made, and otherwise
+/// defers to the policy it wraps. Network reads pass through, because research
+/// is most of planning, and still ask where the inner policy asks.
+pub struct PlanGate<P> {
+    inner: P,
+    planning: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<P> PlanGate<P> {
+    pub fn new(inner: P, planning: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { inner, planning }
+    }
+}
+
+impl<P: ApprovalPolicy> ApprovalPolicy for PlanGate<P> {
+    fn decide(&self, call: &ToolCall, action: &ToolAction) -> DecisionFuture<'_> {
+        let planning = self.planning.load(std::sync::atomic::Ordering::Relaxed);
+        if planning && matches!(action.class, ToolClass::Mutating | ToolClass::Process) {
+            return Box::pin(async {
+                ApprovalDecision::denied(
+                    "plan mode: nothing changes and nothing runs until the plan is accepted; \
+                     finish with a numbered plan",
+                )
+            });
+        }
+        self.inner.decide(call, action)
+    }
+}
+
 /// Allows read-only calls and refuses everything else.
 ///
 /// This is the default policy, so an agent constructed without an explicit
