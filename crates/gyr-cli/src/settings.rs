@@ -47,6 +47,8 @@ pub struct FileConfig {
     /// Most reasoning tokens per turn, for a server that honours a budget.
     /// Qwen defaults to 4096.
     pub thinking_budget: Option<u32>,
+    /// Compact on its own once the context window passes the warning mark.
+    pub auto_compact: Option<bool>,
 }
 
 /// One `[mcp.<name>]` table.

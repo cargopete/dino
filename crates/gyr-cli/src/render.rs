@@ -46,6 +46,8 @@ pub struct Renderer {
     usage: Arc<Mutex<TokenUsage>>,
     /// Model responses, which is what a request-metered plan counts.
     requests: Arc<std::sync::atomic::AtomicU64>,
+    /// Set when the core warns that the context window is filling.
+    context_full: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +65,14 @@ impl Renderer {
             stream: Stream::Idle,
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            context_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Set by a context warning, for a session that compacts on its own.
+    #[must_use]
+    pub fn context_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.context_full)
     }
 
     /// A handle on the number of model responses, for `/cost`.
@@ -203,6 +212,8 @@ impl EventSink for Renderer {
                 ..
             } => {
                 self.break_stream()?;
+                self.context_full
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 let percent = (*input_tokens * 100) / u64::from(*window_tokens).max(1);
                 write_out(&style::paint(
                     WARN,
@@ -478,4 +489,28 @@ fn cap(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use gyr_core::session::EventSink as _;
+    use gyr_protocol::AgentEvent;
+
+    use super::Renderer;
+
+    #[test]
+    fn a_context_warning_raises_the_flag_auto_compaction_watches() {
+        let mut renderer = Renderer::new(false);
+        let full = renderer.context_handle();
+
+        renderer
+            .emit(&AgentEvent::ContextWarning {
+                model_turn: 3,
+                input_tokens: 190_000,
+                window_tokens: 262_144,
+            })
+            .unwrap();
+
+        assert!(full.load(std::sync::atomic::Ordering::Relaxed));
+    }
 }

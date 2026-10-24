@@ -66,6 +66,14 @@ impl ApprovalMode {
     }
 }
 
+/// Whether a session compacts only when asked, or also on its own once the
+/// context window passes the warning mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compaction {
+    Manual,
+    Automatic,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSettings {
     pub profile: ModelProfile,
@@ -86,6 +94,7 @@ pub struct RunSettings {
     pub mcp: Vec<gyr_exec::McpServer>,
     /// Most reasoning tokens per turn, for a server that honours a budget.
     pub thinking_budget: Option<u32>,
+    pub compaction: Compaction,
     /// Overrides the endpoint for a self-served model.
     pub api_base: Option<String>,
     /// Asks a toggling model not to think. Absent leaves the server's default.
@@ -262,6 +271,7 @@ mod tests {
             start_hooks: Vec::new(),
             mcp: Vec::new(),
             thinking_budget: None,
+            compaction: Compaction::Manual,
             show_reasoning: false,
             api_base: None,
             disable_thinking: false,

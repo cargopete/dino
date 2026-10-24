@@ -177,6 +177,7 @@ fn eval_settings(
         hooks: Vec::new(),
         end_turn_hooks: Vec::new(),
         start_hooks: Vec::new(),
+        compaction: config::Compaction::Manual,
         mcp: Vec::new(),
         thinking_budget: args.thinking_budget,
         show_reasoning: false,

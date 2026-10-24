@@ -459,6 +459,7 @@ struct Prepared {
     definitions: Vec<ToolDefinition>,
     requests: Arc<std::sync::atomic::AtomicU64>,
     planning: Arc<std::sync::atomic::AtomicBool>,
+    context_full: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
@@ -530,6 +531,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
     let renderer = Renderer::new(settings.show_reasoning);
     let usage = renderer.usage_handle();
     let requests = renderer.requests_handle();
+    let context_full = renderer.context_handle();
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
         model,
@@ -562,6 +564,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         definitions,
         requests,
         planning,
+        context_full,
     })
 }
 
@@ -589,6 +592,8 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         planning: prepared.planning,
         awaiting_plan: false,
         carried: None,
+        auto_compact: prepared.settings.compaction == config::Compaction::Automatic,
+        context_full: prepared.context_full,
         model: prepared.settings.profile.display_name.clone(),
         workspace: prepared.settings.workspace.display().to_string(),
         sandbox: prepared.sandbox_label,
@@ -687,6 +692,7 @@ struct Resolved {
     protected: (Vec<PathBuf>, Source),
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
+    auto_compact: bool,
     hooks: (Vec<gyr_exec::Hook>, Source),
     end_turn_hooks: Vec<gyr_exec::Hook>,
     start_hooks: Vec<gyr_exec::Hook>,
@@ -786,6 +792,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         max_diagnostics: layers
             .pick(|file| file.max_diagnostics.map(Some))
             .unwrap_or((None, Source::Default)),
+        auto_compact: layers
+            .pick(|file| file.auto_compact)
+            .is_some_and(|(on, _)| on),
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
@@ -949,6 +958,11 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         start_hooks: resolved.start_hooks,
         mcp: resolved.mcp,
         thinking_budget: resolved.thinking_budget.0,
+        compaction: if resolved.auto_compact {
+            config::Compaction::Automatic
+        } else {
+            config::Compaction::Manual
+        },
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,
