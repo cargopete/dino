@@ -152,12 +152,17 @@ impl Renderer {
             // auto-allowed read needs no announcement. A standing rule being
             // spent is the one case worth showing.
             ApprovalDecision::Allowed {
-                source: DecisionSource::SessionRule,
+                source: source @ (DecisionSource::SessionRule | DecisionSource::SavedRule),
             } => {
                 self.break_stream()?;
+                let rule = if *source == DecisionSource::SavedRule {
+                    "saved rule"
+                } else {
+                    "session rule"
+                };
                 write_out(&style::paint(
                     FAINT,
-                    &format!("  allowed  {subject}  by session rule\n"),
+                    &format!("  allowed  {subject}  by {rule}\n"),
                 ))
             }
             ApprovalDecision::Allowed { .. } => Ok(()),

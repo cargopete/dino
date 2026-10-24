@@ -36,6 +36,8 @@ pub enum ApprovalReply {
     Once,
     /// Allow this call and later calls with the same tool and subject.
     ForSession,
+    /// As [`ApprovalReply::ForSession`], and keep the rule for later sessions.
+    Remember,
     /// Refuse, optionally saying why.
     Reject(Option<String>),
 }
@@ -76,11 +78,23 @@ impl ApprovalPolicy for ReadOnly {
     }
 }
 
+/// Rules a person chose to keep beyond one session, keyed as
+/// [`ToolAction::rule_key`] keys them.
+pub trait RuleStore: Send + Sync {
+    fn load(&self) -> Vec<String>;
+
+    /// Keeps one more rule. A store that cannot write should say so to the
+    /// person itself: the call is allowed either way, because they said yes.
+    fn save(&self, key: &str);
+}
+
 /// Allows read-only calls, asks a person about anything else, and remembers the
 /// narrow rules that person granted.
 pub struct Interactive<A> {
     approver: A,
     rules: Mutex<HashSet<String>>,
+    saved: HashSet<String>,
+    store: Option<Box<dyn RuleStore>>,
 }
 
 impl<A> Interactive<A> {
@@ -88,7 +102,17 @@ impl<A> Interactive<A> {
         Self {
             approver,
             rules: Mutex::new(HashSet::new()),
+            saved: HashSet::new(),
+            store: None,
         }
+    }
+
+    /// Consults and adds to rules saved for this workspace.
+    #[must_use]
+    pub fn with_store(mut self, store: impl RuleStore + 'static) -> Self {
+        self.saved = store.load().into_iter().collect();
+        self.store = Some(Box::new(store));
+        self
     }
 
     /// Session rules granted so far, sorted, for display and tests.
@@ -130,6 +154,9 @@ where
         }
 
         let key = action.rule_key(&call.name);
+        if self.saved.contains(&key) {
+            return Box::pin(async { ApprovalDecision::allowed(DecisionSource::SavedRule) });
+        }
         if self.holds_rule(&key) {
             return Box::pin(async { ApprovalDecision::allowed(DecisionSource::SessionRule) });
         }
@@ -140,6 +167,13 @@ where
             match self.approver.ask(&call, &action).await {
                 ApprovalReply::Once => ApprovalDecision::allowed(DecisionSource::User),
                 ApprovalReply::ForSession => {
+                    self.grant_rule(key);
+                    ApprovalDecision::allowed(DecisionSource::User)
+                }
+                ApprovalReply::Remember => {
+                    if let Some(store) = &self.store {
+                        store.save(&key);
+                    }
                     self.grant_rule(key);
                     ApprovalDecision::allowed(DecisionSource::User)
                 }

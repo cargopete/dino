@@ -10,9 +10,13 @@ use std::io::Write;
 use std::io::stderr;
 use std::io::stdin;
 
+use std::path::Path;
+use std::path::PathBuf;
+
 use gyr_core::approval::ApprovalReply;
 use gyr_core::approval::Approver;
 use gyr_core::approval::ReplyFuture;
+use gyr_core::approval::RuleStore;
 use gyr_protocol::ToolAction;
 use gyr_protocol::ToolCall;
 use gyr_protocol::ToolClass;
@@ -84,7 +88,7 @@ fn ask_on_terminal(
     };
     let question = style::paint(
         FAINT,
-        &format!("      [y] once   [a] {always}   [n] refuse: "),
+        &format!("      [y] once   [a] {always}   [r] remember for this workspace   [n] refuse: "),
     );
     let written = writeln!(err, "\n{header}  {summary}")
         .and_then(|()| writeln!(err, "{detail}"))
@@ -115,6 +119,112 @@ fn ask_on_terminal(
     match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => ApprovalReply::Once,
         "a" | "always" => ApprovalReply::ForSession,
+        "r" | "remember" => ApprovalReply::Remember,
         _ => ApprovalReply::Reject(Some("the operator refused this action".into())),
+    }
+}
+
+/// Saved approval rules for one workspace, kept with the user's config rather
+/// than in the repository, so a checkout cannot approve its own commands.
+#[derive(Debug, Clone)]
+pub struct FileRuleStore {
+    path: PathBuf,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct SavedRules {
+    workspace: String,
+    allow: Vec<SavedRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SavedRule {
+    tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subject: Option<String>,
+}
+
+const SEPARATOR: char = '\u{1f}';
+
+impl FileRuleStore {
+    /// The store for `workspace` beneath `user_dir`.
+    #[must_use]
+    pub fn for_workspace(user_dir: &Path, workspace: &Path) -> Self {
+        let name = workspace.display().to_string().replace('/', "%");
+        Self {
+            path: user_dir.join("approvals").join(format!("{name}.json")),
+        }
+    }
+
+    fn read(&self) -> SavedRules {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+}
+
+impl RuleStore for FileRuleStore {
+    fn load(&self) -> Vec<String> {
+        self.read()
+            .allow
+            .into_iter()
+            .map(|rule| match rule.subject {
+                Some(subject) => format!("{}{SEPARATOR}{subject}", rule.tool),
+                None => rule.tool,
+            })
+            .collect()
+    }
+
+    fn save(&self, key: &str) {
+        let mut saved = self.read();
+        let (tool, subject) = match key.split_once(SEPARATOR) {
+            Some((tool, subject)) => (tool.to_owned(), Some(subject.to_owned())),
+            None => (key.to_owned(), None),
+        };
+        let rule = SavedRule { tool, subject };
+        if !saved.allow.contains(&rule) {
+            saved.allow.push(rule);
+        }
+        saved.workspace = self
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.replace('%', "/"))
+            .unwrap_or_default();
+        let written = self
+            .path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| serde_json::to_vec_pretty(&saved).map_err(std::io::Error::other))
+            .and_then(|bytes| std::fs::write(&self.path, bytes));
+        let note = match written {
+            Ok(()) => format!("      saved to {}", self.path.display()),
+            Err(error) => format!("      could not save the rule: {error}"),
+        };
+        let _ = writeln!(stderr(), "{}", style::paint(FAINT, &note));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rules_round_trip_through_the_file_and_are_kept_per_workspace() {
+        let dir = std::env::temp_dir().join(format!("gyr-rules-{}", std::process::id()));
+        let store = FileRuleStore::for_workspace(&dir, Path::new("/repo/one"));
+        let other = FileRuleStore::for_workspace(&dir, Path::new("/repo/two"));
+
+        store.save("cargo\u{1f}cargo test --workspace");
+        store.save("cargo\u{1f}cargo test --workspace");
+        store.save("report_blocker");
+
+        assert_eq!(
+            store.load(),
+            ["cargo\u{1f}cargo test --workspace", "report_blocker"]
+        );
+        assert!(other.load().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
