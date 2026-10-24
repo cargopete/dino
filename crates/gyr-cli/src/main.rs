@@ -226,6 +226,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
         &workspace,
         sandbox,
         &interactive_options(&workspace, Vec::new(), None, Vec::new()),
+        Vec::new(),
     )?;
     let context = prompt_context(
         &workspace,
@@ -251,8 +252,64 @@ fn tool_set(
     workspace: &Path,
     sandbox: Arc<dyn Sandbox>,
     options: &gyr_eval::ToolOptions,
+    extra: Vec<Box<dyn ToolRuntime>>,
 ) -> Result<ToolSet> {
-    gyr_eval::session_tools(workspace, sandbox, options).map_err(|error| anyhow::anyhow!("{error}"))
+    gyr_eval::session_tools_with(workspace, sandbox, options, extra)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// Everything a person's session can call, MCP servers included.
+fn session_tool_set(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Result<ToolSet> {
+    let mcp = connect_mcp(&settings.mcp, &settings.workspace, sandbox);
+    tool_set(
+        &settings.workspace,
+        Arc::clone(sandbox),
+        &interactive_options(
+            &settings.workspace,
+            settings.protected.clone(),
+            settings.max_diagnostics,
+            settings.hooks.clone(),
+        ),
+        mcp,
+    )
+}
+
+/// Starts each configured MCP server and lists its tools. A server that fails
+/// is named and left out; the session goes on without it.
+fn connect_mcp(
+    servers: &[gyr_exec::McpServer],
+    workspace: &Path,
+    sandbox: &Arc<dyn Sandbox>,
+) -> Vec<Box<dyn ToolRuntime>> {
+    let mut connected: Vec<Box<dyn ToolRuntime>> = Vec::new();
+    let mut names = Vec::new();
+    for server in servers {
+        let name = server.name.clone();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(gyr_exec::McpTools::connect(
+                server.clone(),
+                workspace,
+                sandbox,
+            ))
+        });
+        match result {
+            Ok(tools) => {
+                names.push(tools.summary());
+                connected.push(Box::new(tools));
+            }
+            Err(error) => eprintln!(
+                "{}",
+                style::paint(style::WARN, &format!("mcp {name}: {error}"))
+            ),
+        }
+    }
+    if !names.is_empty() {
+        eprintln!(
+            "{}",
+            style::paint(style::FAINT, &format!("mcp: {}", names.join(", ")))
+        );
+    }
+    connected
 }
 
 fn prompt_context(
@@ -379,16 +436,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
             )
         );
     }
-    let tools = tool_set(
-        &settings.workspace,
-        Arc::clone(&sandbox),
-        &interactive_options(
-            &settings.workspace,
-            settings.protected.clone(),
-            settings.max_diagnostics,
-            settings.hooks.clone(),
-        ),
-    )?;
+    let tools = session_tool_set(&settings, &sandbox)?;
     let definitions = tools.definitions();
     let context = prompt_context(
         &settings.workspace,
@@ -593,6 +641,7 @@ struct Resolved {
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
     hooks: (Vec<gyr_exec::Hook>, Source),
+    mcp: Vec<gyr_exec::McpServer>,
     layers: Layers,
 }
 
@@ -688,6 +737,21 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
                 })
             })
             .unwrap_or((Vec::new(), Source::Default)),
+        mcp: layers
+            .pick_user_only(|file| file.mcp.clone())
+            .map(|(servers, _)| {
+                servers
+                    .into_iter()
+                    .map(|(name, server)| gyr_exec::McpServer {
+                        name,
+                        command: server.command,
+                        pass_env: server.pass_env,
+                        read_only_tools: server.read_only_tools,
+                        sandboxed: server.sandbox,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         layers,
     })
 }
@@ -823,6 +887,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         protected: resolved.protected.0,
         max_diagnostics: resolved.max_diagnostics.0,
         hooks: resolved.hooks.0,
+        mcp: resolved.mcp,
         thinking_budget: resolved.thinking_budget.0,
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,

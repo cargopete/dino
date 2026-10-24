@@ -7,6 +7,7 @@
 mod exec;
 mod github;
 mod hooks;
+mod mcp;
 pub mod process;
 mod shell;
 mod web;
@@ -17,6 +18,8 @@ pub use crate::github::GithubLimits;
 pub use crate::github::GithubTool;
 pub use crate::hooks::AfterEdit;
 pub use crate::hooks::Hook;
+pub use crate::mcp::McpServer;
+pub use crate::mcp::McpTools;
 pub use crate::shell::ShellTool;
 pub use crate::web::WebFetchTool;
 pub use crate::web::WebLimits;

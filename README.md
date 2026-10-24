@@ -130,9 +130,15 @@ CI and evals.
 - **Configuration, split by who wrote it.** `~/.config/gyr/config.toml` for your
   defaults, `<workspace>/.gyr/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
-  `sandbox`, `api_base` or `hooks`: two weaken a boundary, one redirects where a
-  credential is sent and one runs commands. A project file that tries is an
+  `sandbox`, `api_base`, `hooks` or `mcp`: two weaken a boundary, one redirects
+  where a credential is sent and two run commands. A project file that tries is an
   error naming the file and the key. No file holds a credential at any layer.
+- **MCP, stdio only.** `[mcp.<name>]` in the user file starts a local server
+  (`command`, plus `pass_env` naming variables to pass through, so no token is
+  written into the file). Its tools appear as `mcp__<name>__<tool>` and ask like
+  a process, except those listed in `read_only_tools`. Servers run inside the
+  sandbox unless `sandbox = false`, which the session banner says. Remote
+  servers and catalogues stay out (RFC-0017 §5).
 - **Hooks.** `[[hooks]]` in the user file run after the file tools edit a file,
   inside the sandbox, with `{path}` for the file and an optional `extension`:
   `command = ["rustfmt", "--edition", "2024", "{path}"]` with `extension = "rs"`

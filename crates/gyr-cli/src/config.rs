@@ -81,6 +81,7 @@ pub struct RunSettings {
     pub max_diagnostics: Option<usize>,
     /// After-edit hooks, as argument vectors.
     pub hooks: Vec<gyr_exec::Hook>,
+    pub mcp: Vec<gyr_exec::McpServer>,
     /// Most reasoning tokens per turn, for a server that honours a budget.
     pub thinking_budget: Option<u32>,
     /// Overrides the endpoint for a self-served model.
@@ -255,6 +256,7 @@ mod tests {
             protected: Vec::new(),
             max_diagnostics: None,
             hooks: Vec::new(),
+            mcp: Vec::new(),
             thinking_budget: None,
             show_reasoning: false,
             api_base: None,
