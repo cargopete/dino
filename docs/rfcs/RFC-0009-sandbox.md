@@ -50,7 +50,12 @@ home directory (`CREDENTIAL_PATHS` in `gyr-sandbox`): `~/.ssh`, `~/.aws`,
 secrets, not the allow-list rejected above, and it fails safe: a build that
 needs one of those paths is wrong to read it. Landlock grants by allow-list and
 cannot carve a hole out of a readable home, so on Linux the label says
-`credential reads not denied` rather than borrowing Seatbelt's words.
+`credential reads not denied` rather than borrowing Seatbelt's words. Since #62
+it can after all, at a cost: `gyr-confine --deny-read` grants reads to every
+sibling along the path to each credential location instead of to `/`, so the
+hole is made by granting around it. Entries created later in a directory on
+that chain, such as a new dotfile in `$HOME`, are unreadable until the next
+session.
 
 **Amended 2026-10-23, writes.** Confining writes to the workspace was not
 enough on its own. Inside the workspace are files that other programs execute

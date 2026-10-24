@@ -30,6 +30,8 @@ pub struct Landlock {
     chosen: usize,
     /// Extra writable paths and outbound HTTPS, for fetching dependencies.
     fetch_writable: Vec<PathBuf>,
+    /// Credential paths that exist under the home directory, denied to reads.
+    deny_read: Vec<PathBuf>,
     fetching: bool,
 }
 
@@ -76,6 +78,7 @@ impl Landlock {
             protected,
             chosen,
             fetch_writable: Vec::new(),
+            deny_read: credential_paths(),
             fetching: false,
         })
     }
@@ -100,9 +103,14 @@ impl Sandbox for Landlock {
         } else {
             "TCP denied"
         };
+        let credentials = if self.deny_read.is_empty() {
+            "no credential paths found to deny"
+        } else {
+            "credential reads denied"
+        };
         format!(
             "workspace (landlock: writes confined, executable config{chosen} restored after \
-             each process, {network}, credential reads not denied)"
+             each process, {network}, {credentials})"
         )
     }
 
@@ -155,6 +163,12 @@ impl Sandbox for Landlock {
         if self.fetching {
             wrapped.extend(["--allow-connect".to_owned(), "443".to_owned()]);
         }
+        for path in &self.deny_read {
+            let path = path.to_str().ok_or_else(|| {
+                SandboxError::Profile("credential path is not valid UTF-8".to_owned())
+            })?;
+            wrapped.extend(["--deny-read".to_owned(), path.to_owned()]);
+        }
         wrapped.extend(["--".to_owned(), program.to_owned()]);
         wrapped.extend_from_slice(arguments);
         Ok(WrappedCommand {
@@ -162,6 +176,19 @@ impl Sandbox for Landlock {
             arguments: wrapped,
         })
     }
+}
+
+/// The credential paths that exist under `$HOME`. Only existing ones, because
+/// the helper grants around each, and a missing one leaves nothing to avoid.
+fn credential_paths() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    crate::CREDENTIAL_PATHS
+        .iter()
+        .map(|path| home.join(path))
+        .filter(|path| path.exists())
+        .collect()
 }
 
 /// Finds the helper without guessing.

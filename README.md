@@ -165,9 +165,10 @@ confines writes to the workspace: Seatbelt on one, Landlock on the other, behind
 one trait. **Neither confines reads in general.** A build script can read most of
 the machine; what it cannot do is write outside the workspace or open a
 connection. But its output is sent to the model, and with a hosted model that is
-a transmission, so Seatbelt also denies reads of known credential locations such
-as `~/.ssh`, `~/.aws` and `~/.config/gyr`. Landlock cannot, and says so in its
-label. RFC-0009 section 2 explains why a general read allow-list was rejected
+a transmission, so both sandboxes deny reads of known credential locations such
+as `~/.ssh`, `~/.aws` and `~/.config/gyr`. Landlock only grants, so on Linux the
+helper grants reads around each of them; a file created later beside one of
+them in an enclosing directory is unreadable until the next session. RFC-0009 section 2 explains why a general read allow-list was rejected
 rather than attempted badly.
 
 The two are not identical and are not labelled as though they were. Seatbelt

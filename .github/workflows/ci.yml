@@ -62,6 +62,25 @@ jobs:
             --allow-write "$RUNNER_TEMP/ws" \
             -- /bin/sh -c "echo fine > $RUNNER_TEMP/ws/written"
           test -f "$RUNNER_TEMP/ws/written"
+      - name: A denied path cannot be read, and its neighbours can
+        run: |
+          mkdir -p "$RUNNER_TEMP/home/.ssh"
+          echo secret > "$RUNNER_TEMP/home/.ssh/id_ed25519"
+          echo fine > "$RUNNER_TEMP/home/.gitconfig"
+          confine() {
+            "$RUNNER_TEMP/install/bin/gyr-confine" --allow-write "$RUNNER_TEMP/ws" \
+              --deny-read "$RUNNER_TEMP/home/.ssh" -- "$@"
+          }
+          confine /bin/cat "$RUNNER_TEMP/home/.ssh/id_ed25519" && exit 1
+          test "$(confine /bin/cat "$RUNNER_TEMP/home/.gitconfig")" = fine
+          echo "the key was refused and its neighbour was read"
+      - name: The toolchain still runs with the real ~/.ssh denied
+        run: |
+          mkdir -p "$HOME/.ssh"
+          "$RUNNER_TEMP/install/bin/gyr-confine" --allow-write "$RUNNER_TEMP/ws" \
+            --deny-read "$HOME/.ssh" -- cargo --version
+          "$RUNNER_TEMP/install/bin/gyr-confine" --allow-write "$RUNNER_TEMP/ws" \
+            --deny-read "$HOME/.ssh" -- git --version
 
   # RFC-0009 section 5.2 step 1. This reports facts and asserts nothing, because
   # the point is to find out whether the kernel floor chosen in section 5.1 is
