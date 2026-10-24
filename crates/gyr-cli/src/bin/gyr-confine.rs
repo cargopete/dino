@@ -126,6 +126,14 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
             .map_err(|error| format!("cannot allow reads under {}: {error}", path.display()))?;
     }
 
+    // As Seatbelt allows: much of the toolchain, git among it, opens /dev/null
+    // for writing and fails without it.
+    if let Ok(null) = PathFd::new("/dev/null") {
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(null, AccessFs::from_file(abi)))
+            .map_err(|error| format!("cannot allow /dev/null: {error}"))?;
+    }
+
     for path in &request.writable {
         // A file takes only the rights a file can have; asking for directory
         // rights on one is an error.
