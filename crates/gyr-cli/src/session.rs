@@ -280,6 +280,10 @@ pub struct Session<S> {
     pub awaiting_plan: bool,
     /// A compacted summary waiting to go ahead of the next message.
     pub carried: Option<String>,
+    /// Compact after any submission that filled the context past the mark.
+    pub auto_compact: bool,
+    /// Set by the renderer when the core warns the context is filling.
+    pub context_full: Arc<std::sync::atomic::AtomicBool>,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -497,6 +501,18 @@ where
             None => text,
         };
         self.run_submission(text).await;
+        let full = self
+            .context_full
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        if full && self.auto_compact {
+            println!(
+                "{}",
+                style::paint(FAINT, "  the context is filling, so compacting now")
+            );
+            self.compact().await;
+            self.context_full
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Runs one prepared message and saves the conversation after it.
