@@ -455,6 +455,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         conversations: 0,
         planning: prepared.planning,
         awaiting_plan: false,
+        carried: None,
         model: prepared.settings.profile.display_name.clone(),
         workspace: prepared.settings.workspace.display().to_string(),
         sandbox: prepared.sandbox_label,

@@ -100,7 +100,8 @@ CI and evals.
   marker in place of real text. A turn cut off because the window filled is
   elided and carried on rather than ending the run. Elision rather than
   summarisation: no extra request, deterministic, and it does not quietly
-  rewrite what the model believes happened.
+  rewrite what the model believes happened. Summarising is `/compact`, asked
+  for by a person and starting a fresh conversation, never done behind one.
 - **Instructions.** `~/.config/gyr/instructions.md` for your own rules, then
   the repository's `AGENTS.md` and `.gyr/instructions.md`, each capped at 16 KiB
   and named when a session starts. They go below the built-in rules and cannot
@@ -195,9 +196,9 @@ and is written into the session log. Windows is not a target.
 
 ### What does not exist yet
 
-Context relief for OpenAI, whose server-side continuation
+Automatic compaction. Context relief for OpenAI, whose server-side continuation
 keeps no local history to reduce, and which wants a live credential to verify
-rather than merely to write. Summarising compaction. Rollback: the diagnostic
+rather than merely to write. Rollback: the diagnostic
 gate refused rather than reverting, because a shadow copy of the workspace is a
 worse version of git. Resuming *from* a log as opposed to replaying one, which
 RFC-0014 section 2 argues cannot be done honestly. A conformance run against a live
@@ -370,7 +371,9 @@ Inside a session: `/help`, `/status`, `/log`, `/exit`; `/clear` for a new
 conversation, `/model <key>` to switch model (in a new conversation, since
 history does not move between models), `/resume [id]` to list or continue a
 saved one, `/diff` for the working tree and `/cost` for requests and tokens.
-`/plan <task>` investigates read-only and ends in a numbered plan; edits and
+`/compact` asks the model for a structured summary, with changes gated off,
+starts a fresh conversation and puts the summary ahead of your next message;
+the old conversation stays resumable in full. `/plan <task>` investigates read-only and ends in a numbered plan; edits and
 processes are refused below the model until you answer `y`, `n` drops it, and
 anything else is feedback for another round.
 Ctrl-C cancels the current

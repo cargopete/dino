@@ -147,6 +147,7 @@ enum Input {
     Model(Option<String>),
     Resume(Option<String>),
     Plan(Option<String>),
+    Compact,
     Log,
     Exit,
     Unknown(String),
@@ -186,6 +187,7 @@ fn parse(line: &str) -> Input {
         "clear" => Input::Clear,
         "diff" => Input::Diff,
         "cost" => Input::Cost,
+        "compact" => Input::Compact,
         "model" => Input::Model(argument),
         "resume" => Input::Resume(argument),
         "plan" => {
@@ -198,6 +200,15 @@ fn parse(line: &str) -> Input {
         _ => submission(),
     }
 }
+
+/// What `/compact` asks for. Specific, because a vague summary loses exactly
+/// the file paths and decisions the next turn needs.
+const COMPACT_REQUEST: &str = "This conversation is about to be compacted: you will continue \
+    in a fresh one that sees only what you write now. Do not call any tool. Write a summary \
+    under 400 words with these headings: Task (what was asked, in the person's words where it \
+    matters), Done (what changed, with file paths), Decisions (and why), Remaining (next steps), \
+    Open questions. Include exact names, paths, commands and error messages that the next turn \
+    will need.";
 
 /// Sent ahead of a planned task. The gate enforces it; this explains it.
 const PLAN_MODE: &str = "Plan mode. Investigate with read-only tools: read, search, list, \
@@ -222,6 +233,8 @@ pub struct Session<S> {
     pub planning: Arc<std::sync::atomic::AtomicBool>,
     /// A plan has been proposed and the next line decides it.
     pub awaiting_plan: bool,
+    /// A compacted summary waiting to go ahead of the next message.
+    pub carried: Option<String>,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -312,6 +325,7 @@ where
                 Self::ask_about_plan();
             }
             Input::Cost => println!("{}", self.cost()),
+            Input::Compact => self.compact().await,
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Unknown(name) => println!(
                 "{}",
@@ -371,6 +385,18 @@ where
     /// Runs one submission, cancellable on its own for its own lifetime.
     async fn submit(&mut self, text: String) {
         let text = self.with_attachments(text).await;
+        let text = match self.carried.take() {
+            Some(summary) => format!(
+                "Summary of this session so far, written before it was compacted:\n\n\
+                 {summary}\n\n---\n\n{text}"
+            ),
+            None => text,
+        };
+        self.run_submission(text).await;
+    }
+
+    /// Runs one prepared message and saves the conversation after it.
+    async fn run_submission(&mut self, text: String) -> Option<gyr_core::RunResult> {
         let cancel = CancellationToken::new();
         let signal = cancel.clone();
         let interrupt = tokio::spawn(async move {
@@ -404,12 +430,50 @@ where
                     "{}",
                     style::paint(FAINT, "  cancelled. The conversation is intact.")
                 );
+                None
             }
-            Ok(_) => {}
+            Ok(run) => Some(run),
             Err(error) => {
                 println!("{}", style::paint(style::WARN, &format!("  {error}")));
+                None
             }
         }
+    }
+
+    /// Asks for a summary with changes gated off, starts a new conversation,
+    /// and carries the summary into the next message. The old conversation
+    /// stays saved in full.
+    async fn compact(&mut self) {
+        let was_planning = self.planning.load(std::sync::atomic::Ordering::Relaxed);
+        self.planning
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let run = self.run_submission(COMPACT_REQUEST.to_owned()).await;
+        self.planning
+            .store(was_planning, std::sync::atomic::Ordering::Relaxed);
+        let summary = run
+            .map(|run| run.text.trim().to_owned())
+            .unwrap_or_default();
+        if summary.is_empty() {
+            println!(
+                "{}",
+                style::paint(
+                    style::WARN,
+                    "  no summary came back, so nothing was compacted"
+                )
+            );
+            return;
+        }
+        let key = self.model_key.clone();
+        self.start_conversation(&key);
+        let words = summary.split_whitespace().count();
+        self.carried = Some(summary);
+        println!(
+            "{}",
+            style::paint(
+                FAINT,
+                &format!("  compacted into {words} words, which go ahead of your next message")
+            )
+        );
     }
 
     fn set_planning(&mut self, planning: bool) {
@@ -662,6 +726,10 @@ fn help() -> String {
         ),
         ("/diff", "what has changed in the working tree"),
         ("/cost", "requests and tokens so far"),
+        (
+            "/compact",
+            "summarise, then carry on in a fresh conversation",
+        ),
         ("/log", "the path of this session's log"),
         ("/exit", "leave; Ctrl-D does the same"),
     ];
@@ -732,6 +800,7 @@ mod tests {
         assert_eq!(parse("/clear"), Input::Clear);
         assert_eq!(parse("/diff"), Input::Diff);
         assert_eq!(parse("/cost"), Input::Cost);
+        assert_eq!(parse("/compact"), Input::Compact);
         assert_eq!(parse("/model"), Input::Model(None));
         assert_eq!(
             parse("/model  claude-opus "),
