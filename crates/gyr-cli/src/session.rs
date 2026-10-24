@@ -32,7 +32,10 @@ use crate::style::SLATE;
 /// than assumed. What did not work was *composing* several lines, which is what
 /// this is for, and the shell's convention is the one fingers already know.
 #[derive(Default)]
-struct Continuation;
+struct Continuation {
+    /// For completing `@path` against the workspace.
+    root: std::path::PathBuf,
+}
 
 impl rustyline::validate::Validator for Continuation {
     fn validate(
@@ -60,6 +63,71 @@ fn join_continuations(input: &str) -> String {
 
 impl rustyline::completion::Completer for Continuation {
     type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _context: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        Ok(complete_at(line, pos, &self.root))
+    }
+}
+
+/// Completes the `@path` word ending at `pos` against the workspace.
+fn complete_at(line: &str, pos: usize, root: &std::path::Path) -> (usize, Vec<String>) {
+    let before = &line[..pos.min(line.len())];
+    let start = before
+        .rfind(char::is_whitespace)
+        .map_or(0, |index| index + 1);
+    let Some(partial) = before[start..].strip_prefix('@') else {
+        return (pos, Vec::new());
+    };
+    let (directory, prefix) = match partial.rfind('/') {
+        Some(index) => (&partial[..=index], &partial[index + 1..]),
+        None => ("", partial),
+    };
+    if directory.starts_with('/') || directory.split('/').any(|part| part == "..") {
+        return (pos, Vec::new());
+    }
+    let Ok(entries) = std::fs::read_dir(root.join(directory)) else {
+        return (pos, Vec::new());
+    };
+    let mut candidates: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let hidden = name.starts_with('.') && !prefix.starts_with('.');
+            if hidden || !name.starts_with(prefix) {
+                return None;
+            }
+            let slash = if entry.path().is_dir() { "/" } else { "" };
+            Some(format!("@{directory}{name}{slash}"))
+        })
+        .collect();
+    candidates.sort();
+    (start, candidates)
+}
+
+/// Workspace-relative paths named as `@path` in `text` that exist, in order and
+/// once each. Anything else with an `@` in it, like an address, is left alone.
+fn attachments(text: &str, root: &std::path::Path) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let Some(path) = word.strip_prefix('@') else {
+            continue;
+        };
+        let path = path.trim_end_matches([',', '.', ';', ':', ')', '!', '?', '"', '\'']);
+        let path = path.trim_end_matches('/');
+        let escapes = path.starts_with('/') || path.split('/').any(|part| part == "..");
+        if path.is_empty() || escapes || found.iter().any(|seen| seen == path) {
+            continue;
+        }
+        if root.join(path).exists() {
+            found.push(path.to_owned());
+        }
+    }
+    found
 }
 impl rustyline::hint::Hinter for Continuation {
     type Hint = String;
@@ -165,7 +233,9 @@ where
     pub async fn run(&mut self) -> Result<()> {
         let mut editor: rustyline::Editor<Continuation, rustyline::history::FileHistory> =
             rustyline::Editor::new().context("cannot start the line editor")?;
-        editor.set_helper(Some(Continuation));
+        editor.set_helper(Some(Continuation {
+            root: self.workspace_root.clone(),
+        }));
         let _ = editor.load_history(&self.history_path);
 
         println!("{}", self.banner());
@@ -224,8 +294,55 @@ where
         Ok(false)
     }
 
+    /// The text with each `@path` it names appended, read by the workspace's
+    /// own `read` and `list` tools so the model sees exactly what those return,
+    /// and the read counts as one before an edit.
+    async fn with_attachments(&self, text: String) -> String {
+        let paths = attachments(&text, &self.workspace_root);
+        if paths.is_empty() {
+            return text;
+        }
+        let mut message = text;
+        message.push_str("\n\nAttached by the user:");
+        for (index, path) in paths.iter().enumerate() {
+            let tool = if self.workspace_root.join(path).is_dir() {
+                "list"
+            } else {
+                "read"
+            };
+            let call = gyr_protocol::ToolCall {
+                id: format!("attach-{index}"),
+                name: tool.to_owned(),
+                arguments: serde_json::json!({ "path": path }),
+            };
+            let attached = gyr_core::ToolRuntime::execute(self.agent.tools(), &call).await;
+            match attached {
+                Ok(output) => {
+                    let _ = write!(
+                        &mut message,
+                        "\n\n### @{path} ({tool})\n\n{}",
+                        output.content
+                    );
+                    println!(
+                        "{}",
+                        style::paint(
+                            FAINT,
+                            &format!("  attached {path} ({} bytes)", output.content.len())
+                        )
+                    );
+                }
+                Err(error) => println!(
+                    "{}",
+                    style::paint(style::WARN, &format!("  could not attach {path}: {error}"))
+                ),
+            }
+        }
+        message
+    }
+
     /// Runs one submission, cancellable on its own for its own lifetime.
     async fn submit(&mut self, text: String) {
+        let text = self.with_attachments(text).await;
         let cancel = CancellationToken::new();
         let signal = cancel.clone();
         let interrupt = tokio::spawn(async move {
@@ -566,6 +683,41 @@ mod tests {
             Input::Log,
             "a known command wins over whatever follows it, as in any shell"
         );
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("gyr-at-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(root.join("src/bin")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn only_at_words_naming_something_in_the_workspace_are_attached() {
+        let root = scratch("attach");
+
+        let found = attachments(
+            "fix @src/lib.rs, see @Cargo.toml and @src/lib.rs again; mail me@example.com \
+             or @missing.rs or @../etc/passwd or @/etc/hosts and look in @src/bin.",
+            &root,
+        );
+
+        assert_eq!(found, ["src/lib.rs", "Cargo.toml", "src/bin"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn completion_offers_workspace_paths_after_an_at() {
+        let root = scratch("complete");
+
+        let (start, candidates) = complete_at("look at @sr", 11, &root);
+        assert_eq!((start, candidates), (8, vec!["@src/".to_owned()]));
+        let (_, candidates) = complete_at("@src/l", 6, &root);
+        assert_eq!(candidates, ["@src/lib.rs"]);
+        let (_, candidates) = complete_at("no at here", 10, &root);
+        assert!(candidates.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

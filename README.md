@@ -366,7 +366,10 @@ history does not move between models), `/resume [id]` to list or continue a
 saved one, `/diff` for the working tree and `/cost` for requests and tokens.
 Ctrl-C cancels the current
 turn and keeps the conversation; Ctrl-D leaves. Paste a stack trace and it
-arrives as one message; end a typed line with a backslash to carry on. History
+arrives as one message; end a typed line with a backslash to carry on.
+`@src/lib.rs` in a message attaches that file as `read` returns it, so the model
+can edit it straight away, and Tab completes the path; `@src/` attaches a
+listing. History
 persists to `.gyr/history` and the conversation to `.gyr/sessions`, so
 `gyr --resume` picks it up where you left it and `gyr replay` shows what
 happened.
