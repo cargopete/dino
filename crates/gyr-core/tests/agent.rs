@@ -1157,3 +1157,25 @@ async fn the_plan_gate_refuses_changes_while_planning_and_steps_aside_after() {
         ApprovalDecision::Allowed { .. }
     ));
 }
+
+#[tokio::test]
+async fn several_checks_report_the_first_that_finds_work_unfinished() {
+    use gyr_core::CheckFuture;
+    use gyr_core::FinishCheck;
+
+    struct Says(Option<&'static str>);
+    impl FinishCheck for Says {
+        fn unfinished(&self) -> CheckFuture<'_> {
+            let said = self.0.map(str::to_owned);
+            Box::pin(async move { said })
+        }
+    }
+
+    let checks = gyr_core::FirstUnfinished::new(vec![
+        Box::new(Says(None)),
+        Box::new(Says(Some("lint failed"))),
+        Box::new(Says(Some("build failed"))),
+    ]);
+
+    assert_eq!(checks.unfinished().await.as_deref(), Some("lint failed"));
+}

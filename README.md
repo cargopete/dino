@@ -143,7 +143,10 @@ CI and evals.
   inside the sandbox, with `{path}` for the file and an optional `extension`:
   `command = ["rustfmt", "--edition", "2024", "{path}"]` with `extension = "rs"`
   formats every Rust edit. The tool result says what ran, and says so when a
-  hook changed the file, so the model reads it again before the next edit.
+  hook changed the file, so the model reads it again before the next edit. A
+  `before_end_turn` hook must pass before the model ends its turn, or it is sent
+  back once with the output (`cargo clippy` makes a good one); a
+  `session_start` hook runs once and what it prints goes into the prompt.
 - **An eval harness.** `gyr eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also

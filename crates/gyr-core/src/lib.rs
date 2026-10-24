@@ -61,6 +61,31 @@ pub trait FinishCheck: Send + Sync {
     fn unfinished(&self) -> CheckFuture<'_>;
 }
 
+/// Several checks, asked in order; the first to find work unfinished speaks.
+pub struct FirstUnfinished {
+    checks: Vec<Box<dyn FinishCheck>>,
+}
+
+impl FirstUnfinished {
+    #[must_use]
+    pub fn new(checks: Vec<Box<dyn FinishCheck>>) -> Self {
+        Self { checks }
+    }
+}
+
+impl FinishCheck for FirstUnfinished {
+    fn unfinished(&self) -> CheckFuture<'_> {
+        Box::pin(async move {
+            for check in &self.checks {
+                if let Some(unfinished) = check.unfinished().await {
+                    return Some(unfinished);
+                }
+            }
+            None
+        })
+    }
+}
+
 /// A set of tools, which both classifies and executes calls against itself.
 ///
 /// Classification lives here rather than in the core because the runtime owns

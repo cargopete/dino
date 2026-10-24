@@ -81,6 +81,8 @@ pub struct RunSettings {
     pub max_diagnostics: Option<usize>,
     /// After-edit hooks, as argument vectors.
     pub hooks: Vec<gyr_exec::Hook>,
+    pub end_turn_hooks: Vec<gyr_exec::Hook>,
+    pub start_hooks: Vec<gyr_exec::Hook>,
     pub mcp: Vec<gyr_exec::McpServer>,
     /// Most reasoning tokens per turn, for a server that honours a budget.
     pub thinking_budget: Option<u32>,
@@ -256,6 +258,8 @@ mod tests {
             protected: Vec::new(),
             max_diagnostics: None,
             hooks: Vec::new(),
+            end_turn_hooks: Vec::new(),
+            start_hooks: Vec::new(),
             mcp: Vec::new(),
             thinking_budget: None,
             show_reasoning: false,

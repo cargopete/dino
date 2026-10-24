@@ -175,6 +175,8 @@ fn eval_settings(
         protected: Vec::new(),
         max_diagnostics: args.max_diagnostics,
         hooks: Vec::new(),
+        end_turn_hooks: Vec::new(),
+        start_hooks: Vec::new(),
         mcp: Vec::new(),
         thinking_budget: args.thinking_budget,
         show_reasoning: false,
