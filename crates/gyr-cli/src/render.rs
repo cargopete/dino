@@ -214,14 +214,15 @@ impl EventSink for Renderer {
                 self.break_stream()?;
                 self.context_full
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                let percent = (*input_tokens * 100) / u64::from(*window_tokens).max(1);
-                write_out(&style::paint(
-                    WARN,
-                    &format!(
-                        "  the context window is {percent}% full ({input_tokens} of \
-                         {window_tokens}); a new session starts clean\n"
-                    ),
-                ))
+                context_warning(*input_tokens, *window_tokens)
+            }
+            AgentEvent::HandedOver {
+                session,
+                reason,
+                pending,
+            } => {
+                self.break_stream()?;
+                handed_over(*session, reason, *pending)
             }
             AgentEvent::Elided {
                 results_elided,
@@ -230,13 +231,7 @@ impl EventSink for Renderer {
                 ..
             } => {
                 self.break_stream()?;
-                write_out(&style::paint(
-                    FAINT,
-                    &format!(
-                        "  elided {results_elided} earlier result(s) and {calls_elided} call(s), \
-                         {bytes_reclaimed} bytes, to stay inside the window\n"
-                    ),
-                ))
+                elided(*results_elided, *calls_elided, *bytes_reclaimed)
             }
             AgentEvent::TurnsRunningOut { turns_left, .. } => {
                 self.break_stream()?;
@@ -442,6 +437,34 @@ fn submitted(text: &str) -> Result<(), SinkError> {
         write_out(&style::paint(FAINT, &format!("  (+{more} more lines)\n")))?;
     }
     Ok(())
+}
+
+fn elided(results: usize, calls: usize, bytes: usize) -> Result<(), SinkError> {
+    write_out(&style::paint(
+        FAINT,
+        &format!(
+            "  elided {results} earlier result(s) and {calls} call(s), {bytes} bytes, to stay \
+             inside the window\n"
+        ),
+    ))
+}
+
+fn context_warning(input_tokens: u64, window_tokens: u32) -> Result<(), SinkError> {
+    let percent = (input_tokens * 100) / u64::from(window_tokens).max(1);
+    write_out(&style::paint(
+        WARN,
+        &format!(
+            "  the context window is {percent}% full ({input_tokens} of {window_tokens}); a new \
+             session starts clean\n"
+        ),
+    ))
+}
+
+fn handed_over(session: u32, reason: &str, pending: usize) -> Result<(), SinkError> {
+    write_out(&style::paint(
+        SLATE,
+        &format!("\n  ── session {session}: {reason}; {pending} item(s) pending ──\n"),
+    ))
 }
 
 /// The checklist itself, rather than a one-line summary of the call.

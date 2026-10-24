@@ -3,6 +3,7 @@
 mod approve;
 mod config;
 mod evals;
+mod handover;
 mod render;
 mod replay;
 mod session;
@@ -151,6 +152,13 @@ struct PromptArgs {
 struct RunArgs {
     /// The request. Read from standard input when omitted.
     prompt: Option<String>,
+    /// Split a long task across fresh sessions, carried by a progress record.
+    /// RFC-0018.
+    #[arg(long)]
+    handover: bool,
+    /// With --handover, the turns one session may take before it hands over.
+    #[arg(long, default_value_t = 16)]
+    session_turns: u32,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -306,8 +314,13 @@ fn start_hook_output(
 }
 
 /// Everything a person's session can call, MCP servers included.
-fn session_tool_set(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Result<ToolSet> {
-    let mcp = connect_mcp(&settings.mcp, &settings.workspace, sandbox);
+fn session_tool_set(
+    settings: &RunSettings,
+    sandbox: &Arc<dyn Sandbox>,
+    extra: Vec<Box<dyn ToolRuntime>>,
+) -> Result<ToolSet> {
+    let mut mcp = connect_mcp(&settings.mcp, &settings.workspace, sandbox);
+    mcp.extend(extra);
     tool_set(
         &settings.workspace,
         Arc::clone(sandbox),
@@ -448,7 +461,7 @@ fn announce_instructions(context: &PromptContext) {
 }
 
 /// Everything a submission needs, assembled once.
-struct Prepared {
+pub(crate) struct Prepared {
     agent: Agent<Box<dyn ModelSession>, ToolSet>,
     state_path: PathBuf,
     usage: std::sync::Arc<std::sync::Mutex<gyr_protocol::TokenUsage>>,
@@ -460,11 +473,16 @@ struct Prepared {
     requests: Arc<std::sync::atomic::AtomicU64>,
     planning: Arc<std::sync::atomic::AtomicBool>,
     context_full: Arc<std::sync::atomic::AtomicBool>,
+    sandbox: Arc<dyn Sandbox>,
 }
 
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
 /// build back to.
-fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
+fn prepare(
+    common: &CommonArgs,
+    unattended: bool,
+    extra: Vec<Box<dyn ToolRuntime>>,
+) -> Result<Prepared> {
     let session_id = SessionId::generate();
     let settings = settings(common, &session_id)?;
     // After resolution rather than before, so a config file can ask for plain
@@ -484,7 +502,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
             )
         );
     }
-    let tools = session_tool_set(&settings, &sandbox)?;
+    let tools = session_tool_set(&settings, &sandbox, extra)?;
     let definitions = tools.definitions();
     let mut context = prompt_context(
         &settings.workspace,
@@ -565,11 +583,12 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         requests,
         planning,
         context_full,
+        sandbox,
     })
 }
 
 async fn session(common: CommonArgs) -> Result<ExitCode> {
-    let prepared = prepare(&common, false)?;
+    let prepared = prepare(&common, false, Vec::new())?;
     let base = prepared.settings.clone();
     let prompt = prepared.system_prompt.clone();
     let definitions = prepared.definitions.clone();
@@ -607,7 +626,20 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
 }
 
 async fn run(args: RunArgs) -> Result<ExitCode> {
-    let mut prepared = prepare(&args.common, true)?;
+    let workspace = config::resolve_workspace(args.common.workspace.as_deref())?;
+    let progress = args.handover.then(|| {
+        gyr_core::progress::Progress::new(
+            workspace
+                .join(".gyr")
+                .join("sessions")
+                .join(format!("{}.progress.json", SessionId::generate().as_str())),
+        )
+    });
+    let extra: Vec<Box<dyn ToolRuntime>> = progress
+        .iter()
+        .map(|progress| Box::new(progress.clone()) as Box<dyn ToolRuntime>)
+        .collect();
+    let mut prepared = prepare(&args.common, true, extra)?;
     let request = request_text(args.prompt)?;
     eprintln!(
         "{}",
@@ -631,6 +663,23 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         }
     });
 
+    if let Some(progress) = &progress {
+        return Ok(
+            match handover::run(
+                &mut prepared,
+                progress,
+                &request,
+                args.session_turns,
+                &cancel,
+            )
+            .await?
+            {
+                handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
+                handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
+                _ => ExitCode::FAILURE,
+            },
+        );
+    }
     let result = prepared.agent.run_cancellable(request, &cancel).await?;
     save_state(&prepared.agent, &prepared.state_path)?;
     Ok(match result.stop_reason {
@@ -666,7 +715,7 @@ fn resume_from(requested: Option<&str>, workspace: &Path) -> Result<Option<(Stri
 }
 
 /// Persists the session's native state, so it can be continued later.
-fn save_state<S: ModelSession, T: gyr_core::ToolRuntime>(
+pub(crate) fn save_state<S: ModelSession, T: gyr_core::ToolRuntime>(
     agent: &Agent<S, T>,
     path: &Path,
 ) -> Result<()> {

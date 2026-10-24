@@ -351,6 +351,14 @@ pub enum AgentEvent {
         input_tokens: u64,
         window_tokens: u32,
     },
+    /// A long task moved to a fresh session, carried by its progress record.
+    /// RFC-0018 section 5.
+    HandedOver {
+        /// The session starting, counting the first as 1.
+        session: u32,
+        reason: String,
+        pending: usize,
+    },
     /// History was reduced, and by how much. An explicit event rather than a
     /// silent optimisation, so a transcript that behaves oddly afterwards can be
     /// traced to the moment it was cut.

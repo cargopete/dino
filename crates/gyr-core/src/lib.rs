@@ -9,6 +9,7 @@ pub mod approval;
 pub mod blocker;
 pub mod git;
 pub mod memory;
+pub mod progress;
 pub mod prompt;
 pub mod resume;
 pub mod session;
@@ -379,6 +380,22 @@ where
         } else {
             TurnInput::UserWithImages { content, images }
         }
+    }
+
+    /// Records an event that happened outside a run, such as a handover, so
+    /// the log meets it in its place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when the sink cannot record it.
+    pub fn record(&mut self, event: &AgentEvent) -> Result<(), AgentError> {
+        self.sink.emit(event)?;
+        Ok(())
+    }
+
+    /// Caps the turns of the next run, as a handover chain does per session.
+    pub fn set_max_model_turns(&mut self, turns: NonZeroU32) {
+        self.config.max_model_turns = turns;
     }
 
     /// Sends these images with the next submission, after its text.

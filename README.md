@@ -112,6 +112,13 @@ CI and evals.
   and named when a session starts. They go below the built-in rules and cannot
   change approvals or the sandbox. Evals read none of them, so a personal file
   cannot move a measurement.
+- **Handover for long tasks.** `gyr run --handover` has the model keep a plan in
+  a `progress` tool and hands the task to a fresh session when one reaches
+  `--session-turns` (16) or stops with items pending, at most four sessions and
+  never more turns than `--max-turns`. Each new session starts from a seed the
+  harness builds: the task, the record, why the last session ended, `git status`
+  and the current `cargo check`. RFC-0018; not yet measured against the plain
+  loop.
 - **A turn budget.** `--max-turns` bounds a submission. The model is told the
   limit in its system prompt and counted down over its last three turns, so it
   can finish and say what is done rather than be cut off.
@@ -219,8 +226,7 @@ worse version of git. Resuming *from* a log as opposed to replaying one, which
 RFC-0014 section 2 argues cannot be done honestly. A conformance run against a live
 endpoint: the suite exists and has only ever seen recorded traffic. `gyr probe`,
 which would let you run it against your own endpoint, is RFC-0017's next step.
-Handing a long task to a fresh session when one context window is not enough:
-RFC-0018 proposes it and nothing is built. Signing in with a Claude
+ Signing in with a Claude
 subscription: the Anthropic profiles take an API key and nothing else.
 
 These are missing features. None is delegated to the system prompt and none is

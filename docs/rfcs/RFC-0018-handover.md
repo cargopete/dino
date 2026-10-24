@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | proposed, not to be built before §7's measurement |
+| Status | built 2026-10-24 as `gyr run --handover`, after §7 step 2 failed (benches v5 to v8); steps 3 and 4 not yet run |
 | Date | 2026-10-20 |
 | Depends on | RFC-0013, RFC-0014, RFC-0017 |
 | Scope | an opt-in mode that splits one task across several short sessions, carried by a progress record |
