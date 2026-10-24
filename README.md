@@ -356,7 +356,11 @@ Or put the model in `~/.config/gyr/config.toml` and run `gyr`. `gyr config`
 prints every setting and where its value came from. `gyr prompt` prints the
 system prompt a run would send, so its cost can be read rather than guessed.
 
-Inside a session: `/help`, `/status`, `/log`, `/exit`. Ctrl-C cancels the current
+Inside a session: `/help`, `/status`, `/log`, `/exit`; `/clear` for a new
+conversation, `/model <key>` to switch model (in a new conversation, since
+history does not move between models), `/resume [id]` to list or continue a
+saved one, `/diff` for the working tree and `/cost` for requests and tokens.
+Ctrl-C cancels the current
 turn and keeps the conversation; Ctrl-D leaves. Paste a stack trace and it
 arrives as one message; end a typed line with a backslash to carry on. History
 persists to `.gyr/history` and the conversation to `.gyr/sessions`, so

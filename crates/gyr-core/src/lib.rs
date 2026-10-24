@@ -340,6 +340,12 @@ where
         &self.session
     }
 
+    /// Swaps in another model session, for a new conversation or another
+    /// model, and returns the old one. Tools, policy and sink are kept.
+    pub fn replace_session(&mut self, session: S) -> S {
+        std::mem::replace(&mut self.session, session)
+    }
+
     pub fn tools(&self) -> &T {
         &self.tools
     }
