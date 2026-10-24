@@ -11,6 +11,7 @@ pub mod git;
 pub mod prompt;
 pub mod resume;
 pub mod session;
+pub mod todo;
 pub mod workspace;
 
 use std::collections::HashMap;

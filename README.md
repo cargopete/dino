@@ -54,7 +54,7 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Eleven tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Twelve tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
@@ -65,7 +65,8 @@ CI and evals.
   subcommands and returns parsed diagnostics, so an `E0308` arrives as a level,
   a code, a file, a line and a column rather than as a page of compiler output.
   `report_blocker` lets the model stop and say a task contradicts itself,
-  rather than bend a test to fit. `github` reads the checkout's own issues and
+  rather than bend a test to fit. `todo` keeps a checklist for a task of
+  several steps, shown in the transcript as it changes. `github` reads the checkout's own issues and
   pull requests through a fixed set of read-only `gh` commands, run by `gyr`
   rather than by a confined process, and is offered only where `gh` is
   installed. `web_fetch` reads one URL as text, HTML rendered, and asks per

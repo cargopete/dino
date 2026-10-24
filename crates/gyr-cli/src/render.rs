@@ -185,6 +185,10 @@ impl EventSink for Renderer {
                 decision,
                 ..
             } => self.decision(tool, action.subject.as_deref(), decision),
+            AgentEvent::ToolStarted { call, .. } if call.name == gyr_core::todo::TODO => {
+                self.break_stream()?;
+                todo_started(call)
+            }
             AgentEvent::ToolStarted { call, .. } => {
                 self.break_stream()?;
                 // The machine is about to do something, so the machine's colour.
@@ -414,6 +418,20 @@ fn argument_string(arguments: &Value, key: &str) -> Option<String> {
 
 fn argument_number(arguments: &Value, key: &str) -> Option<u64> {
     arguments.get(key).and_then(Value::as_u64)
+}
+
+/// The checklist itself, rather than a one-line summary of the call.
+fn todo_started(call: &gyr_protocol::ToolCall) -> Result<(), SinkError> {
+    let list = gyr_core::todo::items(&call.arguments)
+        .map(|items| gyr_core::todo::render(&items))
+        .unwrap_or_default();
+    let indented = list.lines().fold(String::new(), |mut block, line| {
+        block.push_str("    ");
+        block.push_str(line);
+        block.push('\n');
+        block
+    });
+    write_out(&style::paint(SLATE, &format!("  › todo\n{indented}")))
 }
 
 fn tool_finished(result: &ToolResult) -> Result<(), SinkError> {
