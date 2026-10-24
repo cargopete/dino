@@ -174,6 +174,7 @@ fn eval_settings(
         sandbox: args.sandbox,
         protected: Vec::new(),
         max_diagnostics: args.max_diagnostics,
+        hooks: Vec::new(),
         thinking_budget: args.thinking_budget,
         show_reasoning: false,
         api_base: args.api_base.clone(),

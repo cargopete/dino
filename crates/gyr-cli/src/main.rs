@@ -345,6 +345,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         &gyr_eval::ToolOptions {
             protected: settings.protected.clone(),
             max_diagnostics: settings.max_diagnostics,
+            hooks: settings.hooks.clone(),
             github: gyr_exec::GithubTool::available(),
             web: true,
         },
@@ -544,6 +545,7 @@ struct Resolved {
     protected: (Vec<PathBuf>, Source),
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
+    hooks: (Vec<gyr_exec::Hook>, Source),
     layers: Layers,
 }
 
@@ -625,6 +627,20 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
+        hooks: layers
+            .pick_user_only(|file| {
+                file.hooks.as_ref().map(|hooks| {
+                    hooks
+                        .iter()
+                        .filter(|hook| hook.event == settings::HookEvent::AfterEdit)
+                        .map(|hook| gyr_exec::Hook {
+                            command: hook.command.clone(),
+                            extension: hook.extension.clone(),
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or((Vec::new(), Source::Default)),
         layers,
     })
 }
@@ -759,6 +775,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         sandbox: resolved.sandbox.0,
         protected: resolved.protected.0,
         max_diagnostics: resolved.max_diagnostics.0,
+        hooks: resolved.hooks.0,
         thinking_budget: resolved.thinking_budget.0,
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,

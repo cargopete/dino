@@ -123,9 +123,14 @@ CI and evals.
 - **Configuration, split by who wrote it.** `~/.config/gyr/config.toml` for your
   defaults, `<workspace>/.gyr/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
-  `sandbox` or `api_base`: the first two weaken a boundary and the third
-  redirects where a credential is sent. A project file that tries is an error
-  naming the file and the key. No file holds a credential at any layer.
+  `sandbox`, `api_base` or `hooks`: two weaken a boundary, one redirects where a
+  credential is sent and one runs commands. A project file that tries is an
+  error naming the file and the key. No file holds a credential at any layer.
+- **Hooks.** `[[hooks]]` in the user file run after the file tools edit a file,
+  inside the sandbox, with `{path}` for the file and an optional `extension`:
+  `command = ["rustfmt", "--edition", "2024", "{path}"]` with `extension = "rs"`
+  formats every Rust edit. The tool result says what ran, and says so when a
+  hook changed the file, so the model reads it again before the next edit.
 - **An eval harness.** `gyr eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also

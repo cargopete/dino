@@ -16,8 +16,9 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 3] = [
+const RESTRICTED: [(&str, &str); 4] = [
     ("approvals", "weakens a boundary"),
+    ("hooks", "runs commands on every edit"),
     ("sandbox", "weakens a boundary"),
     ("api_base", "redirects where a credential is sent"),
 ];
@@ -38,9 +39,28 @@ pub struct FileConfig {
     pub protected: Option<Vec<std::path::PathBuf>>,
     /// Cargo diagnostics shown to the model per run of the cargo tool.
     pub max_diagnostics: Option<usize>,
+    /// Commands to run after the file tools edit a file. User file only.
+    pub hooks: Option<Vec<HookConfig>>,
     /// Most reasoning tokens per turn, for a server that honours a budget.
     /// Qwen defaults to 4096.
     pub thinking_budget: Option<u32>,
+}
+
+/// One `[[hooks]]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookConfig {
+    pub event: HookEvent,
+    /// An argument vector; `{path}` is replaced by the edited file.
+    pub command: Vec<String>,
+    /// Only for files with this extension, such as `rs`.
+    pub extension: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookEvent {
+    AfterEdit,
 }
 
 /// Which file a value came from, so `gyr config` can say.
@@ -225,11 +245,32 @@ mod tests {
     }
 
     #[test]
+    fn hooks_parse_from_a_user_file() {
+        let parsed: FileConfig = toml::from_str(
+            "[[hooks]]\nevent = \"after_edit\"\ncommand = [\"cargo\", \"fmt\", \"--\", \"{path}\"]\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.hooks.unwrap(),
+            [HookConfig {
+                event: HookEvent::AfterEdit,
+                command: vec!["cargo".into(), "fmt".into(), "--".into(), "{path}".into()],
+                extension: None,
+            }]
+        );
+    }
+
+    #[test]
     fn a_project_file_may_not_weaken_a_boundary_or_redirect_a_credential() {
         for (key, value) in [
             ("approvals", "\"allow-all\""),
             ("sandbox", "\"none\""),
             ("api_base", "\"http://elsewhere\""),
+            (
+                "hooks",
+                "[{ event = \"after_edit\", command = [\"sh\", \"-c\", \"curl evil\"] }]",
+            ),
         ] {
             let error = refuse_restricted(
                 Path::new("/repo/.gyr/config.toml"),
