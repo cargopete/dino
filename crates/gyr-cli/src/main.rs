@@ -225,11 +225,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let tools = tool_set(
         &workspace,
         sandbox,
-        &gyr_eval::ToolOptions {
-            github: gyr_exec::GithubTool::available(),
-            web: true,
-            ..gyr_eval::ToolOptions::default()
-        },
+        &interactive_options(&workspace, Vec::new(), None, Vec::new()),
     )?;
     let context = prompt_context(
         &workspace,
@@ -274,6 +270,9 @@ fn prompt_context(
         approval_mode: mode.label().to_owned(),
         max_model_turns,
         git: gyr_core::git::GitSnapshot::take(workspace),
+        memory: memory_files(workspace)
+            .map(|files| gyr_core::prompt::load_memory(&files))
+            .unwrap_or_default(),
         instructions: gyr_core::prompt::load_instructions(
             settings::user_instructions_path().as_deref(),
             workspace,
@@ -281,14 +280,42 @@ fn prompt_context(
     }
 }
 
+/// The tools a person's own session gets, as opposed to an eval's.
+fn interactive_options(
+    workspace: &Path,
+    protected: Vec<PathBuf>,
+    max_diagnostics: Option<usize>,
+    hooks: Vec<gyr_exec::Hook>,
+) -> gyr_eval::ToolOptions {
+    gyr_eval::ToolOptions {
+        protected,
+        max_diagnostics,
+        hooks,
+        memory: memory_files(workspace),
+        github: gyr_exec::GithubTool::available(),
+        web: true,
+    }
+}
+
+/// The user's memory file and this workspace's, beside the user config.
+fn memory_files(workspace: &Path) -> Option<gyr_core::memory::MemoryFiles> {
+    let dir = settings::user_dir()?.join("memory");
+    let name = workspace.display().to_string().replace('/', "%");
+    Some(gyr_core::memory::MemoryFiles {
+        user: dir.join("user.md"),
+        workspace: dir.join(format!("{name}.md")),
+    })
+}
+
 /// Names the instruction files a session read, so they are never a surprise.
 fn announce_instructions(context: &PromptContext) {
-    if context.instructions.is_empty() {
+    if context.instructions.is_empty() && context.memory.is_empty() {
         return;
     }
     let sources = context
         .instructions
         .iter()
+        .chain(&context.memory)
         .map(|item| {
             if item.truncated {
                 format!("{} (truncated)", item.source)
@@ -343,13 +370,12 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
     let tools = tool_set(
         &settings.workspace,
         Arc::clone(&sandbox),
-        &gyr_eval::ToolOptions {
-            protected: settings.protected.clone(),
-            max_diagnostics: settings.max_diagnostics,
-            hooks: settings.hooks.clone(),
-            github: gyr_exec::GithubTool::available(),
-            web: true,
-        },
+        &interactive_options(
+            &settings.workspace,
+            settings.protected.clone(),
+            settings.max_diagnostics,
+            settings.hooks.clone(),
+        ),
     )?;
     let definitions = tools.definitions();
     let context = prompt_context(
