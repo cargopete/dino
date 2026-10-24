@@ -277,6 +277,7 @@ pub fn session_tools(
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         file_tools(workspace, options, &sandbox)?,
         Box::new(gyr_core::blocker::BlockerTool),
+        Box::new(gyr_core::todo::TodoTool),
         Box::new(
             ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
         ),
