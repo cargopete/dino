@@ -73,7 +73,9 @@ CI and evals.
   mutating or process. Read-only calls proceed. Anything else asks, and a session
   rule is keyed on the tool and the resolved target, never on a description of
   what a command probably does. A refusal returns to the model as an ordinary
-  tool result under its original call ID.
+  tool result under its original call ID. Answering `r` keeps the rule for the
+  workspace in `~/.config/gyr/approvals/`, outside the repository, so a checkout
+  cannot approve its own commands; the file is plain JSON, to read or prune.
 - **A line-based session.** Not an alternate-screen interface, deliberately: the
   transcript belongs in the terminal's scrollback, where a person goes to find
   what the agent did an hour ago and where selection and copying still work.

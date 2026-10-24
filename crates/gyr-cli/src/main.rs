@@ -393,7 +393,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
             ..AgentConfig::default()
         },
     )
-    .with_policy(policy(settings.mode, &sandbox_label))
+    .with_policy(policy(settings.mode, &sandbox_label, &settings.workspace))
     .with_sink((renderer, log));
     let check = if unattended {
         gyr_eval::build_check(&settings.workspace, Arc::clone(&sandbox))?
@@ -742,9 +742,17 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
     })
 }
 
-fn policy(mode: ApprovalMode, sandbox: &str) -> Box<dyn ApprovalPolicy> {
+fn policy(mode: ApprovalMode, sandbox: &str, workspace: &Path) -> Box<dyn ApprovalPolicy> {
     match mode {
-        ApprovalMode::Interactive => Box::new(Interactive::new(TerminalApprover::new(sandbox))),
+        ApprovalMode::Interactive => {
+            let interactive = Interactive::new(TerminalApprover::new(sandbox));
+            match settings::user_dir() {
+                Some(dir) => Box::new(
+                    interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)),
+                ),
+                None => Box::new(interactive),
+            }
+        }
         ApprovalMode::ReadOnly => Box::new(ReadOnly),
         ApprovalMode::AllowAll => Box::new(AllowAll),
     }

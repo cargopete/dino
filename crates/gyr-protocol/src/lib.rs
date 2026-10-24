@@ -246,6 +246,8 @@ pub enum DecisionSource {
     Policy,
     /// Allowed by a narrow rule granted earlier in this session.
     SessionRule,
+    /// Allowed by a rule the user saved for this workspace in an earlier one.
+    SavedRule,
     /// Allowed once, by a person, just now.
     User,
 }

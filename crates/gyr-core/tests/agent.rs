@@ -3,6 +3,8 @@
 mod support;
 
 use std::future::pending;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use futures_util::StreamExt;
 use futures_util::stream;
@@ -1067,4 +1069,54 @@ async fn each_submission_may_be_sent_back_once() {
 
     assert_eq!(sent_back(&first), vec![1]);
     assert_eq!(sent_back(&second), vec![1]);
+}
+
+#[derive(Default, Clone)]
+struct MemoryStore {
+    rules: Arc<Mutex<Vec<String>>>,
+}
+
+impl gyr_core::approval::RuleStore for MemoryStore {
+    fn load(&self) -> Vec<String> {
+        self.rules.lock().unwrap().clone()
+    }
+
+    fn save(&self, key: &str) {
+        self.rules.lock().unwrap().push(key.to_owned());
+    }
+}
+
+#[tokio::test]
+async fn a_remembered_rule_is_saved_and_a_saved_rule_is_not_asked_again() {
+    let store = MemoryStore::default();
+    let (approver, asked) = ScriptedApprover::new(vec![ApprovalReply::Remember]);
+    let mut first = agent(vec![
+        tool_turn(tool_call("call-1", "apply_patch", "src/lib.rs")),
+        text_turn("done"),
+    ])
+    .with_policy(Interactive::new(approver).with_store(store.clone()));
+    first.run("edit").await.unwrap();
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert_eq!(
+        *store.rules.lock().unwrap(),
+        vec!["apply_patch\u{1f}src/lib.rs".to_owned()]
+    );
+
+    // A later session, as after a restart: the store is all that carries over.
+    let (approver, asked) = ScriptedApprover::new(Vec::new());
+    let mut second = agent(vec![
+        tool_turn(tool_call("call-1", "apply_patch", "src/lib.rs")),
+        text_turn("done"),
+    ])
+    .with_policy(Interactive::new(approver).with_store(store));
+    let result = second.run("edit again").await.unwrap();
+
+    assert!(asked.lock().unwrap().is_empty());
+    assert_eq!(
+        decisions(&result)
+            .into_iter()
+            .map(|(_, decision)| decision)
+            .collect::<Vec<_>>(),
+        vec![ApprovalDecision::allowed(DecisionSource::SavedRule)]
+    );
 }
