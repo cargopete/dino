@@ -308,8 +308,7 @@ where
             ),
             Input::Plan(Some(task)) => {
                 self.set_planning(true);
-                self.submit(format!("{PLAN_MODE}\n\nThe task: {task}"))
-                    .await;
+                self.submit(format!("{task}\n\n{PLAN_MODE}")).await;
                 Self::ask_about_plan();
             }
             Input::Cost => println!("{}", self.cost()),
