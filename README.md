@@ -54,7 +54,7 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Ten tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Eleven tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
@@ -68,9 +68,11 @@ CI and evals.
   rather than bend a test to fit. `github` reads the checkout's own issues and
   pull requests through a fixed set of read-only `gh` commands, run by `gyr`
   rather than by a confined process, and is offered only where `gh` is
-  installed.
+  installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
+  host, because a URL can carry workspace text out; a redirect to another host
+  is refused rather than followed past that approval.
 - **Approval enforced below the model.** Every call is classified read-only,
-  mutating or process. Read-only calls proceed. Anything else asks, and a session
+  mutating, process or network. Read-only calls proceed. Anything else asks, and a session
   rule is keyed on the tool and the resolved target, never on a description of
   what a command probably does. A refusal returns to the model as an ordinary
   tool result under its original call ID. Answering `r` keeps the rule for the

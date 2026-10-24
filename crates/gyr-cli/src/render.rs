@@ -368,6 +368,7 @@ pub fn describe_call(call: &ToolCall) -> String {
                     .join(" ")
             }),
         "gate" | "shell" => argument_string(&call.arguments, "command"),
+        "web_fetch" => argument_string(&call.arguments, "url"),
         "cargo" => argument_string(&call.arguments, "command").map(|command| {
             let package = argument_string(&call.arguments, "package")
                 .map_or_else(String::new, |package| format!(" -p {package}"));

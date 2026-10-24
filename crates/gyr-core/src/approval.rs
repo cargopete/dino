@@ -70,7 +70,7 @@ impl ApprovalPolicy for ReadOnly {
     fn decide(&self, _call: &ToolCall, action: &ToolAction) -> DecisionFuture<'_> {
         let decision = match action.class {
             ToolClass::ReadOnly => ApprovalDecision::allowed(DecisionSource::Policy),
-            ToolClass::Mutating | ToolClass::Process => {
+            ToolClass::Mutating | ToolClass::Process | ToolClass::Network => {
                 ApprovalDecision::denied("this session runs in read-only mode")
             }
         };

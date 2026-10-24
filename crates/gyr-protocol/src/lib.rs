@@ -191,6 +191,9 @@ pub enum ToolClass {
     /// Runs code on the host. Its effects are not bounded by the filesystem
     /// fence, and no policy auto-allows it.
     Process,
+    /// Sends a request off the machine. The subject is the host, because a
+    /// request can carry workspace content out in its URL.
+    Network,
 }
 
 /// A classified tool call, with the narrow subject a session rule may be keyed on.
@@ -223,6 +226,14 @@ impl ToolAction {
         Self {
             class: ToolClass::Process,
             subject: Some(subject.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn network(host: impl Into<String>) -> Self {
+        Self {
+            class: ToolClass::Network,
+            subject: Some(host.into()),
         }
     }
 
