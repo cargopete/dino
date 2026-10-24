@@ -33,6 +33,7 @@ gyr-protocol = { path = "crates/gyr-protocol" }
 gyr-rust = { path = "crates/gyr-rust" }
 gyr-sandbox = { path = "crates/gyr-sandbox" }
 gyr-tools = { path = "crates/gyr-tools" }
+html2text = "0.17.4"
 ignore = "0.4.33"
 landlock = "0.4.4"
 pretty_assertions = "1.4.1"

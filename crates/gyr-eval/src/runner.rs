@@ -22,6 +22,8 @@ use gyr_exec::ExecTool;
 use gyr_exec::GithubLimits;
 use gyr_exec::GithubTool;
 use gyr_exec::ShellTool;
+use gyr_exec::WebFetchTool;
+use gyr_exec::WebLimits;
 use gyr_model::ModelSession;
 use gyr_protocol::ToolAction;
 use gyr_protocol::ToolCall;
@@ -87,6 +89,8 @@ pub struct ToolOptions {
     /// Offer the read-only `github` tool. Off for evals, which must not depend
     /// on the network.
     pub github: bool,
+    /// Offer `web_fetch`. Off for evals, for the same reason.
+    pub web: bool,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -156,6 +160,7 @@ pub async fn run_case(
                 protected: case.protected.clone(),
                 max_diagnostics: variant.max_diagnostics,
                 github: false,
+                web: false,
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -281,6 +286,11 @@ pub fn session_tools(
                 .map_err(setup)?,
         ),
     ];
+    if options.web {
+        runtimes.push(Box::new(
+            WebFetchTool::new(WebLimits::default()).map_err(setup)?,
+        ));
+    }
     if options.github {
         runtimes.push(Box::new(
             GithubTool::new(workspace, GithubLimits::default()).map_err(setup)?,

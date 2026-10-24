@@ -227,6 +227,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
         sandbox,
         &gyr_eval::ToolOptions {
             github: gyr_exec::GithubTool::available(),
+            web: true,
             ..gyr_eval::ToolOptions::default()
         },
     )?;
@@ -345,6 +346,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
             protected: settings.protected.clone(),
             max_diagnostics: settings.max_diagnostics,
             github: gyr_exec::GithubTool::available(),
+            web: true,
         },
     )?;
     let definitions = tools.definitions();

@@ -84,6 +84,12 @@ fn ask_on_terminal(
                 "      runs code on your machine · containment: {sandbox} · what it runs may change"
             )),
         ),
+        ToolClass::Network => (
+            "always for this host",
+            Some(format!(
+                "      sends a request to {subject} · the URL can carry workspace text with it"
+            )),
+        ),
         _ => ("always for this file", None),
     };
     let question = style::paint(
