@@ -8,6 +8,7 @@
 pub mod approval;
 pub mod blocker;
 pub mod git;
+pub mod memory;
 pub mod prompt;
 pub mod resume;
 pub mod session;

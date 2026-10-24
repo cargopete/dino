@@ -91,6 +91,8 @@ pub struct ToolOptions {
     pub github: bool,
     /// Offer `web_fetch`. Off for evals, for the same reason.
     pub web: bool,
+    /// Where `remember` writes. None in evals, which keep no memory.
+    pub memory: Option<gyr_core::memory::MemoryFiles>,
     /// After-edit hooks around the file tools. None in evals.
     pub hooks: Vec<gyr_exec::Hook>,
 }
@@ -164,6 +166,7 @@ pub async fn run_case(
                 github: false,
                 web: false,
                 hooks: Vec::new(),
+                memory: None,
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -180,6 +183,7 @@ pub async fn run_case(
         git: None,
         // None, so a user's own instructions cannot move a measurement.
         instructions: Vec::new(),
+        memory: Vec::new(),
     };
     let session = build_session(system_prompt(&context), definitions)?;
 
@@ -286,6 +290,9 @@ pub fn session_tools(
                 .map_err(setup)?,
         ),
     ];
+    if let Some(files) = &options.memory {
+        runtimes.push(Box::new(gyr_core::memory::MemoryTool::new(files.clone())));
+    }
     if options.web {
         runtimes.push(Box::new(
             WebFetchTool::new(WebLimits::default()).map_err(setup)?,
