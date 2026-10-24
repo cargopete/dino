@@ -48,8 +48,10 @@ for line in sys.stdin:
         pass
 "#;
 
-fn fixture() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("gyr-mcp-{}", std::process::id()));
+/// Its own directory per test: they run in parallel, and one rewriting the
+/// script while another's server starts reading it left a half-written file.
+fn fixture(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("gyr-mcp-{}-{name}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("server.py"), SERVER).unwrap();
     fs::canonicalize(root).unwrap()
@@ -85,7 +87,7 @@ fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
 
 #[tokio::test]
 async fn tools_from_every_page_are_offered_under_the_server_prefix() {
-    let root = fixture();
+    let root = fixture("pages");
     let tools = connect(&root).await;
 
     let names: Vec<_> = tools
@@ -99,7 +101,7 @@ async fn tools_from_every_page_are_offered_under_the_server_prefix() {
 
 #[tokio::test]
 async fn calls_return_text_and_errors_as_errors() {
-    let root = fixture();
+    let root = fixture("calls");
     let tools = connect(&root).await;
 
     let sum = tools
@@ -119,7 +121,7 @@ async fn calls_return_text_and_errors_as_errors() {
 
 #[tokio::test]
 async fn listed_read_only_tools_skip_approval_and_the_rest_are_processes() {
-    let root = fixture();
+    let root = fixture("classes");
     let tools = connect(&root).await;
 
     let add = tools.classify(&call("mcp__fake__add", json!({}))).unwrap();

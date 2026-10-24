@@ -54,6 +54,9 @@ pub struct Metrics {
     /// Whether the model ended its turn with work unfinished and was sent back.
     #[serde(default)]
     pub sent_back: bool,
+    /// Fresh sessions a handover chain started after the first.
+    #[serde(default)]
+    pub handovers: usize,
     pub tokens: TokenUsage,
     pub stop_reason: Option<StopReason>,
 }
@@ -153,6 +156,7 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &Ag
         AgentEvent::TurnsRunningOut { .. } => metrics.told_turns_left = true,
         AgentEvent::TurnCutOff { .. } => metrics.turns_cut_off += 1,
         AgentEvent::SentBack { .. } => metrics.sent_back = true,
+        AgentEvent::HandedOver { .. } => metrics.handovers += 1,
         // Counted by nothing: a submission is the unit a metric is per, not a
         // metric itself.
         AgentEvent::Submitted { .. }
