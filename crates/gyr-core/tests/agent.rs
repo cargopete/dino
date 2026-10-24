@@ -1120,3 +1120,40 @@ async fn a_remembered_rule_is_saved_and_a_saved_rule_is_not_asked_again() {
         vec![ApprovalDecision::allowed(DecisionSource::SavedRule)]
     );
 }
+
+#[tokio::test]
+async fn the_plan_gate_refuses_changes_while_planning_and_steps_aside_after() {
+    use gyr_core::approval::ApprovalPolicy;
+    use gyr_core::approval::PlanGate;
+    use gyr_protocol::ToolAction;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    let planning = Arc::new(AtomicBool::new(true));
+    let gate = PlanGate::new(AllowAll, Arc::clone(&planning));
+    let call = tool_call("call-1", "apply_patch", "src/lib.rs");
+
+    for action in [
+        ToolAction::mutating("src/lib.rs"),
+        ToolAction::process("cargo test"),
+    ] {
+        let decision = gate.decide(&call, &action).await;
+        assert!(
+            matches!(&decision, ApprovalDecision::Denied { reason } if reason.contains("plan")),
+            "{decision:?}"
+        );
+    }
+    for action in [ToolAction::read_only(), ToolAction::network("docs.rs")] {
+        assert!(matches!(
+            gate.decide(&call, &action).await,
+            ApprovalDecision::Allowed { .. }
+        ));
+    }
+
+    planning.store(false, Ordering::Relaxed);
+    assert!(matches!(
+        gate.decide(&call, &ToolAction::mutating("src/lib.rs"))
+            .await,
+        ApprovalDecision::Allowed { .. }
+    ));
+}

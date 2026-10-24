@@ -315,6 +315,7 @@ struct Prepared {
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
     requests: Arc<std::sync::atomic::AtomicU64>,
+    planning: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
@@ -393,6 +394,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
     let renderer = Renderer::new(settings.show_reasoning);
     let usage = renderer.usage_handle();
     let requests = renderer.requests_handle();
+    let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
         model,
         tools,
@@ -401,7 +403,10 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
             ..AgentConfig::default()
         },
     )
-    .with_policy(policy(settings.mode, &sandbox_label, &settings.workspace))
+    .with_policy(gyr_core::approval::PlanGate::new(
+        policy(settings.mode, &sandbox_label, &settings.workspace),
+        Arc::clone(&planning),
+    ))
     .with_sink((renderer, log));
     let check = if unattended {
         gyr_eval::build_check(&settings.workspace, Arc::clone(&sandbox))?
@@ -423,6 +428,7 @@ fn prepare(common: &CommonArgs, unattended: bool) -> Result<Prepared> {
         system_prompt: prompt,
         definitions,
         requests,
+        planning,
     })
 }
 
@@ -447,6 +453,8 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         workspace_root: prepared.settings.workspace.clone(),
         run_id: prepared.session_id.as_str().to_owned(),
         conversations: 0,
+        planning: prepared.planning,
+        awaiting_plan: false,
         model: prepared.settings.profile.display_name.clone(),
         workspace: prepared.settings.workspace.display().to_string(),
         sandbox: prepared.sandbox_label,
