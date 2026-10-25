@@ -116,7 +116,7 @@ impl Sandbox for Seatbelt {
         }
         format!(
             "workspace (seatbelt: writes confined{protected}, executable config \
-             protected{credentials}, network denied)"
+             protected{credentials}, network denied except loopback)"
         )
     }
 
@@ -183,6 +183,14 @@ fn profile_for(
                 .expect("writing to a String cannot fail");
         }
     }
+    // Loopback only, so a test can start a server and talk to it. Everything
+    // else on the network stays denied by default.
+    profile.push_str(
+        "(allow system-socket)\n\
+         (allow network-bind (local ip \"localhost:*\"))\n\
+         (allow network-inbound (local ip \"localhost:*\"))\n\
+         (allow network-outbound (remote ip \"localhost:*\"))\n",
+    );
     for device in WRITABLE_DEVICES {
         writeln!(profile, "(allow file-write* (literal \"{device}\"))")
             .expect("writing to a String cannot fail");
@@ -286,11 +294,13 @@ mod tests {
         assert!(profile.contains("(allow file-read*)"));
         assert!(profile.contains(r#"(allow file-write* (subpath "/tmp/workspace"))"#));
         assert!(profile.contains(r#"(allow file-write* (literal "/dev/null"))"#));
-        assert!(
-            !profile.contains("network"),
-            "denying by default is what denies the network; naming it would only \
-             invite an allow rule to be added beside it"
-        );
+        for line in profile.lines().filter(|line| line.contains("network")) {
+            assert!(
+                line.contains("localhost"),
+                "denying by default is what denies the network; only loopback may be \
+                 named: {line}"
+            );
+        }
     }
 
     #[test]
@@ -385,6 +395,51 @@ mod tests {
             assert!(!touch(path), "{path} was writable");
         }
         assert!(sandbox.label().contains("executable config protected"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn loopback_servers_work_and_the_outside_world_stays_shut() {
+        let nested = std::process::Command::new(SANDBOX_EXEC)
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|status| !status.success());
+        if nested {
+            eprintln!("skipped: already inside a sandbox");
+            return;
+        }
+        let workspace = std::env::temp_dir().join(format!("gyr-loopback-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let sandbox = Seatbelt::new(&workspace).unwrap();
+        let python = |code: &str| {
+            let wrapped = sandbox
+                .wrap("/usr/bin/python3", &["-c".to_owned(), code.to_owned()])
+                .unwrap();
+            std::process::Command::new(&wrapped.program)
+                .args(&wrapped.arguments)
+                .output()
+                .unwrap()
+        };
+
+        let local = python(
+            "import socket\n\
+             s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n\
+             c = socket.create_connection(s.getsockname()); a, _ = s.accept()\n\
+             c.sendall(b'ping'); print(a.recv(4).decode())",
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&local.stdout).trim(),
+            "ping",
+            "{}",
+            String::from_utf8_lossy(&local.stderr)
+        );
+        let outside =
+            python("import socket\nsocket.create_connection(('93.184.215.14', 80), timeout=5)");
+        assert!(
+            !outside.status.success(),
+            "an outside connection got through"
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 

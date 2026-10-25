@@ -154,6 +154,11 @@ pub enum TurnInput {
     },
 }
 
+/// The key a tool call's arguments are wrapped in when they were not valid
+/// JSON: `{key: {"raw": ..., "error": ...}}`. The tool set refuses such a call
+/// with a message the model can act on, rather than the run ending.
+pub const UNPARSED_ARGUMENTS: &str = "gyr_unparsed_arguments";
+
 /// An image a person attached, encoded for the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {

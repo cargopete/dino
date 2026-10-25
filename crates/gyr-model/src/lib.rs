@@ -264,6 +264,15 @@ pub(crate) fn http_client() -> Result<reqwest::Client, ModelError> {
         .map_err(|error| ModelError::Configuration(format!("HTTP client: {error}")))
 }
 
+/// Arguments that did not parse, wrapped for the tool set to refuse with a
+/// message the model can act on. See [`gyr_protocol::UNPARSED_ARGUMENTS`].
+pub(crate) fn unparsed(raw: &str, error: &serde_json::Error) -> Value {
+    serde_json::json!({ gyr_protocol::UNPARSED_ARGUMENTS: {
+        "raw": raw,
+        "error": error.to_string(),
+    }})
+}
+
 /// The model used when none is selected. Open weights, so anyone can serve it.
 pub const DEFAULT_PROFILE: &str = "qwen3.8-27b";
 

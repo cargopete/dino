@@ -160,6 +160,15 @@ impl ToolRuntime for ToolSet {
     }
 
     fn classify(&self, call: &ToolCall) -> Result<ToolAction, ToolError> {
+        if let Some(unparsed) = call.arguments.get(gyr_protocol::UNPARSED_ARGUMENTS) {
+            return Err(ToolError::new(format!(
+                "The arguments for {} were not valid JSON ({}). You sent: {}\nSend the call \
+                 again with valid JSON: every string quoted, every key quoted.",
+                call.name,
+                unparsed["error"].as_str().unwrap_or("unknown error"),
+                unparsed["raw"].as_str().unwrap_or_default(),
+            )));
+        }
         self.owner(call)?.classify(call)
     }
 

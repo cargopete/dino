@@ -632,16 +632,20 @@ impl MessagesStreamParser {
         else {
             return Ok(Vec::new());
         };
-        let input = if partial_json.is_empty() {
-            initial_input.clone()
+        // Unparsable arguments go to the tool set to refuse; history keeps an
+        // empty object, which the API accepts back.
+        let (input, kept) = if partial_json.is_empty() {
+            (initial_input.clone(), initial_input.clone())
         } else {
-            serde_json::from_str(partial_json).map_err(|error| {
-                ModelError::Protocol(format!(
-                    "Anthropic returned invalid arguments for {name}: {error}"
-                ))
-            })?
+            match serde_json::from_str(partial_json) {
+                Ok(input) => (input, Value::Null),
+                Err(error) => (
+                    crate::unparsed(partial_json, &error),
+                    Value::Object(serde_json::Map::new()),
+                ),
+            }
         };
-        *final_input = Some(input.clone());
+        *final_input = Some(if kept.is_null() { input.clone() } else { kept });
         Ok(vec![ModelEvent::ToolCallCompleted {
             call: ToolCall {
                 id: id.clone(),
@@ -1221,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_invalid_partial_tool_json() {
+    fn invalid_partial_tool_json_is_marked_for_the_tool_set_to_refuse() {
         let mut parser = MessagesStreamParser::default();
         parser
             .consume(
@@ -1234,11 +1238,14 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            parser
-                .consume(r#"{"type":"content_block_stop","index":0}"#)
-                .is_err()
-        );
+        let events = parser
+            .consume(r#"{"type":"content_block_stop","index":0}"#)
+            .unwrap();
+
+        let Some(ModelEvent::ToolCallCompleted { call }) = events.first() else {
+            panic!("no call completed: {events:?}");
+        };
+        assert_eq!(call.arguments[gyr_protocol::UNPARSED_ARGUMENTS]["raw"], "{");
     }
 
     #[test]

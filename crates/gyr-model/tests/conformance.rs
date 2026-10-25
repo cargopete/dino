@@ -451,19 +451,28 @@ async fn every_adapter_keeps_text_and_a_tool_call_from_one_turn() {
 }
 
 #[tokio::test]
-async fn every_adapter_refuses_truncated_tool_arguments() {
+async fn every_adapter_marks_truncated_tool_arguments_instead_of_building_a_call() {
     for provider in Provider::ALL {
-        let error = run(provider, malformed_arguments().for_provider(provider))
+        let events = run(provider, malformed_arguments().for_provider(provider))
             .await
-            .err()
-            .unwrap_or_else(|| panic!("{}: half a JSON object was accepted", provider.name()));
+            .unwrap_or_else(|error| panic!("{}: {error}", provider.name()));
 
-        // Never a tool call built from an unparsable fragment. What the message
-        // says is the adapter's business; that it refuses is not.
+        // Never a usable call built from an unparsable fragment: the arguments
+        // are marked, so the tool set refuses the call and the model can retry.
+        let call = events
+            .iter()
+            .find_map(|event| match event {
+                ModelEvent::ToolCallCompleted { call } => Some(call),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{}: no call completed", provider.name()));
         assert!(
-            matches!(error, ModelError::Protocol(_)),
-            "{}: {error}",
-            provider.name()
+            call.arguments
+                .get(gyr_protocol::UNPARSED_ARGUMENTS)
+                .is_some(),
+            "{}: {}",
+            provider.name(),
+            call.arguments
         );
     }
 }
