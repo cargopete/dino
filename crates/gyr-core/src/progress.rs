@@ -205,12 +205,15 @@ enum Op {
     Note { text: String },
 }
 
-/// One item number, or several, so finishing a plan costs one call.
+/// One item number, or several. The schema offers an integer only: a union
+/// type there made Qwen send `"1"` and `"[1, 2]"` as strings, so those are
+/// read too.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum Numbers {
     One(usize),
     Many(Vec<usize>),
+    Text(String),
 }
 
 impl Numbers {
@@ -218,6 +221,13 @@ impl Numbers {
         match self {
             Self::One(number) => vec![*number],
             Self::Many(numbers) => numbers.clone(),
+            Self::Text(text) => {
+                let text = text.trim();
+                serde_json::from_str::<Vec<usize>>(text)
+                    .ok()
+                    .or_else(|| text.parse().ok().map(|number| vec![number]))
+                    .unwrap_or_else(|| vec![0])
+            }
         }
     }
 }
@@ -229,7 +239,7 @@ impl ToolRuntime for Progress {
             description: "Keep the progress record this task is carried by. It may continue in \
                           a fresh session that sees only the record and the workspace. op plan \
                           sets 2 to 6 items before you start; op done or blocked marks items by \
-                          number (one, or a list such as [2, 3]), with a short note; op note records what a fresh session would \
+                          number, with a short note; op note records what a fresh session would \
                           need: what you tried, why it failed, where things are."
                 .into(),
             input_schema: json!({
@@ -237,11 +247,7 @@ impl ToolRuntime for Progress {
                 "properties": {
                     "op": {"type": "string", "enum": ["plan", "done", "blocked", "note"]},
                     "items": {"type": "array", "items": {"type": "string"}},
-                    "item": {
-                        "type": ["integer", "array"],
-                        "minimum": 1,
-                        "items": {"type": "integer", "minimum": 1}
-                    },
+                    "item": {"type": "integer", "minimum": 1},
                     "note": {"type": "string"},
                     "text": {"type": "string"}
                 },
@@ -314,7 +320,8 @@ mod tests {
         );
         for arguments in [
             json!({"op": "plan", "items": ["a", "b", "c"]}),
-            json!({"op": "done", "item": [1, 2, 3], "note": "all verified"}),
+            json!({"op": "done", "item": [1, 2], "note": "all verified"}),
+            json!({"op": "done", "item": "3", "note": "all verified"}),
         ] {
             progress.execute(&call(arguments)).await.unwrap();
         }
@@ -342,6 +349,7 @@ mod tests {
             json!({"op": "done", "item": 0}),
             json!({"op": "done", "item": 3}),
             json!({"op": "done", "item": [2, 3]}),
+            json!({"op": "done", "item": "two"}),
             json!({"op": "note", "text": "  "}),
         ] {
             assert!(

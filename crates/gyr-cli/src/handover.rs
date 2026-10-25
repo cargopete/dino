@@ -107,8 +107,17 @@ pub async fn run(
             message = String::from(PENDING);
             continue;
         }
-        if finished || session >= MAX_SESSIONS || used >= total {
+        if finished {
+            // Nothing pending but not all done: some items were marked blocked.
+            if !record.items.is_empty() && record.done() < record.items.len() {
+                return Ok(Ended::Stopped(StopReason::Blocked));
+            }
             return Ok(stop.map_or(Ended::OutOfTurns, Ended::Stopped));
+        }
+        // Out of sessions or turns with the plan unfinished is unfinished,
+        // whatever the last session's own stop reason said.
+        if session >= MAX_SESSIONS || used >= total {
+            return Ok(Ended::OutOfTurns);
         }
         // A session that ended of its own accord without finishing an item
         // is allowed once; twice in a row ends the chain rather than looping.
