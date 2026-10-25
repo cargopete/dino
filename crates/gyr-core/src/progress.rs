@@ -117,8 +117,7 @@ impl Progress {
     }
 
     fn apply(&self, arguments: &Value) -> Result<String, ToolError> {
-        let op: Op = serde_json::from_value(arguments.clone())
-            .map_err(|error| ToolError::new(format!("invalid {PROGRESS} arguments: {error}")))?;
+        let op = Op::parse(arguments)?;
         let mut record = self
             .record
             .lock()
@@ -196,13 +195,71 @@ impl Progress {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug)]
 enum Op {
     Plan { items: Vec<String> },
     Done { item: Numbers, note: Option<String> },
     Blocked { item: Numbers, note: Option<String> },
     Note { text: String },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    Plan,
+    Done,
+    Blocked,
+    Note,
+}
+
+/// The arguments as sent. Models put `text` where `note` belongs and the other
+/// way round, and name an item under `items`; refusing those cost one run
+/// every call it made, so the fields are read by what the op needs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Arguments {
+    op: Kind,
+    items: Option<Value>,
+    item: Option<Numbers>,
+    note: Option<String>,
+    text: Option<String>,
+}
+
+impl Op {
+    fn parse(arguments: &Value) -> Result<Self, ToolError> {
+        let invalid = |why: &str| ToolError::new(format!("invalid {PROGRESS} arguments: {why}"));
+        let raw: Arguments = serde_json::from_value(arguments.clone())
+            .map_err(|error| invalid(&error.to_string()))?;
+        let words = raw.note.or(raw.text);
+        let numbers = || {
+            raw.item
+                .or_else(|| {
+                    raw.items
+                        .clone()
+                        .and_then(|items| serde_json::from_value(items).ok())
+                })
+                .ok_or_else(|| invalid("done and blocked need item, the item's number"))
+        };
+        Ok(match raw.op {
+            Kind::Plan => Self::Plan {
+                items: raw
+                    .items
+                    .and_then(|items| serde_json::from_value(items).ok())
+                    .ok_or_else(|| invalid("plan needs items, a list of short strings"))?,
+            },
+            Kind::Done => Self::Done {
+                item: numbers()?,
+                note: words,
+            },
+            Kind::Blocked => Self::Blocked {
+                item: numbers()?,
+                note: words,
+            },
+            Kind::Note => Self::Note {
+                text: words.ok_or_else(|| invalid("note needs text"))?,
+            },
+        })
+    }
 }
 
 /// One item number, or several. The schema offers an integer only: a union
@@ -261,8 +318,7 @@ impl ToolRuntime for Progress {
         if call.name != PROGRESS {
             return Err(ToolError::new(format!("unknown tool {:?}", call.name)));
         }
-        serde_json::from_value::<Op>(call.arguments.clone())
-            .map_err(|error| ToolError::new(format!("invalid {PROGRESS} arguments: {error}")))?;
+        Op::parse(&call.arguments)?;
         Ok(ToolAction::read_only())
     }
 
@@ -311,6 +367,28 @@ mod tests {
         let saved: Record = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved, record);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn misplaced_fields_are_read_by_what_the_op_needs() {
+        let progress = Progress::new(
+            std::env::temp_dir().join(format!("gyr-progress-loose-{}.json", std::process::id())),
+        );
+        for arguments in [
+            json!({"op": "plan", "items": ["a", "b", "c"]}),
+            json!({"op": "done", "item": 1, "text": "parser done"}),
+            json!({"op": "done", "items": [2, 3]}),
+            json!({"op": "note", "note": "all green"}),
+        ] {
+            progress
+                .execute(&call(arguments.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("{arguments}: {error}"));
+        }
+        let record = progress.snapshot();
+        assert_eq!(record.done(), 3);
+        assert_eq!(record.items[0].note.as_deref(), Some("parser done"));
+        assert_eq!(record.notes, ["all green"]);
     }
 
     #[tokio::test]
