@@ -887,13 +887,25 @@ fn check(
     // the answer. The rule is that a case must assert something material
     // happened, in the workspace or in what was said, not that every task ends
     // in an edit.
-    if files_changed.is_empty() && case.expect.answer_contains.is_empty() {
+    if files_changed.is_empty()
+        && case.expect.answer_contains.is_empty()
+        && case.expect.answer_mentions.is_empty()
+    {
         failures.push("nothing in the workspace changed".to_owned());
     }
 
     for wanted in &case.expect.answer_contains {
         if !answer.contains(wanted.as_str()) {
             failures.push(format!("the answer does not mention {wanted:?}"));
+        }
+    }
+    let lowered = answer.to_lowercase();
+    for idea in &case.expect.answer_mentions {
+        if !idea
+            .iter()
+            .any(|wording| lowered.contains(&wording.to_lowercase()))
+        {
+            failures.push(format!("the answer mentions none of {idea:?}"));
         }
     }
 
