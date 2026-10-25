@@ -56,6 +56,12 @@ pub const EXECUTABLE_CONFIG: &[&str] = &[
     "rust-toolchain",
     ".envrc",
     ".vscode",
+    // Where packages come from, and code the package manager runs at install.
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".pnpmfile.cjs",
+    "bunfig.toml",
 ];
 
 /// The user's protected paths followed by [`EXECUTABLE_CONFIG`].

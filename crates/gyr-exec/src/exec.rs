@@ -112,6 +112,7 @@ impl ExecTool {
             self.limits.timeout,
         )
         .await?;
+        let note = process::network_note(self.sandbox.as_ref(), &execution);
 
         if execution.timed_out {
             return json_output(&ExecOutput {
@@ -125,6 +126,7 @@ impl ExecTool {
                 ),
                 truncated: execution.truncated,
                 restored_protected_paths: execution.restored,
+                note,
             });
         }
 
@@ -138,6 +140,7 @@ impl ExecTool {
                 || execution.stdout.len() > self.limits.max_output_bytes
                 || execution.stderr.len() > self.limits.max_output_bytes,
             restored_protected_paths: execution.restored,
+            note,
         })
     }
 }
@@ -149,7 +152,9 @@ impl ToolRuntime for ExecTool {
             description: format!(
                 "Run one program with one argument vector. There is no shell: no pipes, no \
                  redirection, no globbing and no &&. Use a program's own flags instead, and \
-                 prefer the read and search tools over cat and grep. Containment: {}.",
+                 prefer the read and search tools over cat and grep. Run Cargo through the \
+                 cargo tool, which can fetch dependencies when nothing else can. \
+                 Containment: {}.",
                 self.sandbox.label()
             ),
             input_schema: json!({
@@ -270,6 +275,9 @@ pub(crate) struct ExecOutput {
     /// Protected paths this command changed, which have been put back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) restored_protected_paths: Vec<String>,
+    /// Why the command failed, when the output alone would mislead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<&'static str>,
 }
 
 pub(crate) fn json_output<T: Serialize>(value: &T) -> Result<ToolOutput, ToolError> {

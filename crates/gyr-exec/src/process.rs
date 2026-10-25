@@ -46,7 +46,59 @@ fn child_environment(sandbox: &dyn Sandbox) -> BTreeMap<&'static str, String> {
     if let Some(temp_dir) = sandbox.temp_dir() {
         environment.insert("TMPDIR", temp_dir.display().to_string());
     }
+    // With the network denied, package managers otherwise retry DNS for minutes
+    // and then fail in words that read as an outage rather than as policy.
+    if sandbox.denies_network() {
+        for (name, value) in OFFLINE {
+            environment.insert(name, (*value).to_owned());
+        }
+    }
     environment
+}
+
+/// Each package manager's own switch for working from its cache alone.
+const OFFLINE: &[(&str, &str)] = &[
+    ("CARGO_NET_OFFLINE", "true"),
+    ("npm_config_offline", "true"),
+    ("YARN_ENABLE_OFFLINE_MODE", "1"),
+    ("GOPROXY", "off"),
+    ("GOFLAGS", "-mod=mod"),
+];
+
+/// What a model is told when a command failed because it tried the network.
+pub const NETWORK_DENIED: &str = "The network is denied in this sandbox. This is policy, not \
+     an outage: nothing run here can download, and mirrors, caches elsewhere on disk and \
+     registry settings will not get round it. Rust dependencies: declare them in Cargo.toml \
+     and use the cargo tool's `fetch`, or its `add`, which may reach crates.io. Other package \
+     managers cannot fetch here; use what is already installed, or say so with report_blocker.";
+
+/// The note for a failed command whose output shows it reaching for the
+/// network, when the sandbox is what stopped it.
+#[must_use]
+pub fn network_note(sandbox: &dyn Sandbox, execution: &Execution) -> Option<&'static str> {
+    const SIGNS: &[&str] = &[
+        "could not resolve host",
+        "couldn't resolve host",
+        "enotfound",
+        "enotcached",
+        "getaddrinfo",
+        "name resolution",
+        "nodename nor servname",
+        "--offline was specified",
+        "offline mode",
+        "goproxy=off",
+        "module lookup disabled",
+        "network is unreachable",
+        "spurious network error",
+    ];
+    if !sandbox.denies_network() || execution.exit_code == Some(0) {
+        return None;
+    }
+    let output = format!("{}\n{}", execution.stdout, execution.stderr).to_lowercase();
+    SIGNS
+        .iter()
+        .any(|sign| output.contains(sign))
+        .then_some(NETWORK_DENIED)
 }
 
 /// Runs a program to completion, or kills it when the clock or the caller says
