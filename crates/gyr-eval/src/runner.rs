@@ -69,6 +69,10 @@ pub struct Outcome {
     /// The run's score, when scoring was asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<crate::score::Score>,
+    /// Everything the score was computed from, so a later scorer version can
+    /// rescore the run without running it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<crate::score::Measured>,
 }
 
 /// How a run differs from the harness as shipped, for ablations.
@@ -164,38 +168,7 @@ pub async fn run_case(
     let workspace = case.materialise(scratch)?;
     let before = fingerprint_tree(&workspace)?;
 
-    let tools = Without {
-        inner: session_tools(
-            &workspace,
-            Arc::clone(&sandbox),
-            &ToolOptions {
-                protected: case.protected.clone(),
-                max_diagnostics: variant.max_diagnostics,
-                github: false,
-                web: false,
-                hooks: Vec::new(),
-                memory: None,
-                skills: Vec::new(),
-            },
-        )?,
-        hidden: variant.without.iter().cloned().collect(),
-    };
-    let definitions = tools.definitions();
-    let context = PromptContext {
-        workspace_root: workspace.display().to_string(),
-        tools: definitions
-            .iter()
-            .map(|definition| definition.name.clone())
-            .collect(),
-        approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
-        max_model_turns: Some(case.max_turns),
-        git: None,
-        // None, so a user's own instructions cannot move a measurement.
-        instructions: Vec::new(),
-        memory: Vec::new(),
-        skills: Vec::new(),
-    };
-    let session = build_session(system_prompt(&context), definitions)?;
+    let (session, tools) = eval_session(case, &workspace, &sandbox, variant, build_session)?;
 
     let log_path = scratch.join(format!("{}.jsonl", case.name));
     let log = case_log(case, &log_path, &workspace, sandbox.as_ref())?;
@@ -235,24 +208,31 @@ pub async fn run_case(
         failures.push(failure);
     }
     let mut measured = if variant.score {
-        Some(
-            measure(
-                case,
-                &workspace,
-                &sandbox,
-                &files_changed,
-                &answer,
-                failures.is_empty(),
-                &metrics,
-            )
-            .await?,
+        let measured = measure(
+            case,
+            &workspace,
+            &sandbox,
+            &files_changed,
+            &answer,
+            failures.is_empty(),
+            &metrics,
         )
+        .await?;
+        Some(measured)
     } else {
         None
     };
     // Last, because the overlay changes the workspace every check above reads.
     if case.expect.hidden_tests {
-        lay_hidden(case, &workspace, sandbox, measured.as_mut(), &mut failures).await?;
+        lay_hidden(
+            case,
+            scratch,
+            &workspace,
+            sandbox,
+            measured.as_mut(),
+            &mut failures,
+        )
+        .await?;
     }
 
     Ok(Outcome {
@@ -266,7 +246,10 @@ pub async fn run_case(
         without: variant.without.clone(),
         max_diagnostics: variant.max_diagnostics,
         thinking_budget: variant.thinking_budget,
-        score: measured.map(|measured| crate::score::score(case, &measured)),
+        score: measured
+            .as_ref()
+            .map(|measured| crate::score::score(case, measured)),
+        measured,
     })
 }
 
@@ -274,6 +257,7 @@ pub async fn run_case(
 /// scoring, and fails the run when they do not pass.
 async fn lay_hidden(
     case: &Case,
+    scratch: &Path,
     workspace: &Path,
     sandbox: Arc<dyn Sandbox>,
     measured: Option<&mut crate::score::Measured>,
@@ -281,12 +265,95 @@ async fn lay_hidden(
 ) -> Result<(), EvalError> {
     crate::case::overlay_hidden(case, workspace)?;
     if let Some(measured) = measured {
+        measured.baseline_passing = baseline_passing(case, scratch).await?;
         hidden_results(case, workspace, &sandbox, measured).await;
     }
     if let Some(failure) = check_hidden_tests(workspace, sandbox).await? {
         failures.push(failure);
     }
     Ok(())
+}
+
+/// Hidden tests that already pass on the untouched workspace, as
+/// `binary::name`. Measured once per case and remembered for later trials.
+async fn baseline_passing(case: &Case, scratch: &Path) -> Result<Vec<String>, EvalError> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(known) = cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&case.name).cloned())
+    {
+        return Ok(known);
+    }
+    let workspace = case.materialise(&scratch.join("baseline"))?;
+    crate::case::overlay_hidden(case, &workspace)?;
+    let sandbox: Arc<dyn Sandbox> = Arc::from(
+        gyr_sandbox::detect_protecting(&workspace, &case.protected)
+            .map_err(|error| EvalError::Setup(error.to_string()))?,
+    );
+    let mut measured = crate::score::Measured::default();
+    hidden_results(case, &workspace, &sandbox, &mut measured).await;
+    let passing = passing_keys(&measured);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(case.name.clone(), passing.clone());
+    }
+    Ok(passing)
+}
+
+fn passing_keys(measured: &crate::score::Measured) -> Vec<String> {
+    measured
+        .hidden
+        .iter()
+        .filter(|test| test.passed)
+        .map(|test| format!("{}::{}", test.binary, test.name))
+        .collect()
+}
+
+/// The model session and the tool set one run of a case gets: the shipped
+/// tools, less any withheld, and a prompt with nothing personal in it.
+fn eval_session(
+    case: &Case,
+    workspace: &Path,
+    sandbox: &Arc<dyn Sandbox>,
+    variant: &Variant,
+    build_session: BuildSession<'_>,
+) -> Result<(Box<dyn ModelSession>, Without), EvalError> {
+    let tools = Without {
+        inner: session_tools(
+            workspace,
+            Arc::clone(sandbox),
+            &ToolOptions {
+                protected: case.protected.clone(),
+                max_diagnostics: variant.max_diagnostics,
+                github: false,
+                web: false,
+                hooks: Vec::new(),
+                memory: None,
+                skills: Vec::new(),
+            },
+        )?,
+        hidden: variant.without.iter().cloned().collect(),
+    };
+    let definitions = tools.definitions();
+    let context = PromptContext {
+        workspace_root: workspace.display().to_string(),
+        tools: definitions
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect(),
+        approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
+        max_model_turns: Some(case.max_turns),
+        git: None,
+        // None, so a user's own instructions cannot move a measurement.
+        instructions: Vec::new(),
+        memory: Vec::new(),
+        skills: Vec::new(),
+    };
+    let session = build_session(system_prompt(&context), definitions)?;
+    Ok((session, tools))
 }
 
 /// A fresh session log for one run of a case.
@@ -311,6 +378,112 @@ fn case_log(
         },
     )
     .map_err(|error| EvalError::Setup(error.to_string()))
+}
+
+/// Builds the sandbox for one workspace root.
+pub type SandboxFor<'a> = dyn Fn(&Path) -> Result<Arc<dyn Sandbox>, EvalError> + 'a;
+
+/// The floor and ceiling a case must score between before it is trusted, with
+/// no model involved. RFC-0019 section 5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Calibration {
+    pub case: String,
+    /// The untouched workspace, which must score under 10.
+    pub floor: crate::score::Score,
+    /// The reference solution with an honest report, which must reach 95.
+    pub ceiling: crate::score::Score,
+}
+
+impl Calibration {
+    #[must_use]
+    pub fn holds(&self) -> bool {
+        self.floor.total < 10.0 && self.ceiling.total >= 95.0
+    }
+}
+
+/// Scores a case's untouched workspace and its reference solution through the
+/// same sandboxed measurement a model's run gets.
+///
+/// # Errors
+///
+/// Returns [`EvalError`] when the case cannot be materialised, has no
+/// reference, or Cargo cannot be run at all.
+pub async fn calibrate(
+    case: &Case,
+    scratch: &Path,
+    sandbox_for: &SandboxFor<'_>,
+) -> Result<Calibration, EvalError> {
+    let measure_workspace = async |workspace: &Path, reference: bool| {
+        let before = fingerprint_tree(workspace)?;
+        if reference {
+            crate::case::overlay_reference(case, workspace)?;
+        }
+        let sandbox = sandbox_for(workspace)?;
+        let files_changed = changed_files(&before, &fingerprint_tree(workspace)?);
+        let mut failures = Vec::new();
+        check(case, workspace, &files_changed, "", &mut failures);
+        let metrics = Metrics {
+            model_turns: if reference {
+                case.score
+                    .reference_turns
+                    .unwrap_or_else(|| case.max_turns.div_ceil(3))
+            } else {
+                1
+            },
+            ..Metrics::default()
+        };
+        let mut measured = measure(
+            case,
+            workspace,
+            &sandbox,
+            &files_changed,
+            "",
+            failures.is_empty(),
+            &metrics,
+        )
+        .await?;
+        if case.expect.hidden_tests {
+            crate::case::overlay_hidden(case, workspace)?;
+            hidden_results(case, workspace, &sandbox, &mut measured).await;
+        }
+        Ok::<_, EvalError>(measured)
+    };
+    let mut floor = measure_workspace(&case.materialise(&scratch.join("floor"))?, false).await?;
+    let mut ceiling = measure_workspace(&case.materialise(&scratch.join("ceiling"))?, true).await?;
+    // The untouched workspace is the baseline: tests passing there are guards.
+    let baseline = passing_keys(&floor);
+    floor.baseline_passing.clone_from(&baseline);
+    ceiling.baseline_passing = baseline;
+    // The report a model would give if it told the truth.
+    ceiling.report = Some(crate::score::Report {
+        task: Some(crate::score::Status::Done),
+        build: Some(if ceiling.builds { "pass" } else { "fail" }.to_owned()),
+        tests: Some(
+            match ceiling.own_tests_pass {
+                Some(true) => "pass",
+                Some(false) => "fail",
+                None => "none",
+            }
+            .to_owned(),
+        ),
+        requirements: ceiling
+            .requirements
+            .iter()
+            .map(|(name, _, met)| {
+                let status = if *met {
+                    crate::score::Status::Done
+                } else {
+                    crate::score::Status::NotDone
+                };
+                (name.clone(), status)
+            })
+            .collect(),
+    });
+    Ok(Calibration {
+        case: case.name.clone(),
+        floor: crate::score::score(case, &floor),
+        ceiling: crate::score::score(case, &ceiling),
+    })
 }
 
 /// The case's prompt, with the report instruction when the run is scored.
@@ -393,6 +566,7 @@ async fn measure(
         own_tests_pass,
         hidden: Vec::new(),
         hidden_broken: Vec::new(),
+        baseline_passing: Vec::new(),
         assertions_passed,
         requirements,
         protected_touched,
@@ -470,7 +644,18 @@ async fn hidden_results(
             });
         }
         if measured.hidden.len() == before {
-            measured.hidden_broken.push(stem);
+            // Why it produced nothing, so a case that cannot run says so.
+            let reason = execution
+                .stderr
+                .lines()
+                .chain(execution.stdout.lines())
+                .find(|line| line.contains("error") || line.contains("panicked"))
+                .unwrap_or("no test results")
+                .trim()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            measured.hidden_broken.push(format!("{stem} ({reason})"));
         }
     }
 }

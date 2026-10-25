@@ -70,6 +70,11 @@ pub struct EvalArgs {
     /// Run every case this many times.
     #[arg(long, default_value_t = 1)]
     pub trials: u32,
+    /// Score each case's untouched workspace and its reference solution, with
+    /// no model, and fail unless every floor is under 10 and every ceiling 95
+    /// or more. RFC-0019 section 5.
+    #[arg(long)]
+    pub calibrate: bool,
 }
 
 /// Runs a corpus and reports.
@@ -81,6 +86,9 @@ pub struct EvalArgs {
 /// the result, and it decides the exit code.
 pub async fn run(args: EvalArgs) -> Result<ExitCode> {
     style::enable(args.plain);
+    if args.calibrate {
+        return calibrate(&args).await;
+    }
     let profile = config::resolve_profile(args.model.as_deref())?;
     let cases = select(&args)?;
     let scratch = match &args.scratch {
@@ -224,6 +232,68 @@ fn eval_settings(
         disable_thinking: args.no_thinking,
         plain: args.plain,
     }
+}
+
+/// Checks every selected case against the scorer's floor and ceiling.
+async fn calibrate(args: &EvalArgs) -> Result<ExitCode> {
+    let cases = select(args)?;
+    let scratch = match &args.scratch {
+        Some(path) => path.clone(),
+        None => std::env::temp_dir().join(format!("gyrfalcon-calibrate-{}", std::process::id())),
+    };
+    let sandbox_for = |workspace: &std::path::Path| {
+        config::build_sandbox(args.sandbox, workspace, &[])
+            .map_err(|error| gyr_eval::EvalError::Setup(error.to_string()))
+    };
+    let mut broken = 0;
+    for case in &cases {
+        if !case.directory.join("reference").is_dir() {
+            println!(
+                "  {}  {}",
+                style::paint(FAINT, "skip"),
+                style::paint(SLATE, &format!("{:<28} no reference/", case.name))
+            );
+            continue;
+        }
+        let result = gyr_eval::calibrate(case, &scratch.join(&case.name), &sandbox_for).await?;
+        let holds = result.holds();
+        if !holds {
+            broken += 1;
+        }
+        println!(
+            "  {}  {}  {}",
+            style::paint(
+                if holds { OK } else { WARN },
+                if holds { "ok  " } else { "FAIL" }
+            ),
+            style::paint(SLATE, &format!("{:<28}", case.name)),
+            style::paint(
+                FAINT,
+                &format!(
+                    "floor {:.1} · ceiling {:.1}",
+                    result.floor.total, result.ceiling.total
+                )
+            )
+        );
+        if !holds {
+            for (which, notes) in [
+                ("ceiling", &result.ceiling.notes),
+                ("floor", &result.floor.notes),
+            ] {
+                for note in notes {
+                    println!(
+                        "        {}",
+                        style::paint(FAINT, &format!("{which}: {note}"))
+                    );
+                }
+            }
+        }
+    }
+    Ok(if broken == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// Every scored run as (case, tier, total), summarised.

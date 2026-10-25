@@ -155,6 +155,23 @@ impl Case {
     }
 }
 
+/// Lays the case's reference solution over a workspace, for calibration.
+///
+/// # Errors
+///
+/// Returns [`EvalError::Case`] when the case has no `reference/` tree or it
+/// cannot be copied.
+pub fn overlay_reference(case: &Case, workspace: &Path) -> Result<(), EvalError> {
+    let reference = case.directory.join("reference");
+    if !reference.is_dir() {
+        return Err(EvalError::Case(format!(
+            "{} has no reference/ tree",
+            case.name
+        )));
+    }
+    copy_tree(&reference, workspace)
+}
+
 /// Lays the case's hidden tests over a finished workspace.
 ///
 /// # Errors

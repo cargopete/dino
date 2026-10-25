@@ -1,0 +1,89 @@
+name = "ledger"
+max_turns = 120
+protected = ["proto"]
+prompt = """
+Build a production-quality accounts ledger service in this crate, called \
+ledger: create account, deposit, withdraw, transfer and get balance. Balances \
+are integer minor units and never go negative; a transfer is atomic.
+
+One binary serves an HTTP JSON API with axum and a gRPC API with tonic, on \
+separate addresses, sharing one store behind a trait with an in-memory \
+implementation. It is a library crate named ledger plus a thin main.
+
+Contract. Black-box tests will hold you to it exactly.
+
+- Addresses come from LEDGER_HTTP_ADDR (default 127.0.0.1:8080) and \
+LEDGER_GRPC_ADDR (default 127.0.0.1:50051).
+- The gRPC service is proto/ledger.proto, as supplied; do not change it. \
+Generate it with tonic-build in build.rs, and expose the generated code as \
+`pub mod pb` in the library, client included.
+- HTTP, all JSON. An account is {"id": string, "balance": number}. An error is \
+{"error": string}.
+  - POST /accounts with {"id"} creates an account with balance 0: 201 and the \
+account. An existing id is 409.
+  - GET /accounts/{id}: 200 and the account; unknown is 404.
+  - POST /accounts/{id}/deposit with {"amount"}: 200 and the account.
+  - POST /accounts/{id}/withdraw with {"amount"}: 200 and the account; more \
+than the balance is 422.
+  - POST /transfers with {"from", "to", "amount"}: 200 and \
+{"from": account, "to": account}; more than the balance is 422; the same \
+account on both sides is 400.
+  - An amount that is zero or negative is 400. An unknown account is 404.
+- gRPC status codes for the same cases: an existing id ALREADY_EXISTS, unknown \
+NOT_FOUND, a bad amount or the same account INVALID_ARGUMENT, more than the \
+balance FAILED_PRECONDITION.
+- On SIGINT the binary stops accepting requests and exits with status 0 within \
+five seconds.
+- Structured logging with tracing; errors with thiserror.
+- The tests need reqwest (with the json feature), serde_json, tokio (with the \
+full feature) and tonic available to integration tests, so make sure they are \
+dependencies or dev-dependencies.
+
+Write your own unit tests and integration tests, and make cargo clippy and \
+cargo fmt clean. Run everything yourself and keep going until it passes.
+"""
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+
+[score]
+tier = "large"
+reference_turns = 40
+
+[[score.groups]]
+name = "http operations"
+weight = 3.0
+tests = ["http_ops"]
+
+[[score.groups]]
+name = "grpc operations"
+weight = 3.0
+tests = ["grpc_ops"]
+
+[[score.groups]]
+name = "error mapping"
+weight = 2.0
+tests = ["errors"]
+
+[[score.groups]]
+name = "concurrency"
+weight = 1.0
+tests = ["concurrent"]
+
+[[score.groups]]
+name = "graceful shutdown"
+weight = 1.0
+tests = ["shutdown"]
+
+[[score.requirements]]
+name = "clippy clean"
+command = ["cargo", "clippy", "--offline", "--all-targets", "--", "-D", "warnings"]
+
+[[score.requirements]]
+name = "formatted"
+command = ["cargo", "fmt", "--check"]
+
+[[score.requirements]]
+name = "own tests pass"
+command = ["cargo", "test", "--offline"]

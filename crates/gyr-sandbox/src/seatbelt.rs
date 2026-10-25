@@ -170,7 +170,7 @@ fn profile_for(
          (allow file-read*)\n\
          (allow sysctl-read)\n\
          (allow mach-lookup)\n\
-         (allow signal (target self))\n",
+         (allow signal (target same-sandbox))\n",
     );
     // After the read allow, because the last matching rule wins.
     if let Some(home) = home {
@@ -441,6 +441,43 @@ mod tests {
             "an outside connection got through"
         );
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_process_can_signal_what_it_started_but_not_outside_the_sandbox() {
+        let nested = std::process::Command::new(SANDBOX_EXEC)
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|status| !status.success());
+        if nested {
+            eprintln!("skipped: already inside a sandbox");
+            return;
+        }
+        let workspace = std::env::temp_dir().join(format!("gyr-signal-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let sandbox = Seatbelt::new(&workspace).unwrap();
+        let outsider = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let script = format!(
+            "sleep 30 & child=$!; kill -INT $child && echo child-stopped; \
+             kill -0 {} 2>/dev/null && echo outsider-reachable; true",
+            outsider.id()
+        );
+        let wrapped = sandbox.wrap("/bin/sh", &["-c".to_owned(), script]).unwrap();
+        let output = std::process::Command::new(&wrapped.program)
+            .args(&wrapped.arguments)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&output.stdout);
+        let mut outsider = outsider;
+        let _ = outsider.kill();
+        let _ = std::fs::remove_dir_all(&workspace);
+
+        assert!(said.contains("child-stopped"), "{said}");
+        assert!(!said.contains("outsider-reachable"), "{said}");
     }
 
     #[cfg(target_os = "macos")]

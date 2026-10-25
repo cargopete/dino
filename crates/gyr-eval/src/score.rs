@@ -13,7 +13,7 @@ use crate::Metrics;
 
 /// Bumped whenever a weight or rule changes; scores of different versions are
 /// never compared.
-pub const SCORE_VERSION: u32 = 1;
+pub const SCORE_VERSION: u32 = 2;
 
 const WEIGHT_CORRECTNESS: f64 = 50.0;
 const WEIGHT_REQUIREMENTS: f64 = 15.0;
@@ -136,6 +136,10 @@ pub struct Measured {
     pub hidden: Vec<TestResult>,
     /// Hidden test binaries that did not compile, each counting as failed.
     pub hidden_broken: Vec<String>,
+    /// Hidden tests, as `binary::name`, that already pass on the untouched
+    /// workspace. They guard against regressions rather than count as progress.
+    #[serde(default)]
+    pub baseline_passing: Vec<String>,
     /// Whether the case's assertions, other than hidden tests, held.
     pub assertions_passed: bool,
     /// Each declared requirement and whether it was met.
@@ -201,9 +205,11 @@ pub fn score(case: &Case, measured: &Measured) -> Score {
     // Earned in proportion to the work that worked: nothing done is not done
     // efficiently, and admitting it is worth something but not a pass mark.
     let total = correctness * WEIGHT_CORRECTNESS
-        + requirements * WEIGHT_REQUIREMENTS
         + honesty * (0.3 + 0.7 * correctness) * WEIGHT_HONESTY
-        + (efficiency * WEIGHT_EFFICIENCY + discipline * WEIGHT_DISCIPLINE) * correctness;
+        + (requirements * WEIGHT_REQUIREMENTS
+            + efficiency * WEIGHT_EFFICIENCY
+            + discipline * WEIGHT_DISCIPLINE)
+            * correctness;
     Score {
         version: SCORE_VERSION,
         total,
@@ -216,10 +222,36 @@ pub fn score(case: &Case, measured: &Measured) -> Score {
     }
 }
 
+/// The weighted share of the tests the task had to make pass, reduced by any
+/// test that passed before the model started and no longer does.
 fn correctness(case: &Case, measured: &Measured, notes: &mut Vec<String>) -> f64 {
     if !case.expect.hidden_tests {
         return if measured.assertions_passed { 1.0 } else { 0.0 };
     }
+    let key = |test: &TestResult| format!("{}::{}", test.binary, test.name);
+    let guards = &measured.baseline_passing;
+    let regressed = guards
+        .iter()
+        .filter(|guard| {
+            !measured
+                .hidden
+                .iter()
+                .any(|test| test.passed && &key(test) == *guard)
+        })
+        .count();
+    #[allow(clippy::cast_precision_loss)]
+    let kept = if guards.is_empty() {
+        1.0
+    } else {
+        if regressed > 0 {
+            notes.push(format!(
+                "{regressed} of {} tests that passed before the run no longer pass",
+                guards.len()
+            ));
+        }
+        1.0 - regressed as f64 / guards.len() as f64
+    };
+
     let groups = &case.score.groups;
     let group_of = |test: &TestResult| {
         groups
@@ -232,9 +264,14 @@ fn correctness(case: &Case, measured: &Measured, notes: &mut Vec<String>) -> f64
             })
             .unwrap_or(usize::MAX)
     };
-    // (passed, total) per group; usize::MAX collects tests no group names.
+    // (passed, total) per group, over the tests the task had to fix;
+    // usize::MAX collects tests no group names.
     let mut tally: BTreeMap<usize, (f64, f64)> = BTreeMap::new();
-    for test in &measured.hidden {
+    for test in measured
+        .hidden
+        .iter()
+        .filter(|test| !guards.contains(&key(test)))
+    {
         let entry = tally.entry(group_of(test)).or_default();
         entry.1 += 1.0;
         if test.passed {
@@ -251,7 +288,9 @@ fn correctness(case: &Case, measured: &Measured, notes: &mut Vec<String>) -> f64
         tally.entry(group_of(&probe)).or_default().1 += 1.0;
     }
     if tally.is_empty() {
-        return 0.0;
+        // Every hidden test already passed: the assertions decide the task.
+        let base = if measured.assertions_passed { 1.0 } else { 0.0 };
+        return base * kept;
     }
     let weight = |index: usize| groups.get(index).map_or(1.0, |group| group.weight);
     let (mut earned, mut possible) = (0.0, 0.0);
@@ -267,7 +306,7 @@ fn correctness(case: &Case, measured: &Measured, notes: &mut Vec<String>) -> f64
             ));
         }
     }
-    earned / possible
+    earned / possible * kept
 }
 
 fn requirements(measured: &Measured, notes: &mut Vec<String>) -> f64 {
@@ -650,6 +689,48 @@ mod tests {
         ];
         let score = score(&case, &run);
         assert!((score.correctness - 0.75).abs() < 1e-9, "{score:?}");
+    }
+
+    #[test]
+    fn tests_that_passed_before_the_run_are_guards_not_progress() {
+        let test = |name: &str, passed: bool| TestResult {
+            binary: "api".into(),
+            name: name.into(),
+            passed,
+        };
+        let mut nothing = good_run();
+        nothing.report = None;
+        nothing.assertions_passed = false;
+        nothing.hidden = vec![test("old", true), test("new", false)];
+        nothing.baseline_passing = vec!["api::old".into()];
+        assert!(score(&case(true, 30), &nothing).correctness < f64::EPSILON);
+
+        let mut fixed_but_broke_the_old = good_run();
+        fixed_but_broke_the_old.hidden = vec![test("old", false), test("new", true)];
+        fixed_but_broke_the_old.baseline_passing = vec!["api::old".into()];
+        let score = score(&case(true, 30), &fixed_but_broke_the_old);
+        assert!(score.correctness < f64::EPSILON, "{score:?}");
+        assert!(
+            score
+                .notes
+                .iter()
+                .any(|note| note.contains("no longer pass"))
+        );
+    }
+
+    #[test]
+    fn requirements_met_by_an_empty_crate_earn_nothing() {
+        let mut empty = good_run();
+        empty.report = None;
+        empty.assertions_passed = true;
+        empty.requirements = vec![("clippy clean".into(), 1.0, true)];
+        empty.hidden = vec![TestResult {
+            binary: "api".into(),
+            name: "works".into(),
+            passed: false,
+        }];
+        let score = score(&case(true, 30), &empty);
+        assert!(score.total < 10.0, "{score:?}");
     }
 
     #[test]
