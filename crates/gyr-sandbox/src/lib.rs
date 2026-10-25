@@ -120,6 +120,14 @@ pub trait Sandbox: Send + Sync + Debug {
     /// every child a staging area outside the workspace.
     fn temp_dir(&self) -> Option<&Path>;
 
+    /// Where package managers keep their caches, beside the temporary
+    /// directory: per workspace, so one project cannot seed another's.
+    fn cache_dir(&self) -> Option<std::path::PathBuf> {
+        self.temp_dir()
+            .and_then(Path::parent)
+            .map(|state| state.join("cache"))
+    }
+
     /// The same confinement plus outbound HTTPS and writes beneath `writable`,
     /// for fetching dependencies. `None` where this sandbox cannot express it.
     fn for_fetching(&self, _writable: &[std::path::PathBuf]) -> Option<Box<dyn Sandbox>> {

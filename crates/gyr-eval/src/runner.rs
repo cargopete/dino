@@ -750,6 +750,10 @@ pub fn session_tools_with(
             ShellTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
                 .map_err(setup)?,
         ),
+        Box::new(
+            gyr_exec::PackagesTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
+                .map_err(setup)?,
+        ),
     ];
     if !options.skills.is_empty() {
         runtimes.push(Box::new(gyr_core::skills::SkillTool::new(
