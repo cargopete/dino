@@ -1,6 +1,7 @@
 //! Running one case and deciding whether it passed.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -45,7 +46,7 @@ use crate::case::fingerprint_tree;
 use crate::metrics;
 
 /// What a run of one case produced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Outcome {
     pub case: String,
     pub passed: bool,
@@ -65,6 +66,9 @@ pub struct Outcome {
     /// The reasoning budget the run was given, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
+    /// The run's score, when scoring was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<crate::score::Score>,
 }
 
 /// How a run differs from the harness as shipped, for ablations.
@@ -77,6 +81,8 @@ pub struct Variant {
     /// The reasoning budget the session was built with. Recorded here; the
     /// session itself is the caller's to build.
     pub thinking_budget: Option<u32>,
+    /// Ask for a `gyr-report` and score the run. RFC-0019.
+    pub score: bool,
 }
 
 /// What shapes the tools a session gets.
@@ -192,27 +198,13 @@ pub async fn run_case(
     let session = build_session(system_prompt(&context), definitions)?;
 
     let log_path = scratch.join(format!("{}.jsonl", case.name));
-    let _ = std::fs::remove_file(&log_path);
-    let log = JsonlSessionLog::create(
-        &log_path,
-        SessionMeta {
-            session_id: SessionId::generate(),
-            gyrfalcon_version: env!("CARGO_PKG_VERSION").to_owned(),
-            model_key: "eval".to_owned(),
-            provider: gyr_protocol::ProviderKind::Qwen,
-            workspace_root: workspace.display().to_string(),
-            approval_mode: "eval (unattended, everything allowed)".to_owned(),
-            sandbox: sandbox.label(),
-            max_model_turns: case.max_turns,
-        },
-    )
-    .map_err(|error| EvalError::Setup(error.to_string()))?;
+    let log = case_log(case, &log_path, &workspace, sandbox.as_ref())?;
 
     let finish = build_check(&workspace, Arc::clone(&sandbox))?;
     let mut agent = eval_agent(case, session, tools, log, finish)?;
 
     let started = Instant::now();
-    let run = agent.run(case.prompt.clone()).await;
+    let run = agent.run(prompt_for(case, variant.score)).await;
     let duration_ms = started.elapsed().as_millis();
 
     let mut failures = Vec::new();
@@ -242,12 +234,25 @@ pub async fn run_case(
     {
         failures.push(failure);
     }
+    let mut measured = if variant.score {
+        Some(
+            measure(
+                case,
+                &workspace,
+                &sandbox,
+                &files_changed,
+                &answer,
+                failures.is_empty(),
+                &metrics,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     // Last, because the overlay changes the workspace every check above reads.
     if case.expect.hidden_tests {
-        crate::case::overlay_hidden(case, &workspace)?;
-        if let Some(failure) = check_hidden_tests(&workspace, sandbox).await? {
-            failures.push(failure);
-        }
+        lay_hidden(case, &workspace, sandbox, measured.as_mut(), &mut failures).await?;
     }
 
     Ok(Outcome {
@@ -261,7 +266,213 @@ pub async fn run_case(
         without: variant.without.clone(),
         max_diagnostics: variant.max_diagnostics,
         thinking_budget: variant.thinking_budget,
+        score: measured.map(|measured| crate::score::score(case, &measured)),
     })
+}
+
+/// Lays the hidden tests over the workspace, records each one's result for
+/// scoring, and fails the run when they do not pass.
+async fn lay_hidden(
+    case: &Case,
+    workspace: &Path,
+    sandbox: Arc<dyn Sandbox>,
+    measured: Option<&mut crate::score::Measured>,
+    failures: &mut Vec<String>,
+) -> Result<(), EvalError> {
+    crate::case::overlay_hidden(case, workspace)?;
+    if let Some(measured) = measured {
+        hidden_results(case, workspace, &sandbox, measured).await;
+    }
+    if let Some(failure) = check_hidden_tests(workspace, sandbox).await? {
+        failures.push(failure);
+    }
+    Ok(())
+}
+
+/// A fresh session log for one run of a case.
+fn case_log(
+    case: &Case,
+    log_path: &Path,
+    workspace: &Path,
+    sandbox: &dyn Sandbox,
+) -> Result<JsonlSessionLog, EvalError> {
+    let _ = std::fs::remove_file(log_path);
+    JsonlSessionLog::create(
+        log_path,
+        SessionMeta {
+            session_id: SessionId::generate(),
+            gyrfalcon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            model_key: "eval".to_owned(),
+            provider: gyr_protocol::ProviderKind::Qwen,
+            workspace_root: workspace.display().to_string(),
+            approval_mode: "eval (unattended, everything allowed)".to_owned(),
+            sandbox: sandbox.label(),
+            max_model_turns: case.max_turns,
+        },
+    )
+    .map_err(|error| EvalError::Setup(error.to_string()))
+}
+
+/// The case's prompt, with the report instruction when the run is scored.
+fn prompt_for(case: &Case, scored: bool) -> String {
+    if !scored {
+        return case.prompt.clone();
+    }
+    let mut prompt = format!("{}\n\n{}", case.prompt, crate::score::REPORT_INSTRUCTION);
+    if !case.score.requirements.is_empty() {
+        let names: Vec<&str> = case
+            .score
+            .requirements
+            .iter()
+            .map(|requirement| requirement.name.as_str())
+            .collect();
+        let _ = write!(
+            prompt,
+            " The requirements to report on: {}.",
+            names.join(", ")
+        );
+    }
+    prompt
+}
+
+/// What scoring needs that the assertions do not: the build, the model's own
+/// tests, each declared requirement, the report and protected paths. Read
+/// before the hidden tests are laid over the workspace.
+async fn measure(
+    case: &Case,
+    workspace: &Path,
+    sandbox: &Arc<dyn Sandbox>,
+    files_changed: &[String],
+    answer: &str,
+    assertions_passed: bool,
+    metrics: &Metrics,
+) -> Result<crate::score::Measured, EvalError> {
+    let cargo = workspace.join("Cargo.toml").is_file();
+    let (builds, own_tests_pass) = if cargo {
+        let tool = CargoTool::new(workspace, CargoLimits::default(), Arc::clone(sandbox))
+            .map_err(|error| EvalError::Setup(error.to_string()))?;
+        let builds = tool
+            .parsed_check()
+            .await
+            .is_ok_and(|parsed| parsed.counts.errors == 0);
+        let tests = tool.run_tests().await.ok();
+        // No `test result:` line with a test in it means the model wrote none.
+        let ran_any = tests.as_ref().is_some_and(|run| {
+            run.summary.split(" | ").any(|line| {
+                line.starts_with("test result:") && !line.contains(" 0 passed; 0 failed")
+            })
+        });
+        (builds, ran_any.then(|| tests.is_some_and(|run| run.passed)))
+    } else {
+        (true, None)
+    };
+    let mut requirements = Vec::new();
+    for requirement in &case.score.requirements {
+        let met = match requirement.command.split_first() {
+            Some((program, arguments)) => gyr_exec::process::run(
+                program,
+                arguments,
+                workspace,
+                sandbox.as_ref(),
+                256 * 1_024,
+                std::time::Duration::from_secs(600),
+            )
+            .await
+            .is_ok_and(|execution| execution.exit_code == Some(0)),
+            None => false,
+        };
+        requirements.push((requirement.name.clone(), requirement.weight, met));
+    }
+    let protected_touched = files_changed.iter().any(|file| {
+        case.protected
+            .iter()
+            .any(|protected| Path::new(file).starts_with(protected))
+    });
+    Ok(crate::score::Measured {
+        builds,
+        own_tests_pass,
+        hidden: Vec::new(),
+        hidden_broken: Vec::new(),
+        assertions_passed,
+        requirements,
+        protected_touched,
+        report: crate::score::parse_report(answer),
+        metrics: metrics.clone(),
+    })
+}
+
+/// Runs each hidden test file on its own and records every test's result. A
+/// file that does not compile counts as one failed test, so breaking the build
+/// cannot hide the tests it would have run.
+async fn hidden_results(
+    case: &Case,
+    workspace: &Path,
+    sandbox: &Arc<dyn Sandbox>,
+    measured: &mut crate::score::Measured,
+) {
+    let Ok(entries) = std::fs::read_dir(case.directory.join("hidden").join("tests")) else {
+        return;
+    };
+    let mut stems: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().is_some_and(|extension| extension == "rs"))
+                .then(|| path.file_stem()?.to_str().map(str::to_owned))
+                .flatten()
+        })
+        .collect();
+    stems.sort();
+    let manifest = workspace.join("Cargo.toml").display().to_string();
+    for stem in stems {
+        let arguments: Vec<String> = [
+            "test",
+            "--offline",
+            "--no-fail-fast",
+            "--test",
+            stem.as_str(),
+            "--manifest-path",
+            manifest.as_str(),
+        ]
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect();
+        let run = gyr_exec::process::run(
+            "cargo",
+            &arguments,
+            workspace,
+            sandbox.as_ref(),
+            4 * 1_024 * 1_024,
+            std::time::Duration::from_secs(600),
+        )
+        .await;
+        let Ok(execution) = run else {
+            measured.hidden_broken.push(stem);
+            continue;
+        };
+        let before = measured.hidden.len();
+        for line in execution.stdout.lines() {
+            let Some(rest) = line.strip_prefix("test ") else {
+                continue;
+            };
+            let Some((name, verdict)) = rest.rsplit_once(" ... ") else {
+                continue;
+            };
+            let passed = match verdict.trim() {
+                "ok" => true,
+                "FAILED" => false,
+                _ => continue,
+            };
+            measured.hidden.push(crate::score::TestResult {
+                binary: stem.clone(),
+                name: name.to_owned(),
+                passed,
+            });
+        }
+        if measured.hidden.len() == before {
+            measured.hidden_broken.push(stem);
+        }
+    }
 }
 
 /// The tools a session gets, for the harness and for the executable alike.

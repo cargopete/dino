@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::EvalError;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
     pub name: String,
@@ -22,6 +22,9 @@ pub struct Case {
     /// case is judged by.
     #[serde(default)]
     pub protected: Vec<PathBuf>,
+    /// How the case is weighed when scored. RFC-0019.
+    #[serde(default)]
+    pub score: crate::score::CaseScoring,
     /// Where the case was loaded from. Not part of the file.
     #[serde(skip)]
     pub directory: PathBuf,

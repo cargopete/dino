@@ -8,6 +8,7 @@
 mod case;
 mod metrics;
 mod runner;
+pub mod score;
 
 use thiserror::Error;
 
