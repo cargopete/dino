@@ -451,12 +451,8 @@ impl ResponsesStreamParser {
                 call.name
             )));
         }
-        let parsed = serde_json::from_str(&arguments).map_err(|error| {
-            ModelError::Protocol(format!(
-                "OpenAI returned invalid arguments for {}: {error}",
-                call.name
-            ))
-        })?;
+        let parsed = serde_json::from_str(&arguments)
+            .unwrap_or_else(|error| crate::unparsed(&arguments, &error));
         call.arguments = arguments;
         call.completed = true;
         Ok(vec![ModelEvent::ToolCallCompleted {

@@ -752,16 +752,16 @@ impl QwenStreamParser {
                     name: accumulator.name.clone(),
                 });
             }
-            let arguments = match serde_json::from_str(&accumulator.arguments) {
-                Ok(arguments) => arguments,
+            let (arguments, wire_arguments) = match serde_json::from_str(&accumulator.arguments) {
+                Ok(arguments) => (arguments, accumulator.arguments.clone()),
                 // The output allowance ran out mid-call; the call was never made.
                 Err(_) if reason == StopReason::MaxTokens => continue,
-                Err(error) => {
-                    return Err(ModelError::Protocol(format!(
-                        "Qwen returned invalid arguments for {}: {error}",
-                        accumulator.name
-                    )));
-                }
+                // Handed to the tool set to refuse, so the model can try again.
+                // History keeps `{}`, which a provider will accept back.
+                Err(error) => (
+                    crate::unparsed(&accumulator.arguments, &error),
+                    "{}".to_owned(),
+                ),
             };
             events.push(ModelEvent::ToolCallCompleted {
                 call: ToolCall {
@@ -775,7 +775,7 @@ impl QwenStreamParser {
                 r#type: CallKind::Function,
                 function: ChatFunction {
                     name: accumulator.name.clone(),
-                    arguments: accumulator.arguments.clone(),
+                    arguments: wire_arguments,
                 },
             });
         }
@@ -1037,6 +1037,38 @@ mod tests {
     }
 
     #[test]
+    fn invalid_arguments_become_a_marked_call_rather_than_a_dead_run() {
+        let mut parser = QwenStreamParser::default();
+        let chunks = [
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"exec","arguments":"{\"command\": cargo --version}"}}]},"finish_reason":null}]}"#,
+            r#"{"id":"chat-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ];
+        for chunk in chunks {
+            parser.consume(chunk).unwrap();
+        }
+
+        let (events, assistant) = parser.finish().unwrap();
+
+        let call = events
+            .iter()
+            .find_map(|event| match event {
+                ModelEvent::ToolCallCompleted { call } => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        let unparsed = &call.arguments[gyr_protocol::UNPARSED_ARGUMENTS];
+        assert_eq!(unparsed["raw"], "{\"command\": cargo --version}");
+        assert!(
+            unparsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("expected value")
+        );
+        // History carries valid JSON, which the provider will accept back.
+        assert_eq!(assistant.tool_calls[0].function.arguments, "{}");
+    }
+
+    #[test]
     fn parser_reads_reasoning_in_the_shape_vllm_0_32_sends() {
         let mut parser = QwenStreamParser::default();
         let chunks = [
@@ -1109,18 +1141,6 @@ mod tests {
             .position(|event| matches!(event, ModelEvent::ToolCallArgumentsDelta { .. }))
             .unwrap();
         assert!(started < arguments);
-    }
-
-    #[test]
-    fn parser_rejects_malformed_tool_arguments() {
-        let mut parser = QwenStreamParser::default();
-        parser
-            .consume(
-                r#"{"id":"chat-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"read_file","arguments":"{"}}]},"finish_reason":"tool_calls"}]}"#,
-            )
-            .unwrap();
-
-        assert!(matches!(parser.finish(), Err(ModelError::Protocol(_))));
     }
 
     #[test]

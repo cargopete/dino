@@ -179,8 +179,10 @@ them in an enclosing directory is unreadable until the next session. RFC-0009 se
 rather than attempted badly.
 
 The two are not identical and are not labelled as though they were. Seatbelt
-denies the network outright; Landlock ABI 4 denies TCP and leaves UDP open, so it
-says `TCP denied` rather than `network denied`. Making the weaker one wear the
+denies the network except loopback, so a test can start a server on
+`127.0.0.1:0` and talk to it; Landlock ABI 4 denies TCP, loopback included,
+because it can restrict ports but not addresses, and leaves UDP open, so it says
+`TCP denied` rather than `network denied`. Making the weaker one wear the
 stronger one's words is the failure that document exists to avoid.
 
 One consequence is load-bearing. RFC-0001 lists automatic commits, pushes,

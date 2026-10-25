@@ -1179,3 +1179,21 @@ async fn several_checks_report_the_first_that_finds_work_unfinished() {
 
     assert_eq!(checks.unfinished().await.as_deref(), Some("lint failed"));
 }
+
+#[test]
+fn a_call_with_unparsed_arguments_is_refused_with_what_was_sent() {
+    let tools = ToolSet::new(vec![Box::new(gyr_core::todo::TodoTool)]).unwrap();
+    let call = gyr_protocol::ToolCall {
+        id: "call-1".into(),
+        name: "todo".into(),
+        arguments: serde_json::json!({
+            gyr_protocol::UNPARSED_ARGUMENTS: {"raw": "{items: x}", "error": "key must be a string"}
+        }),
+    };
+
+    let error = tools.classify(&call).unwrap_err().to_string();
+
+    assert!(error.contains("not valid JSON"), "{error}");
+    assert!(error.contains("{items: x}"), "{error}");
+    assert!(error.contains("key must be a string"), "{error}");
+}
