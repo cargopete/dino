@@ -6,6 +6,7 @@
 //! which is measuring the weather.
 
 mod case;
+pub mod external;
 mod metrics;
 mod runner;
 pub mod score;
