@@ -197,10 +197,56 @@ pub async fn run_case(
         _ => {}
     }
 
+    let metrics = metrics::from_log(&log_path)?;
+    conclude(
+        case,
+        scratch,
+        sandbox,
+        variant,
+        Finished {
+            workspace,
+            before,
+            answer,
+            failures,
+            metrics,
+            duration_ms,
+            log_path,
+        },
+    )
+    .await
+}
+
+/// A run that has ended, by whichever harness, ready to be checked.
+pub(crate) struct Finished {
+    pub workspace: std::path::PathBuf,
+    pub before: std::collections::BTreeMap<String, String>,
+    pub answer: String,
+    pub failures: Vec<String>,
+    pub metrics: Metrics,
+    pub duration_ms: u128,
+    pub log_path: std::path::PathBuf,
+}
+
+/// Checks a finished run's assertions, measures it, lays the hidden tests
+/// over it and scores it. The same for gyr and for an external harness.
+pub(crate) async fn conclude(
+    case: &Case,
+    scratch: &Path,
+    sandbox: Arc<dyn Sandbox>,
+    variant: &Variant,
+    finished: Finished,
+) -> Result<Outcome, EvalError> {
+    let Finished {
+        workspace,
+        before,
+        answer,
+        mut failures,
+        metrics,
+        duration_ms,
+        log_path,
+    } = finished;
     let after = fingerprint_tree(&workspace)?;
     let files_changed = changed_files(&before, &after);
-    let metrics = metrics::from_log(&log_path)?;
-
     check(case, &workspace, &files_changed, &answer, &mut failures);
     if let Some(expectation) = case.expect.cargo_check
         && let Some(failure) = check_cargo(&workspace, Arc::clone(&sandbox), expectation).await?
@@ -487,7 +533,7 @@ pub async fn calibrate(
 }
 
 /// The case's prompt, with the report instruction when the run is scored.
-fn prompt_for(case: &Case, scored: bool) -> String {
+pub(crate) fn prompt_for(case: &Case, scored: bool) -> String {
     if !scored {
         return case.prompt.clone();
     }

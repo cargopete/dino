@@ -75,6 +75,25 @@ pub struct EvalArgs {
     /// or more. RFC-0019 section 5.
     #[arg(long)]
     pub calibrate: bool,
+    /// Run the cases through another agent's own CLI instead of gyr, scored the
+    /// same way. `--model` is then that harness's model name, passed through.
+    #[arg(long, value_enum)]
+    pub harness: Option<ExternalHarness>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ExternalHarness {
+    ClaudeCode,
+    Codex,
+}
+
+impl From<ExternalHarness> for gyr_eval::external::Harness {
+    fn from(harness: ExternalHarness) -> Self {
+        match harness {
+            ExternalHarness::ClaudeCode => Self::ClaudeCode,
+            ExternalHarness::Codex => Self::Codex,
+        }
+    }
 }
 
 /// Runs a corpus and reports.
@@ -89,7 +108,15 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
     if args.calibrate {
         return calibrate(&args).await;
     }
-    let profile = config::resolve_profile(args.model.as_deref())?;
+    let profile = match args.harness {
+        None => Some(config::resolve_profile(args.model.as_deref())?),
+        Some(_) => None,
+    };
+    let label = match (&profile, args.harness, &args.model) {
+        (Some(profile), _, _) => profile.key.clone(),
+        (None, Some(harness), Some(model)) => format!("{model} ({harness:?})"),
+        (None, _, _) => bail!("--harness needs --model, the harness's own model name"),
+    };
     let cases = select(&args)?;
     let scratch = match &args.scratch {
         Some(path) => path.clone(),
@@ -104,7 +131,9 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
                 FAINT,
                 &format!(
                     "{} · {} case(s){} · scratch {}",
-                    profile.display_name,
+                    profile
+                        .as_ref()
+                        .map_or(&label, |profile| &profile.display_name),
                     cases.len(),
                     if args.without.is_empty() {
                         String::new()
@@ -133,7 +162,25 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         let workspace = case.materialise(&scratch)?;
         let sandbox = config::build_sandbox(args.sandbox, &workspace, &case.protected)?;
 
-        let settings = eval_settings(&args, &profile, &workspace);
+        if let (Some(harness), Some(model)) = (args.harness, &args.model) {
+            let outcome = gyr_eval::external::run_external(
+                case,
+                &scratch,
+                Arc::clone(&sandbox),
+                harness.into(),
+                model,
+            )
+            .await?;
+            if !args.json {
+                print_case(&outcome);
+            }
+            outcomes.push(outcome);
+            continue;
+        }
+        let Some(profile) = &profile else {
+            unreachable!("a profile is resolved whenever there is no harness");
+        };
+        let settings = eval_settings(&args, profile, &workspace);
         let build = |prompt: String, tools: Vec<gyr_protocol::ToolDefinition>| {
             config::build_session(&settings, prompt, tools)
                 .map_err(|error| gyr_eval::EvalError::Setup(error.to_string()))
@@ -153,13 +200,31 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         outcomes.push(outcome);
     }
 
-    let summary = args.score.then(|| summarise(&cases, &outcomes));
+    report(&args, &label, trials, &cases, &outcomes)?;
+
+    let failed = outcomes.iter().filter(|outcome| !outcome.passed).count();
+    Ok(if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Prints the runs, and the score when there is one, as a table or as JSON.
+fn report(
+    args: &EvalArgs,
+    label: &str,
+    trials: u32,
+    cases: &[Case],
+    outcomes: &[gyr_eval::Outcome],
+) -> Result<()> {
+    let summary = (args.score || args.harness.is_some()).then(|| summarise(cases, outcomes));
     if args.json {
         match &summary {
             Some(summary) => println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "model": profile.key,
+                    "model": label,
                     "trials": trials,
                     "summary": summary,
                     "outcomes": outcomes,
@@ -168,18 +233,12 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
             None => println!("{}", serde_json::to_string_pretty(&outcomes)?),
         }
     } else {
-        print_summary(&outcomes);
+        print_summary(outcomes);
         if let Some(summary) = &summary {
-            print_score(&profile.key, summary);
+            print_score(label, summary);
         }
     }
-
-    let failed = outcomes.iter().filter(|outcome| !outcome.passed).count();
-    Ok(if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(())
 }
 
 fn select(args: &EvalArgs) -> Result<Vec<Case>> {
