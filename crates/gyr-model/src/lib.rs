@@ -289,6 +289,10 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         qwen_3_6_35b_a3b(),
         qwen_3_8_27b(),
         qwen_3_7_plus(),
+        qwen_3_8_max(),
+        qwen_3_7_max(),
+        deepseek_v4_pro(),
+        glm_5_3(),
         qwen3_8b(),
     ]
 }
@@ -484,26 +488,47 @@ fn qwen_3_8_27b() -> ModelProfile {
     }
 }
 
-/// Alibaba's hosted Qwen3.7-Plus, as Model Studio and its Coding Plan serve it.
-/// **Not measured.** Alibaba publishes no window we have checked, so this is a
-/// floor; sampling is left to the server.
-fn qwen_3_7_plus() -> ModelProfile {
+/// Models Alibaba serves through Model Studio and its Coding and Token Plans,
+/// all over the same `DashScope` dialect. **Not measured.** Alibaba publishes no
+/// windows we have checked, so each is a floor; sampling is left to the server.
+/// Each accepted a streamed tool call with thinking on, probed 2026-10-25.
+fn dashscope(key: &str, display_name: &str, window: u32, image_input: bool) -> ModelProfile {
     ModelProfile {
-        key: "qwen3.7-plus".into(),
-        provider_model: "qwen3.7-plus".into(),
-        display_name: "Qwen3.7-Plus (Alibaba Model Studio)".into(),
+        key: key.into(),
+        provider_model: key.into(),
+        display_name: format!("{display_name} (Alibaba Model Studio)"),
         provider: ProviderKind::Qwen,
         status: ProfileStatus::Development,
-        context_window_tokens: Some(262_144),
+        context_window_tokens: Some(window),
         max_output_tokens: None,
         reasoning: ReasoningSupport::Toggle,
         parallel_tool_calls: true,
-        image_input: true,
+        image_input,
         tool_call_parser: None,
         reasoning_parser: None,
         sampling: None,
         chat_server: ChatServer::DashScope,
     }
+}
+
+fn qwen_3_7_plus() -> ModelProfile {
+    dashscope("qwen3.7-plus", "Qwen3.7-Plus", 262_144, true)
+}
+
+fn qwen_3_8_max() -> ModelProfile {
+    dashscope("qwen3.8-max", "Qwen3.8-Max", 262_144, true)
+}
+
+fn qwen_3_7_max() -> ModelProfile {
+    dashscope("qwen3.7-max", "Qwen3.7-Max", 262_144, false)
+}
+
+fn deepseek_v4_pro() -> ModelProfile {
+    dashscope("deepseek-v4-pro", "DeepSeek V4 Pro", 131_072, false)
+}
+
+fn glm_5_3() -> ModelProfile {
+    dashscope("glm-5.3", "GLM-5.3", 131_072, false)
 }
 
 /// A small local model, present as a development target rather than a coding
@@ -613,7 +638,7 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-        assert_eq!(all.len(), 11);
+        assert_eq!(all.len(), 15);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 
