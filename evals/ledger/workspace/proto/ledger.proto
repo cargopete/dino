@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+// The gRPC half of the ledger. Amounts are integer minor units.
+service Ledger {
+  rpc CreateAccount(CreateAccountRequest) returns (Account);
+  rpc Deposit(AmountRequest) returns (Account);
+  rpc Withdraw(AmountRequest) returns (Account);
+  rpc Transfer(TransferRequest) returns (TransferReply);
+  rpc GetBalance(GetBalanceRequest) returns (Account);
+}
+
+message Account {
+  string id = 1;
+  int64 balance = 2;
+}
+
+message CreateAccountRequest {
+  string id = 1;
+}
+
+message AmountRequest {
+  string id = 1;
+  int64 amount = 2;
+}
+
+message TransferRequest {
+  string from = 1;
+  string to = 2;
+  int64 amount = 3;
+}
+
+message TransferReply {
+  Account from = 1;
+  Account to = 2;
+}
+
+message GetBalanceRequest {
+  string id = 1;
+}

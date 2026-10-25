@@ -85,6 +85,14 @@ discipline are multiplied by correctness, since nothing is done efficiently by
 not doing it, and honesty by 0.3 + 0.7 × correctness, so admitting failure beats
 lying about it without being worth a pass mark. A perfect run is unaffected.
 
+Calibration (§5) then found two more holes, and the score became version 2.
+Requirements met by an empty crate (clippy clean, formatted, zero tests passing)
+earned 12 points, so requirements are scaled by correctness too. And some hidden
+tests already pass on the untouched workspace: in two cases doing nothing earned
+a quarter of correctness. Those tests are now **guards**: correctness counts only
+the tests the task had to make pass, and each guard that stops passing takes its
+share off. The baseline is measured once per case on an untouched copy.
+
 **Gates.** A workspace that does not build scores 0 for correctness and
 requirements, which by the rule above leaves at most 4.5. A run that changes a protected path or the hidden
 tests' location is scored 0 and flagged, whatever else it did.
@@ -110,6 +118,12 @@ A score means something only against fixed points.
   is checked against that before it joins the suite.
 - **Ceiling.** The case's reference solution, laid in by the harness and scored
   as if a model wrote it with an honest report, must score at least 95.
+- **Checked by `gyr eval --calibrate`**, with no model: every case with a
+  reference scores its untouched workspace and its reference through the same
+  sandboxed measurement. On 2026-10-25 all eleven such cases held, floor 1.1 and
+  ceiling 100, after the two fixes above; the first pass failed three.
+- **Each run's record keeps what was measured**, not only the score, so a later
+  version can rescore old runs without repeating them.
 - **Versioning.** The score carries a version: the scorer's, and each case's.
   Two numbers with different versions are not compared. A case that changes
   gets a new version, never a quiet edit.
