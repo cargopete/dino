@@ -22,6 +22,8 @@ use crate::style::OK;
 use crate::style::SLATE;
 use crate::style::WARN;
 
+// Command-line flags are booleans by nature.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct EvalArgs {
     /// Model key from `gyr models`. Defaults to `GYR_MODEL`.
@@ -62,6 +64,12 @@ pub struct EvalArgs {
     /// Never emit terminal colour.
     #[arg(long)]
     pub plain: bool,
+    /// Score each run from 1 to 100 and the model across the corpus. RFC-0019.
+    #[arg(long)]
+    pub score: bool,
+    /// Run every case this many times.
+    #[arg(long, default_value_t = 1)]
+    pub trials: u32,
 }
 
 /// Runs a corpus and reports.
@@ -102,7 +110,15 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
     }
 
     let mut outcomes = Vec::with_capacity(cases.len());
-    for case in &cases {
+    let trials = args.trials.max(1);
+    for (trial, case) in (1..=trials).flat_map(|trial| cases.iter().map(move |case| (trial, case)))
+    {
+        let scratch = if trials > 1 {
+            scratch.join(format!("trial-{trial}"))
+        } else {
+            scratch.clone()
+        };
+        std::fs::create_dir_all(&scratch)?;
         // Per case, because a sandbox is built around one workspace root and
         // each case gets its own. An unattended run is exactly when the
         // containment has to be real.
@@ -120,6 +136,7 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
             without: args.without.clone(),
             max_diagnostics: args.max_diagnostics,
             thinking_budget: args.thinking_budget,
+            score: args.score,
         };
         let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?;
         if !args.json {
@@ -128,10 +145,25 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         outcomes.push(outcome);
     }
 
+    let summary = args.score.then(|| summarise(&cases, &outcomes));
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&outcomes)?);
+        match &summary {
+            Some(summary) => println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "model": profile.key,
+                    "trials": trials,
+                    "summary": summary,
+                    "outcomes": outcomes,
+                }))?
+            ),
+            None => println!("{}", serde_json::to_string_pretty(&outcomes)?),
+        }
     } else {
         print_summary(&outcomes);
+        if let Some(summary) = &summary {
+            print_score(&profile.key, summary);
+        }
     }
 
     let failed = outcomes.iter().filter(|outcome| !outcome.passed).count();
@@ -181,9 +213,60 @@ fn eval_settings(
         mcp: Vec::new(),
         thinking_budget: args.thinking_budget,
         show_reasoning: false,
-        api_base: args.api_base.clone(),
+        // The flag, else the user's own config: an endpoint is where the person
+        // runs models, not a property of the case. A project file cannot set it.
+        api_base: args.api_base.clone().or_else(|| {
+            crate::settings::Layers::load(workspace)
+                .ok()?
+                .pick_user_only(|file| file.api_base.clone())
+                .map(|(base, _)| base)
+        }),
         disable_thinking: args.no_thinking,
         plain: args.plain,
+    }
+}
+
+/// Every scored run as (case, tier, total), summarised.
+fn summarise(cases: &[gyr_eval::Case], outcomes: &[Outcome]) -> gyr_eval::score::Summary {
+    let runs: Vec<(String, gyr_eval::score::Tier, f64)> = outcomes
+        .iter()
+        .filter_map(|outcome| {
+            let score = outcome.score.as_ref()?;
+            let case = cases.iter().find(|case| case.name == outcome.case)?;
+            Some((
+                outcome.case.clone(),
+                gyr_eval::score::tier(case),
+                score.total,
+            ))
+        })
+        .collect();
+    gyr_eval::score::summarise(&runs)
+}
+
+fn print_score(model: &str, summary: &gyr_eval::score::Summary) {
+    println!(
+        "\n  {}  {}",
+        style::paint(SLATE, &format!("{model}: {} / 100", summary.score)),
+        style::paint(
+            FAINT,
+            &format!(
+                "90% interval {} to {} · {} run(s) · score version {}",
+                summary.low, summary.high, summary.runs, summary.version
+            )
+        )
+    );
+    for (case, result) in &summary.cases {
+        println!(
+            "  {}  {}",
+            style::paint(MUTED, &format!("{case:<28}")),
+            style::paint(
+                FAINT,
+                &format!(
+                    "{:>5.1}  ({:.0} to {:.0}, {:?}, {} trial(s))",
+                    result.mean, result.min, result.max, result.tier, result.trials
+                )
+            )
+        );
     }
 }
 
@@ -209,6 +292,27 @@ fn print_case(outcome: &Outcome) {
     );
     for failure in &outcome.failures {
         println!("        {}", style::paint(WARN, failure));
+    }
+    if let Some(score) = &outcome.score {
+        println!(
+            "        {}",
+            style::paint(
+                MUTED,
+                &format!(
+                    "score {:.0} · correctness {:.2} · requirements {:.2} · honesty {:.2} · \
+                     efficiency {:.2} · discipline {:.2}",
+                    score.total,
+                    score.correctness,
+                    score.requirements,
+                    score.honesty,
+                    score.efficiency,
+                    score.discipline
+                )
+            )
+        );
+        for note in &score.notes {
+            println!("        {}", style::paint(FAINT, note));
+        }
     }
 }
 
