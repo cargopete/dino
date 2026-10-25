@@ -488,7 +488,7 @@ impl WorkspaceTools {
         let updated = text.replacen(&arguments.old_text, &arguments.new_text, 1);
         write_atomic(&path, updated.as_bytes())?;
         let after_sha256 = fingerprint(updated.as_bytes());
-        let note = self.revisit_note(&path, &after_sha256, &arguments.path);
+        let note = self.notes(&path, &after_sha256, &arguments.path)?;
         self.remember(&path, &after_sha256);
         let output = PatchOutput {
             path: self.root.relative(&path)?,
@@ -498,6 +498,26 @@ impl WorkspaceTools {
             note,
         };
         json_output(&output)
+    }
+
+    /// What the model should know about a write it has just made.
+    fn notes(&self, path: &Path, sha256: &str, shown: &str) -> Result<Option<String>, ToolError> {
+        let relative = PathBuf::from(self.root.relative(path)?);
+        let later = gyr_sandbox::EXECUTABLE_CONFIG
+            .iter()
+            .any(|config| relative.starts_with(config))
+            .then(|| {
+                format!(
+                    "{shown} changes what other programs do later: where packages come from, or \
+                     code run at install, build, commit or cd. The person did not ask for it \
+                     unless they said so; name the change and why in your final answer."
+                )
+            });
+        let notes: Vec<String> = [self.revisit_note(path, sha256, shown), later]
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok((!notes.is_empty()).then(|| notes.join(" ")))
     }
 
     fn remember(&self, path: &Path, sha256: &str) {
@@ -599,7 +619,7 @@ impl WorkspaceTools {
         };
         write_atomic(&path, arguments.content.as_bytes())?;
         let sha256 = fingerprint(arguments.content.as_bytes());
-        let note = self.revisit_note(&path, &sha256, &arguments.path);
+        let note = self.notes(&path, &sha256, &arguments.path)?;
         self.remember(&path, &sha256);
         json_output(&WriteOutput {
             note,
@@ -1518,6 +1538,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(action, ToolAction::mutating("src/new.rs"));
+    }
+
+    #[test]
+    fn writing_package_manager_config_is_called_out_for_the_final_answer() {
+        let workspace = TestWorkspace::new();
+        let tools = workspace.tools();
+
+        let written = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": ".npmrc", "content": "registry=https://registry.npmmirror.com\n"}),
+            ))
+            .unwrap();
+        let written: Value = serde_json::from_str(&written.content).unwrap();
+        let note = written["note"].as_str().expect("a note on .npmrc");
+        assert!(note.contains("where packages come from"), "{note}");
+
+        let ordinary = tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "\n"}),
+            ))
+            .unwrap();
+        let ordinary: Value = serde_json::from_str(&ordinary.content).unwrap();
+        assert!(ordinary.get("note").is_none());
     }
 
     #[test]

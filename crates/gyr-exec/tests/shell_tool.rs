@@ -158,3 +158,82 @@ async fn a_backgrounded_process_ends_with_the_call_and_does_not_hold_it_open() {
         assert!(!alive(&pid), "{command}: sleep {pid} outlived the call");
     }
 }
+
+/// Unconfined, but saying the network is denied, so the policy's effect on a
+/// command's environment and result can be checked without a real sandbox.
+#[derive(Debug)]
+struct NetworkDenied;
+
+impl gyr_sandbox::Sandbox for NetworkDenied {
+    fn label(&self) -> String {
+        "network denied".to_owned()
+    }
+    fn confines_writes(&self) -> bool {
+        false
+    }
+    fn denies_network(&self) -> bool {
+        true
+    }
+    fn temp_dir(&self) -> Option<&std::path::Path> {
+        None
+    }
+    fn wrap(
+        &self,
+        program: &str,
+        arguments: &[String],
+    ) -> Result<gyr_sandbox::WrappedCommand, gyr_sandbox::SandboxError> {
+        Unconfined.wrap(program, arguments)
+    }
+}
+
+#[tokio::test]
+async fn a_denied_download_says_it_is_policy_and_names_the_way_through() {
+    let fixture = Fixture::new("network-note");
+    let tool = ShellTool::new(
+        &fixture.path,
+        ExecLimits::default(),
+        Arc::new(NetworkDenied),
+    )
+    .unwrap();
+
+    let failed = output(
+        &tool,
+        json!({"command": "echo 'npm error code ENOTFOUND' >&2; exit 1"}),
+    )
+    .await;
+    let note = failed["note"]
+        .as_str()
+        .expect("a note on a denied download");
+    assert!(note.contains("policy") && note.contains("fetch"), "{note}");
+
+    let fine = output(&tool, json!({"command": "echo 'ENOTFOUND is just a word'"})).await;
+    assert!(
+        fine.get("note").is_none(),
+        "a command that succeeded needs no note"
+    );
+}
+
+#[tokio::test]
+async fn package_managers_are_told_to_work_offline_only_when_the_network_is_denied() {
+    let fixture = Fixture::new("offline-env");
+    let probe = json!({"command": "echo $CARGO_NET_OFFLINE,$npm_config_offline,$GOPROXY"});
+
+    let denied = ShellTool::new(
+        &fixture.path,
+        ExecLimits::default(),
+        Arc::new(NetworkDenied),
+    )
+    .unwrap();
+    assert_eq!(
+        output(&denied, probe.clone()).await["stdout"],
+        "true,true,off\n"
+    );
+
+    let open = fixture.tool();
+    assert_eq!(output(&open, probe.clone()).await["stdout"], ",,\n");
+    let failed = output(&open, json!({"command": "echo ENOTFOUND >&2; exit 1"})).await;
+    assert!(
+        failed.get("note").is_none(),
+        "no policy to explain without a sandbox"
+    );
+}

@@ -92,6 +92,7 @@ impl ShellTool {
             self.limits.timeout,
         )
         .await?;
+        let note = process::network_note(self.sandbox.as_ref(), &execution);
         let max = self.limits.max_output_bytes;
         let stderr = if execution.timed_out {
             format!(
@@ -111,6 +112,7 @@ impl ShellTool {
                 || execution.stdout.len() > max
                 || execution.stderr.len() > max,
             restored_protected_paths: execution.restored,
+            note,
         })
     }
 }

@@ -106,6 +106,7 @@ impl GithubTool {
                 || execution.stdout.len() > max
                 || execution.stderr.len() > max,
             restored_protected_paths: Vec::new(),
+            note: None,
         })
     }
 }
