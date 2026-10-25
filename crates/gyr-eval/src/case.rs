@@ -55,6 +55,10 @@ pub struct Expectations {
     /// can only ask for edits will only ever learn about editing.
     #[serde(default)]
     pub answer_contains: Vec<String>,
+    /// Ideas the answer must mention, each as alternative wordings matched
+    /// without regard to case. For a claim a model may phrase several ways.
+    #[serde(default)]
+    pub answer_mentions: Vec<Vec<String>>,
     /// After the run, copy the case's `hidden/` tree over the workspace and
     /// require `cargo test` to pass. The model never sees these tests, so a
     /// case can check behaviour rather than only that the code compiles.
