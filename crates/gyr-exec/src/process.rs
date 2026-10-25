@@ -45,6 +45,13 @@ fn child_environment(sandbox: &dyn Sandbox) -> BTreeMap<&'static str, String> {
     // every child a staging area outside the workspace. It gets one inside.
     if let Some(temp_dir) = sandbox.temp_dir() {
         environment.insert("TMPDIR", temp_dir.display().to_string());
+        environment.insert("GOTMPDIR", temp_dir.display().to_string());
+    }
+    // Their defaults under the home directory are outside the writable set.
+    if let Some(cache) = sandbox.cache_dir() {
+        for (name, sub) in CACHES {
+            environment.insert(name, cache.join(sub).display().to_string());
+        }
     }
     // With the network denied, package managers otherwise retry DNS for minutes
     // and then fail in words that read as an outage rather than as policy.
@@ -55,6 +62,16 @@ fn child_environment(sandbox: &dyn Sandbox) -> BTreeMap<&'static str, String> {
     }
     environment
 }
+
+/// Each package manager's cache, beneath the sandbox's cache directory.
+const CACHES: &[(&str, &str)] = &[
+    ("XDG_CACHE_HOME", ""),
+    ("GOCACHE", "go-build"),
+    ("GOMODCACHE", "go-mod"),
+    ("npm_config_cache", "npm"),
+    ("npm_config_store_dir", "pnpm-store"),
+    ("YARN_CACHE_FOLDER", "yarn"),
+];
 
 /// Each package manager's own switch for working from its cache alone.
 const OFFLINE: &[(&str, &str)] = &[
@@ -69,8 +86,8 @@ const OFFLINE: &[(&str, &str)] = &[
 pub const NETWORK_DENIED: &str = "The network is denied in this sandbox. This is policy, not \
      an outage: nothing run here can download, and mirrors, caches elsewhere on disk and \
      registry settings will not get round it. Rust dependencies: declare them in Cargo.toml \
-     and use the cargo tool's `fetch`, or its `add`, which may reach crates.io. Other package \
-     managers cannot fetch here; use what is already installed, or say so with report_blocker.";
+     and use the cargo tool's `fetch`, or its `add`, which may reach crates.io. npm, pnpm and Go \
+     dependencies: the packages tool's `install` or `add`.";
 
 /// The note for a failed command whose output shows it reaching for the
 /// network, when the sandbox is what stopped it.
@@ -122,6 +139,23 @@ pub async fn run(
     limit: usize,
     timeout: Duration,
 ) -> Result<Execution, ToolError> {
+    run_with(program, arguments, directory, sandbox, limit, timeout, &[]).await
+}
+
+/// [`run`], with variables set on top of the child's usual environment.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn run_with(
+    program: &str,
+    arguments: &[String],
+    directory: &Path,
+    sandbox: &dyn Sandbox,
+    limit: usize,
+    timeout: Duration,
+    extra: &[(&str, &str)],
+) -> Result<Execution, ToolError> {
     let wrapped = sandbox
         .wrap(program, arguments)
         .map_err(|error| ToolError::new(error.to_string()))?;
@@ -135,6 +169,13 @@ pub async fn run(
                 temp_dir.display()
             ))
         })?;
+        // Session logs, scratch files and caches are not the project's.
+        if let Some(state) = temp_dir.parent() {
+            let ignore = state.join(".gitignore");
+            if !ignore.exists() {
+                let _ = std::fs::write(ignore, "*\n");
+            }
+        }
     }
     let mut snapshot = sandbox
         .snapshot()
@@ -153,6 +194,9 @@ pub async fn run(
     #[cfg(unix)]
     command.process_group(0);
     for (name, value) in child_environment(sandbox) {
+        command.env(name, value);
+    }
+    for (name, value) in extra {
         command.env(name, value);
     }
 
