@@ -739,10 +739,17 @@ pub fn session_tools_with(
     extra: Vec<Box<dyn ToolRuntime>>,
 ) -> Result<ToolSet, EvalError> {
     let setup = |error: gyr_core::ToolError| EvalError::Setup(error.to_string());
+    // A handover run's progress record is its checklist; two checklists with
+    // different arguments are one too many, and models mix them up.
+    let has_progress = extra.iter().any(|runtime| {
+        runtime
+            .definitions()
+            .iter()
+            .any(|definition| definition.name == gyr_core::progress::PROGRESS)
+    });
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         file_tools(workspace, options, &sandbox)?,
         Box::new(gyr_core::blocker::BlockerTool),
-        Box::new(gyr_core::todo::TodoTool),
         Box::new(
             ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
         ),
@@ -784,6 +791,9 @@ pub fn session_tools_with(
     runtimes.push(Box::new(
         CargoTool::new(workspace, limits, sandbox).map_err(setup)?,
     ));
+    if !has_progress {
+        runtimes.push(Box::new(gyr_core::todo::TodoTool));
+    }
     runtimes.extend(extra);
     ToolSet::new(runtimes).map_err(setup)
 }

@@ -157,14 +157,22 @@ impl Progress {
             Op::Done { item, note } | Op::Blocked { item, note } => {
                 let status = if done { Status::Done } else { Status::Blocked };
                 let count = record.items.len();
-                let entry = item
-                    .checked_sub(1)
-                    .and_then(|index| record.items.get_mut(index))
-                    .ok_or_else(|| {
-                        ToolError::new(format!("there is no item {item}; the plan has {count}"))
-                    })?;
-                entry.status = status;
-                entry.note = note.as_deref().map(clean).transpose()?;
+                let note = note.as_deref().map(clean).transpose()?;
+                let numbers = item.numbers();
+                // All or none, so a bad number leaves the record as it was.
+                if let Some(bad) = numbers
+                    .iter()
+                    .find(|&&number| number == 0 || number > count)
+                {
+                    return Err(ToolError::new(format!(
+                        "there is no item {bad}; the plan has {count}"
+                    )));
+                }
+                for number in numbers {
+                    let entry = &mut record.items[number - 1];
+                    entry.status = status;
+                    entry.note.clone_from(&note);
+                }
             }
             Op::Note { text } => {
                 let text = clean(&text)?;
@@ -192,9 +200,26 @@ impl Progress {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Op {
     Plan { items: Vec<String> },
-    Done { item: usize, note: Option<String> },
-    Blocked { item: usize, note: Option<String> },
+    Done { item: Numbers, note: Option<String> },
+    Blocked { item: Numbers, note: Option<String> },
     Note { text: String },
+}
+
+/// One item number, or several, so finishing a plan costs one call.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Numbers {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl Numbers {
+    fn numbers(&self) -> Vec<usize> {
+        match self {
+            Self::One(number) => vec![*number],
+            Self::Many(numbers) => numbers.clone(),
+        }
+    }
 }
 
 impl ToolRuntime for Progress {
@@ -203,8 +228,8 @@ impl ToolRuntime for Progress {
             name: PROGRESS.into(),
             description: "Keep the progress record this task is carried by. It may continue in \
                           a fresh session that sees only the record and the workspace. op plan \
-                          sets 2 to 6 items before you start; op done or blocked marks one by its \
-                          number, with a short note; op note records what a fresh session would \
+                          sets 2 to 6 items before you start; op done or blocked marks items by \
+                          number (one, or a list such as [2, 3]), with a short note; op note records what a fresh session would \
                           need: what you tried, why it failed, where things are."
                 .into(),
             input_schema: json!({
@@ -212,7 +237,11 @@ impl ToolRuntime for Progress {
                 "properties": {
                     "op": {"type": "string", "enum": ["plan", "done", "blocked", "note"]},
                     "items": {"type": "array", "items": {"type": "string"}},
-                    "item": {"type": "integer", "minimum": 1},
+                    "item": {
+                        "type": ["integer", "array"],
+                        "minimum": 1,
+                        "items": {"type": "integer", "minimum": 1}
+                    },
                     "note": {"type": "string"},
                     "text": {"type": "string"}
                 },
@@ -279,6 +308,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn several_items_are_closed_in_one_call() {
+        let progress = Progress::new(
+            std::env::temp_dir().join(format!("gyr-progress-many-{}.json", std::process::id())),
+        );
+        for arguments in [
+            json!({"op": "plan", "items": ["a", "b", "c"]}),
+            json!({"op": "done", "item": [1, 2, 3], "note": "all verified"}),
+        ] {
+            progress.execute(&call(arguments)).await.unwrap();
+        }
+        let record = progress.snapshot();
+        assert_eq!(record.done(), 3);
+        assert_eq!(record.items[2].note.as_deref(), Some("all verified"));
+    }
+
+    #[tokio::test]
     async fn a_plan_with_done_items_cannot_be_replaced_and_bad_items_are_refused() {
         let progress = Progress::new(
             std::env::temp_dir().join(format!("gyr-progress-refuse-{}.json", std::process::id())),
@@ -296,6 +341,7 @@ mod tests {
             json!({"op": "plan", "items": ["c"]}),
             json!({"op": "done", "item": 0}),
             json!({"op": "done", "item": 3}),
+            json!({"op": "done", "item": [2, 3]}),
             json!({"op": "note", "text": "  "}),
         ] {
             assert!(

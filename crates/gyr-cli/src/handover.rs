@@ -74,6 +74,21 @@ pub async fn run(
         };
 
         let record = progress.snapshot();
+        // Every item done is a finished task, even when the session spent its
+        // last turn saying so.
+        let complete = !record.items.is_empty() && record.done() == record.items.len();
+        if complete && !matches!(stop, Some(StopReason::Cancelled | StopReason::Blocked)) {
+            if stop.is_none() {
+                eprintln!(
+                    "{}",
+                    crate::style::paint(
+                        crate::style::FAINT,
+                        "  every item in the plan is done; the run is finished"
+                    )
+                );
+            }
+            return Ok(Ended::Stopped(StopReason::EndTurn));
+        }
         let finished = matches!(stop, Some(StopReason::Cancelled | StopReason::Blocked))
             || record.items.is_empty()
             || record.pending() == 0;
