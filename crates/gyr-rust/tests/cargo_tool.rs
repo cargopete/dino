@@ -272,8 +272,8 @@ fn an_unknown_field_is_rejected_rather_than_ignored() {
     assert!(error.to_string().contains("invalid cargo arguments"));
 }
 
-#[test]
-fn a_directory_without_a_manifest_is_refused_at_construction() {
+#[tokio::test]
+async fn a_new_project_gets_the_tool_and_is_told_to_write_a_manifest_first() {
     let serial = WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "gyrfalcon-cargo-bare-{}-{serial}",
@@ -281,10 +281,16 @@ fn a_directory_without_a_manifest_is_refused_at_construction() {
     ));
     fs::create_dir_all(&path).unwrap();
 
-    let error = CargoTool::new(&path, CargoLimits::default(), Arc::new(Unconfined)).unwrap_err();
+    let tool = CargoTool::new(&path, CargoLimits::default(), Arc::new(Unconfined)).unwrap();
+    let call = ToolCall {
+        id: "call-1".into(),
+        name: "cargo".into(),
+        arguments: serde_json::json!({"command": "fetch"}),
+    };
+    let error = tool.execute(&call).await.unwrap_err();
 
     fs::remove_dir_all(&path).unwrap();
-    assert!(error.to_string().contains("no Cargo.toml"));
+    assert!(error.to_string().contains("no Cargo.toml"), "{error}");
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

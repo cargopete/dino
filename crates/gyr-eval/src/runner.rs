@@ -769,22 +769,17 @@ pub fn session_tools_with(
             GithubTool::new(workspace, GithubLimits::default()).map_err(setup)?,
         ));
     }
-    if workspace.join("Cargo.toml").is_file() {
-        // The gate is deliberately absent. RFC-0011 section 13.
-        runtimes.push(Box::new(
-            CargoTool::new(
-                workspace,
-                CargoLimits {
-                    max_diagnostics: options
-                        .max_diagnostics
-                        .unwrap_or(CargoLimits::default().max_diagnostics),
-                    ..CargoLimits::default()
-                },
-                sandbox,
-            )
-            .map_err(setup)?,
-        ));
-    }
+    // Offered before a Cargo.toml exists too: a new project needs it to fetch.
+    // The gate is deliberately absent. RFC-0011 section 13.
+    let limits = CargoLimits {
+        max_diagnostics: options
+            .max_diagnostics
+            .unwrap_or(CargoLimits::default().max_diagnostics),
+        ..CargoLimits::default()
+    };
+    runtimes.push(Box::new(
+        CargoTool::new(workspace, limits, sandbox).map_err(setup)?,
+    ));
     runtimes.extend(extra);
     ToolSet::new(runtimes).map_err(setup)
 }

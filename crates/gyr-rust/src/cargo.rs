@@ -88,13 +88,9 @@ impl CargoTool {
                 root.as_ref().display()
             ))
         })?;
+        // Checked per call, not here: a new project starts with no manifest,
+        // and a session without this tool cannot fetch the crates it needs.
         let manifest = root.join("Cargo.toml");
-        if !manifest.is_file() {
-            return Err(ToolError::new(format!(
-                "no Cargo.toml at the workspace root: {}",
-                root.display()
-            )));
-        }
         Ok(Self {
             root,
             manifest,
@@ -252,6 +248,7 @@ impl CargoTool {
     /// timeout as an error because a gate has no honest verdict without a
     /// complete diagnostic set.
     pub async fn parsed_check(&self) -> Result<ParsedDiagnostics, ToolError> {
+        self.require_manifest()?;
         let request = CargoRequest::plain(CargoCommand::Check);
         let arguments = self.arguments(&request);
         let execution = process::run(
@@ -291,6 +288,7 @@ impl CargoTool {
     ///
     /// Returns [`ToolError`] when the child cannot be run.
     pub async fn run_tests(&self) -> Result<TestRun, ToolError> {
+        self.require_manifest()?;
         let arguments = self.arguments(&CargoRequest::plain(CargoCommand::Test));
         let execution = process::run(
             &Self::program(),
@@ -328,7 +326,18 @@ impl CargoTool {
         self.subject(&self.arguments(&CargoRequest::plain(CargoCommand::Check)))
     }
 
+    fn require_manifest(&self) -> Result<(), ToolError> {
+        if self.manifest.is_file() {
+            return Ok(());
+        }
+        Err(ToolError::new(
+            "there is no Cargo.toml at the workspace root yet. Write one with write_file, \
+             declaring the dependencies, then call cargo with fetch to download them.",
+        ))
+    }
+
     async fn run(&self, request: CargoRequest) -> Result<ToolOutput, ToolError> {
+        self.require_manifest()?;
         let arguments = self.arguments(&request);
         let sandbox = self.sandbox_for(request.command)?;
         // A program that does not exit, such as a server, is cut short sooner.
