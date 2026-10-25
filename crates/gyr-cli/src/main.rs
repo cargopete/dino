@@ -676,6 +676,16 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             {
                 handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
                 handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
+                handover::Ended::Stalled => {
+                    eprintln!(
+                        "{}",
+                        style::paint(
+                            style::FAINT,
+                            "  stopped: two sessions in a row ended with the plan unfinished"
+                        )
+                    );
+                    ExitCode::FAILURE
+                }
                 _ => ExitCode::FAILURE,
             },
         );

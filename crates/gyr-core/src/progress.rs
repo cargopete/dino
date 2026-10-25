@@ -117,8 +117,7 @@ impl Progress {
     }
 
     fn apply(&self, arguments: &Value) -> Result<String, ToolError> {
-        let op: Op = serde_json::from_value(arguments.clone())
-            .map_err(|error| ToolError::new(format!("invalid {PROGRESS} arguments: {error}")))?;
+        let op = Op::parse(arguments)?;
         let mut record = self
             .record
             .lock()
@@ -157,14 +156,22 @@ impl Progress {
             Op::Done { item, note } | Op::Blocked { item, note } => {
                 let status = if done { Status::Done } else { Status::Blocked };
                 let count = record.items.len();
-                let entry = item
-                    .checked_sub(1)
-                    .and_then(|index| record.items.get_mut(index))
-                    .ok_or_else(|| {
-                        ToolError::new(format!("there is no item {item}; the plan has {count}"))
-                    })?;
-                entry.status = status;
-                entry.note = note.as_deref().map(clean).transpose()?;
+                let note = note.as_deref().map(clean).transpose()?;
+                let numbers = item.numbers();
+                // All or none, so a bad number leaves the record as it was.
+                if let Some(bad) = numbers
+                    .iter()
+                    .find(|&&number| number == 0 || number > count)
+                {
+                    return Err(ToolError::new(format!(
+                        "there is no item {bad}; the plan has {count}"
+                    )));
+                }
+                for number in numbers {
+                    let entry = &mut record.items[number - 1];
+                    entry.status = status;
+                    entry.note.clone_from(&note);
+                }
             }
             Op::Note { text } => {
                 let text = clean(&text)?;
@@ -188,13 +195,98 @@ impl Progress {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug)]
 enum Op {
     Plan { items: Vec<String> },
-    Done { item: usize, note: Option<String> },
-    Blocked { item: usize, note: Option<String> },
+    Done { item: Numbers, note: Option<String> },
+    Blocked { item: Numbers, note: Option<String> },
     Note { text: String },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    Plan,
+    Done,
+    Blocked,
+    Note,
+}
+
+/// The arguments as sent. Models put `text` where `note` belongs and the other
+/// way round, and name an item under `items`; refusing those cost one run
+/// every call it made, so the fields are read by what the op needs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Arguments {
+    op: Kind,
+    items: Option<Value>,
+    item: Option<Numbers>,
+    note: Option<String>,
+    text: Option<String>,
+}
+
+impl Op {
+    fn parse(arguments: &Value) -> Result<Self, ToolError> {
+        let invalid = |why: &str| ToolError::new(format!("invalid {PROGRESS} arguments: {why}"));
+        let raw: Arguments = serde_json::from_value(arguments.clone())
+            .map_err(|error| invalid(&error.to_string()))?;
+        let words = raw.note.or(raw.text);
+        let numbers = || {
+            raw.item
+                .or_else(|| {
+                    raw.items
+                        .clone()
+                        .and_then(|items| serde_json::from_value(items).ok())
+                })
+                .ok_or_else(|| invalid("done and blocked need item, the item's number"))
+        };
+        Ok(match raw.op {
+            Kind::Plan => Self::Plan {
+                items: raw
+                    .items
+                    .and_then(|items| serde_json::from_value(items).ok())
+                    .ok_or_else(|| invalid("plan needs items, a list of short strings"))?,
+            },
+            Kind::Done => Self::Done {
+                item: numbers()?,
+                note: words,
+            },
+            Kind::Blocked => Self::Blocked {
+                item: numbers()?,
+                note: words,
+            },
+            Kind::Note => Self::Note {
+                text: words.ok_or_else(|| invalid("note needs text"))?,
+            },
+        })
+    }
+}
+
+/// One item number, or several. The schema offers an integer only: a union
+/// type there made Qwen send `"1"` and `"[1, 2]"` as strings, so those are
+/// read too.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Numbers {
+    One(usize),
+    Many(Vec<usize>),
+    Text(String),
+}
+
+impl Numbers {
+    fn numbers(&self) -> Vec<usize> {
+        match self {
+            Self::One(number) => vec![*number],
+            Self::Many(numbers) => numbers.clone(),
+            Self::Text(text) => {
+                let text = text.trim();
+                serde_json::from_str::<Vec<usize>>(text)
+                    .ok()
+                    .or_else(|| text.parse().ok().map(|number| vec![number]))
+                    .unwrap_or_else(|| vec![0])
+            }
+        }
+    }
 }
 
 impl ToolRuntime for Progress {
@@ -203,7 +295,7 @@ impl ToolRuntime for Progress {
             name: PROGRESS.into(),
             description: "Keep the progress record this task is carried by. It may continue in \
                           a fresh session that sees only the record and the workspace. op plan \
-                          sets 2 to 6 items before you start; op done or blocked marks one by its \
+                          sets 2 to 6 items before you start; op done or blocked marks items by \
                           number, with a short note; op note records what a fresh session would \
                           need: what you tried, why it failed, where things are."
                 .into(),
@@ -226,8 +318,7 @@ impl ToolRuntime for Progress {
         if call.name != PROGRESS {
             return Err(ToolError::new(format!("unknown tool {:?}", call.name)));
         }
-        serde_json::from_value::<Op>(call.arguments.clone())
-            .map_err(|error| ToolError::new(format!("invalid {PROGRESS} arguments: {error}")))?;
+        Op::parse(&call.arguments)?;
         Ok(ToolAction::read_only())
     }
 
@@ -279,6 +370,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn misplaced_fields_are_read_by_what_the_op_needs() {
+        let progress = Progress::new(
+            std::env::temp_dir().join(format!("gyr-progress-loose-{}.json", std::process::id())),
+        );
+        for arguments in [
+            json!({"op": "plan", "items": ["a", "b", "c"]}),
+            json!({"op": "done", "item": 1, "text": "parser done"}),
+            json!({"op": "done", "items": [2, 3]}),
+            json!({"op": "note", "note": "all green"}),
+        ] {
+            progress
+                .execute(&call(arguments.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("{arguments}: {error}"));
+        }
+        let record = progress.snapshot();
+        assert_eq!(record.done(), 3);
+        assert_eq!(record.items[0].note.as_deref(), Some("parser done"));
+        assert_eq!(record.notes, ["all green"]);
+    }
+
+    #[tokio::test]
+    async fn several_items_are_closed_in_one_call() {
+        let progress = Progress::new(
+            std::env::temp_dir().join(format!("gyr-progress-many-{}.json", std::process::id())),
+        );
+        for arguments in [
+            json!({"op": "plan", "items": ["a", "b", "c"]}),
+            json!({"op": "done", "item": [1, 2], "note": "all verified"}),
+            json!({"op": "done", "item": "3", "note": "all verified"}),
+        ] {
+            progress.execute(&call(arguments)).await.unwrap();
+        }
+        let record = progress.snapshot();
+        assert_eq!(record.done(), 3);
+        assert_eq!(record.items[2].note.as_deref(), Some("all verified"));
+    }
+
+    #[tokio::test]
     async fn a_plan_with_done_items_cannot_be_replaced_and_bad_items_are_refused() {
         let progress = Progress::new(
             std::env::temp_dir().join(format!("gyr-progress-refuse-{}.json", std::process::id())),
@@ -296,6 +426,8 @@ mod tests {
             json!({"op": "plan", "items": ["c"]}),
             json!({"op": "done", "item": 0}),
             json!({"op": "done", "item": 3}),
+            json!({"op": "done", "item": [2, 3]}),
+            json!({"op": "done", "item": "two"}),
             json!({"op": "note", "text": "  "}),
         ] {
             assert!(

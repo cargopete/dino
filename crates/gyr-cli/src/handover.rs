@@ -33,7 +33,16 @@ const BRIEF: &str = "This task may continue in fresh sessions that see only the 
 pub enum Ended {
     Stopped(StopReason),
     OutOfTurns,
+    /// Sessions kept ending with items pending and nothing newly done.
+    Stalled,
 }
+
+/// Sent once, in the same session, when it ends its turn with items pending:
+/// models finish the work and forget the record more often than they stop
+/// short, and a fresh session costs far more than one question.
+const PENDING: &str = "The progress record still has pending items. If they are finished and \
+    verified, mark them with the progress tool, op done, several at once if you like. If not, \
+    carry on with the next one.";
 
 /// Runs the task, handing over to a fresh session while items stay pending.
 ///
@@ -53,6 +62,7 @@ pub async fn run(
     let mut session = 1;
     let mut last_done = 0;
     let mut stalled = false;
+    let mut asked = false;
     let mut message = format!("{task}\n\n{BRIEF}");
     loop {
         let turns = per_session.min(total.saturating_sub(used)).max(1);
@@ -74,17 +84,46 @@ pub async fn run(
         };
 
         let record = progress.snapshot();
+        // Every item done is a finished task, even when the session spent its
+        // last turn saying so.
+        let complete = !record.items.is_empty() && record.done() == record.items.len();
+        if complete && !matches!(stop, Some(StopReason::Cancelled | StopReason::Blocked)) {
+            if stop.is_none() {
+                eprintln!(
+                    "{}",
+                    crate::style::paint(
+                        crate::style::FAINT,
+                        "  every item in the plan is done; the run is finished"
+                    )
+                );
+            }
+            return Ok(Ended::Stopped(StopReason::EndTurn));
+        }
         let finished = matches!(stop, Some(StopReason::Cancelled | StopReason::Blocked))
             || record.items.is_empty()
             || record.pending() == 0;
-        if finished || session >= MAX_SESSIONS || used >= total {
+        if !finished && stop == Some(StopReason::EndTurn) && !asked && used < total {
+            asked = true;
+            message = String::from(PENDING);
+            continue;
+        }
+        if finished {
+            // Nothing pending but not all done: some items were marked blocked.
+            if !record.items.is_empty() && record.done() < record.items.len() {
+                return Ok(Ended::Stopped(StopReason::Blocked));
+            }
             return Ok(stop.map_or(Ended::OutOfTurns, Ended::Stopped));
+        }
+        // Out of sessions or turns with the plan unfinished is unfinished,
+        // whatever the last session's own stop reason said.
+        if session >= MAX_SESSIONS || used >= total {
+            return Ok(Ended::OutOfTurns);
         }
         // A session that ended of its own accord without finishing an item
         // is allowed once; twice in a row ends the chain rather than looping.
         if stop.is_some() && record.done() == last_done {
             if stalled {
-                return Ok(Ended::Stopped(StopReason::EndTurn));
+                return Ok(Ended::Stalled);
             }
             stalled = true;
         } else {
@@ -104,6 +143,7 @@ pub async fn run(
             prepared.definitions.clone(),
         )?;
         prepared.agent.replace_session(fresh);
+        asked = false;
         message = seed(
             task,
             &record,
