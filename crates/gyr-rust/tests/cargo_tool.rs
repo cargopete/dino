@@ -266,7 +266,7 @@ fn an_unknown_field_is_rejected_rather_than_ignored() {
 
     let error = fixture
         .tool()
-        .classify(&call(json!({"command": "check", "args": ["--offline"]})))
+        .classify(&call(json!({"command": "check", "flags": ["--offline"]})))
         .unwrap_err();
 
     assert!(error.to_string().contains("invalid cargo arguments"));
@@ -431,4 +431,45 @@ fn add_needs_a_crate_and_its_fields_belong_to_it_alone() {
             "{arguments}"
         );
     }
+}
+
+#[test]
+fn build_run_fmt_and_fmt_check_run_what_they_say() {
+    let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
+    let tool = fixture.tool();
+    let subject = |arguments: Value| tool.classify(&call(arguments)).unwrap().subject.unwrap();
+
+    assert!(
+        subject(json!({"command": "build"}))
+            .starts_with("cargo build --workspace --all-targets --message-format=json")
+    );
+    assert_eq!(
+        subject(json!({"command": "run", "args": ["--port", "0"]})),
+        "cargo run --manifest-path Cargo.toml -- --port 0"
+    );
+    assert_eq!(
+        subject(json!({"command": "fmt"})),
+        "cargo fmt --all --manifest-path Cargo.toml"
+    );
+    assert_eq!(
+        subject(json!({"command": "fmt_check"})),
+        "cargo fmt --all --check --manifest-path Cargo.toml"
+    );
+    assert!(
+        tool.classify(&call(json!({"command": "check", "args": ["x"]})))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn fmt_formats_the_file() {
+    let fixture = Fixture::new("pub fn  two( )->u32{2}\n");
+    let tool = fixture.tool();
+
+    tool.execute(&call(json!({"command": "fmt"})))
+        .await
+        .unwrap();
+
+    let source = std::fs::read_to_string(fixture.path.join("src/lib.rs")).unwrap();
+    assert_eq!(source, "pub fn two() -> u32 {\n    2\n}\n");
 }

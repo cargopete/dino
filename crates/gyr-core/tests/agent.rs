@@ -1197,3 +1197,59 @@ fn a_call_with_unparsed_arguments_is_refused_with_what_was_sent() {
     assert!(error.contains("{items: x}"), "{error}");
     assert!(error.contains("key must be a string"), "{error}");
 }
+
+fn todo_turn(items: &serde_json::Value) -> support::Turn {
+    tool_turn(gyr_protocol::ToolCall {
+        id: format!("todo-{}", items.to_string().len()),
+        name: "todo".into(),
+        arguments: serde_json::json!({ "items": items }),
+    })
+}
+
+#[tokio::test]
+async fn a_checklist_left_unfinished_sends_the_model_back_once() {
+    let mut agent = agent(vec![
+        todo_turn(&serde_json::json!([
+            {"text": "Write the store", "status": "done"},
+            {"text": "Add graceful shutdown", "status": "pending"}
+        ])),
+        text_turn("All done."),
+        text_turn("Still done."),
+    ])
+    .with_policy(AllowAll);
+
+    let result = agent.run("build it").await.unwrap();
+
+    let sent_back: Vec<&String> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::SentBack { reason, .. } => Some(reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent_back.len(), 1, "{sent_back:?}");
+    assert!(
+        sent_back[0].contains("Add graceful shutdown"),
+        "{}",
+        sent_back[0]
+    );
+}
+
+#[tokio::test]
+async fn a_finished_checklist_lets_the_model_stop() {
+    let mut agent = agent(vec![
+        todo_turn(&serde_json::json!([{"text": "Write the store", "status": "done"}])),
+        text_turn("All done."),
+    ])
+    .with_policy(AllowAll);
+
+    let result = agent.run("build it").await.unwrap();
+
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::SentBack { .. }))
+    );
+}
