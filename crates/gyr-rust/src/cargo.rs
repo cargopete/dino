@@ -129,7 +129,7 @@ impl CargoTool {
                 "1".to_owned(),
                 "--no-deps".to_owned(),
             ]),
-            CargoCommand::Check | CargoCommand::Clippy => {
+            CargoCommand::Check | CargoCommand::Clippy | CargoCommand::Build => {
                 arguments.push(request.command.subcommand().to_owned());
                 scope(&mut arguments);
                 arguments.extend([
@@ -155,13 +155,21 @@ impl CargoTool {
                     arguments.extend(["-p".to_owned(), package.clone()]);
                 }
             }
-            CargoCommand::Fmt => {
+            CargoCommand::Fmt | CargoCommand::FmtCheck => {
                 arguments.push("fmt".to_owned());
                 match &request.package {
                     Some(package) => arguments.extend(["-p".to_owned(), package.clone()]),
                     None => arguments.push("--all".to_owned()),
                 }
-                arguments.push("--check".to_owned());
+                if request.command == CargoCommand::FmtCheck {
+                    arguments.push("--check".to_owned());
+                }
+            }
+            CargoCommand::Run => {
+                arguments.push("run".to_owned());
+                if let Some(package) = &request.package {
+                    arguments.extend(["-p".to_owned(), package.clone()]);
+                }
             }
         }
         arguments.extend(["--manifest-path".to_owned(), manifest]);
@@ -169,7 +177,7 @@ impl CargoTool {
         // DNS in a way that reads as a network fault rather than as policy.
         // `cargo fmt` does not accept the flag and does not need it.
         if self.sandbox.denies_network()
-            && request.command != CargoCommand::Fmt
+            && !matches!(request.command, CargoCommand::Fmt | CargoCommand::FmtCheck)
             && !request.command.fetches()
         {
             arguments.push("--offline".to_owned());
@@ -178,6 +186,10 @@ impl CargoTool {
             && request.command == CargoCommand::Test
         {
             arguments.push(filter.clone());
+        }
+        if request.command == CargoCommand::Run && !request.args.is_empty() {
+            arguments.push("--".to_owned());
+            arguments.extend(request.args.iter().cloned());
         }
         arguments
     }
@@ -319,13 +331,19 @@ impl CargoTool {
     async fn run(&self, request: CargoRequest) -> Result<ToolOutput, ToolError> {
         let arguments = self.arguments(&request);
         let sandbox = self.sandbox_for(request.command)?;
+        // A program that does not exit, such as a server, is cut short sooner.
+        let timeout = if request.command == CargoCommand::Run {
+            self.limits.timeout.min(Duration::from_secs(120))
+        } else {
+            self.limits.timeout
+        };
         let execution = process::run(
             &Self::program(),
             &arguments,
             &self.root,
             sandbox.as_ref(),
             self.limits.max_captured_bytes,
-            self.limits.timeout,
+            timeout,
         )
         .await?;
 
@@ -338,10 +356,7 @@ impl CargoTool {
                 diagnostics: Vec::new(),
                 dropped_diagnostics: 0,
                 packages: None,
-                output: format!(
-                    "no result: killed after {} seconds",
-                    self.limits.timeout.as_secs()
-                ),
+                output: format!("no result: killed after {} seconds", timeout.as_secs()),
                 truncated: execution.truncated,
                 restored_protected_paths: execution.restored,
             });
@@ -361,7 +376,7 @@ impl CargoTool {
         };
 
         match request.command {
-            CargoCommand::Check | CargoCommand::Clippy => {
+            CargoCommand::Check | CargoCommand::Clippy | CargoCommand::Build => {
                 let parsed = diagnostics::parse(&execution.stdout);
                 output.counts = parsed.counts;
                 let (kept, dropped) = diagnostics::cap(
@@ -383,7 +398,12 @@ impl CargoTool {
                     output.output = capped(&execution.stderr, self.limits.max_output_bytes);
                 }
             }
-            CargoCommand::Test | CargoCommand::Fmt | CargoCommand::Fetch | CargoCommand::Add => {
+            CargoCommand::Test
+            | CargoCommand::Fmt
+            | CargoCommand::FmtCheck
+            | CargoCommand::Run
+            | CargoCommand::Fetch
+            | CargoCommand::Add => {
                 // Neither has a machine-readable stream worth parsing yet, so
                 // the captured text is returned as text and labelled as such.
                 let combined = format!("{}{}", execution.stdout, execution.stderr);
@@ -401,10 +421,12 @@ impl ToolRuntime for CargoTool {
             name: "cargo".into(),
             description: format!(
                 "Run one of a fixed set of Cargo commands in the workspace and return parsed \
-                 diagnostics. No subcommand is read-only: check and clippy run build scripts, \
+                 diagnostics. No subcommand is read-only: check, build and clippy run build scripts, \
                  and test runs test code. Everything runs offline except fetch, which \
                  downloads the locked dependencies, and add, which adds crates to Cargo.toml; \
-                 use those when a build fails for a missing dependency. Containment: {}.",
+                 use those when a build fails for a missing dependency. fmt formats, so read a \
+                 file again after it; fmt_check only reports. run is for programs that exit \
+                 and is stopped after two minutes. Containment: {}.",
                 self.sandbox.label()
             ),
             input_schema: json!({
@@ -412,7 +434,12 @@ impl ToolRuntime for CargoTool {
                 "properties": {
                     "command": {
                         "type": "string",
-                        "enum": ["metadata", "check", "clippy", "test", "fmt", "fetch", "add"]
+                        "enum": ["metadata", "check", "build", "clippy", "test", "run", "fmt", "fmt_check", "fetch", "add"]
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Only for run: arguments passed to the program after --."
                     },
                     "crates": {
                         "type": "array",
@@ -469,6 +496,9 @@ enum CargoCommand {
     Clippy,
     Test,
     Fmt,
+    FmtCheck,
+    Build,
+    Run,
     Fetch,
     Add,
 }
@@ -484,7 +514,9 @@ impl CargoCommand {
             Self::Check => "check",
             Self::Clippy => "clippy",
             Self::Test => "test",
-            Self::Fmt => "fmt",
+            Self::Fmt | Self::FmtCheck => "fmt",
+            Self::Build => "build",
+            Self::Run => "run",
             Self::Fetch => "fetch",
             Self::Add => "add",
         }
@@ -503,6 +535,8 @@ struct CargoRequest {
     features: Vec<String>,
     #[serde(default)]
     dev: bool,
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 impl CargoRequest {
@@ -515,6 +549,7 @@ impl CargoRequest {
             crates: Vec::new(),
             features: Vec::new(),
             dev: false,
+            args: Vec::new(),
         }
     }
 
@@ -542,6 +577,16 @@ impl CargoRequest {
             }
         } else if !request.crates.is_empty() || !request.features.is_empty() || request.dev {
             return Err(ToolError::new("crates, features and dev apply only to add"));
+        }
+        if request.command != CargoCommand::Run && !request.args.is_empty() {
+            return Err(ToolError::new("args apply only to run"));
+        }
+        if request
+            .args
+            .iter()
+            .any(|argument| argument.chars().any(char::is_control))
+        {
+            return Err(ToolError::new("an argument holds a control character"));
         }
         Ok(request)
     }

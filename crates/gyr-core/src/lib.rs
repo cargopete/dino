@@ -679,13 +679,17 @@ where
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, AgentError> {
-        let Some(check) = self.finish_check.as_ref() else {
-            return Ok(None);
-        };
         if self.sent_back || model_turn >= self.config.max_model_turns.get() {
             return Ok(None);
         }
-        let Some(Some(reason)) = cancel.run_until_cancelled(check.unfinished()).await else {
+        let checked = match self.finish_check.as_ref() {
+            Some(check) => cancel.run_until_cancelled(check.unfinished()).await,
+            None => Some(None),
+        };
+        let Some(checked) = checked else {
+            return Ok(None);
+        };
+        let Some(reason) = checked.or_else(|| unfinished_checklist(events)) else {
             return Ok(None);
         };
         self.sent_back = true;
@@ -1026,6 +1030,33 @@ where
         events.push(event);
         Ok(())
     }
+}
+
+/// The items of this run's latest checklist that are not done, as a reason to
+/// send the model back. Read from the call as the model made it, so it holds
+/// whichever tool set is attached.
+fn unfinished_checklist(events: &[AgentEvent]) -> Option<String> {
+    let call = events.iter().rev().find_map(|event| match event {
+        AgentEvent::Model {
+            event: ModelEvent::ToolCallCompleted { call },
+            ..
+        } if call.name == todo::TODO => Some(call),
+        _ => None,
+    })?;
+    let open: Vec<String> = todo::items(&call.arguments)
+        .ok()?
+        .into_iter()
+        .filter(|item| item.status != todo::Status::Done)
+        .map(|item| item.text)
+        .collect();
+    (!open.is_empty()).then(|| {
+        format!(
+            "your checklist still has {} item(s) not done: {}. Finish them, or update the \
+             list and say plainly which are not done and why.",
+            open.len(),
+            open.join("; ")
+        )
+    })
 }
 
 fn usages(events: &[AgentEvent]) -> impl DoubleEndedIterator<Item = &TokenUsage> {
