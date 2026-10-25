@@ -17,6 +17,8 @@ echo "formatted    $(yes_no 'cargo fmt --check')"
 echo "tests        $tests"
 echo "proto+build  $(yes_no 'test -f proto/ledger.proto && grep -q tonic build.rs')"
 echo "shutdown     $(yes_no 'grep -rqE "ctrl_c|signal::unix|SignalKind" src')"
-echo "real ports   $(yes_no 'grep -rqE "TcpListener::bind|127\.0\.0\.1:0|0\.0\.0\.0:0" tests')"
+# Real ports means real clients: the servers start however the crate likes, but
+# the tests must reach them over a socket rather than calling handlers directly.
+echo "http client  $(yes_no 'grep -rqE "reqwest|hyper_util::client|hyper::client" tests')"
 echo "grpc client  $(yes_no 'grep -rqE "Client::connect|ServiceClient" tests')"
 echo "versions     axum $(locked axum), tonic $(locked tonic), thiserror $(locked thiserror)"
