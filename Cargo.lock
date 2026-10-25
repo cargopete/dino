@@ -618,6 +618,7 @@ dependencies = [
  "gyr-protocol",
  "gyr-sandbox",
  "html2text",
+ "nix",
  "pretty_assertions",
  "reqwest",
  "serde",

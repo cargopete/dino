@@ -74,7 +74,8 @@ Tool discipline:
   pipeline, and prefer `read` and `search` over `cat` and `grep`.
 - `shell` runs one command line through `sh -c`, for when a pipe, redirect, glob
   or `&&` is genuinely needed. Every distinct line is approved separately, so
-  prefer `exec` for a single program.
+  prefer `exec` for a single program. Nothing a command starts outlives it, `&`
+  included: to try a server, start it, use it and stop it in the same line.
 - `todo` keeps a checklist for a task of several steps. Send the whole list
   each time, keep one item in progress, and mark items done as you finish them.
   Skip it for a task of one or two steps.

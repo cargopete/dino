@@ -36,6 +36,7 @@ gyr-sandbox = { path = "crates/gyr-sandbox" }
 gyr-tools = { path = "crates/gyr-tools" }
 html2text = "0.17.4"
 ignore = "0.4.33"
+nix = { version = "0.30.1", default-features = false, features = ["signal"] }
 landlock = "0.4.4"
 pretty_assertions = "1.4.1"
 rustyline = { version = "17.0.2", default-features = false, features = ["with-file-history"] }

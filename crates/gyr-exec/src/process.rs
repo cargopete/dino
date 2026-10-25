@@ -96,6 +96,10 @@ pub async fn run(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env_clear();
+    // Its own group, so whatever it starts in the background can be ended with
+    // it rather than outliving the call.
+    #[cfg(unix)]
+    command.process_group(0);
     for (name, value) in child_environment(sandbox) {
         command.env(name, value);
     }
@@ -112,20 +116,26 @@ pub async fn run(
         .take()
         .ok_or_else(|| ToolError::new("child process had no stderr"))?;
 
+    let mut group = Group(child.id());
+    // Both pipes are drained concurrently. Reading one to completion first
+    // would deadlock as soon as the other filled its buffer.
+    let out = tokio::spawn(read_capped(stdout, limit));
+    let err = tokio::spawn(read_capped(stderr, limit));
     let collected = tokio::time::timeout(timeout, async {
-        // Both pipes are drained concurrently. Reading one to completion first
-        // would deadlock as soon as the other filled its buffer.
-        let (out, err, status) = tokio::join!(
-            read_capped(stdout, limit),
-            read_capped(stderr, limit),
-            child.wait()
-        );
-        Ok::<_, std::io::Error>((out?, err?, status?))
+        let status = child.wait().await?;
+        // A background process still holds the pipes open; ending the group
+        // closes them, so the call returns when its command does.
+        group.kill();
+        let joined = |result: Result<std::io::Result<(String, bool)>, tokio::task::JoinError>| {
+            result.map_err(std::io::Error::other).and_then(|read| read)
+        };
+        Ok::<_, std::io::Error>((joined(out.await)?, joined(err.await)?, status))
     })
     .await;
 
     if collected.is_err() {
         // Killed before restoring, or it could write again afterwards.
+        group.kill();
         let _ = child.kill().await;
     }
     let restored = match snapshot.as_mut() {
@@ -155,6 +165,27 @@ pub async fn run(
             timed_out: true,
             restored,
         }),
+    }
+}
+
+/// A child's process group, killed when the call is over or abandoned.
+struct Group(Option<u32>);
+
+impl Group {
+    fn kill(&mut self) {
+        #[cfg(unix)]
+        if let Some(id) = self.0.take().and_then(|id| i32::try_from(id).ok()) {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(id),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
