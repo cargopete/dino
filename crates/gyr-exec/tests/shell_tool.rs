@@ -118,3 +118,35 @@ fn empty_lines_and_escaping_directories_are_refused() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_backgrounded_process_ends_with_the_call_and_does_not_hold_it_open() {
+    let fixture = Fixture::new("orphan");
+    let tool = fixture.tool();
+    let alive = |pid: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .unwrap()
+            .success()
+    };
+
+    for command in [
+        // Detached from the pipes, as a server started in the background is.
+        "sleep 60 > /dev/null 2>&1 & echo $!",
+        // Still holding the pipes, which used to keep the call waiting.
+        "sleep 60 & echo $!",
+    ] {
+        let started = std::time::Instant::now();
+        let result = output(&tool, json!({ "command": command })).await;
+        let pid = result["stdout"].as_str().unwrap().trim().to_owned();
+
+        assert!(!pid.is_empty(), "{result}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{command} held the call for {:?}",
+            started.elapsed()
+        );
+        assert!(!alive(&pid), "{command}: sleep {pid} outlived the call");
+    }
+}
