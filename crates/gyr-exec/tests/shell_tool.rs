@@ -123,12 +123,20 @@ fn empty_lines_and_escaping_directories_are_refused() {
 async fn a_backgrounded_process_ends_with_the_call_and_does_not_hold_it_open() {
     let fixture = Fixture::new("orphan");
     let tool = fixture.tool();
+    // A killed process can linger briefly as a zombie until it is reaped, and
+    // `kill -0` still finds a zombie, so give it a moment to go.
     let alive = |pid: &str| {
-        std::process::Command::new("kill")
-            .args(["-0", pid])
-            .status()
-            .unwrap()
-            .success()
+        (0..20).all(|_| {
+            let found = std::process::Command::new("kill")
+                .args(["-0", pid])
+                .status()
+                .unwrap()
+                .success();
+            if found {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            found
+        })
     };
 
     for command in [
