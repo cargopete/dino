@@ -4,11 +4,13 @@ mod approve;
 mod config;
 mod evals;
 mod handover;
+mod markdown;
 mod render;
 mod replay;
 mod session;
 mod settings;
 mod style;
+mod summary;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -446,10 +448,11 @@ fn announce_instructions(context: &PromptContext) {
         .iter()
         .chain(&context.memory)
         .map(|item| {
+            let source = render::short_path(Path::new(&item.source), Path::new(""));
             if item.truncated {
-                format!("{} (truncated)", item.source)
+                format!("{source} (truncated)")
             } else {
-                item.source.clone()
+                source
             }
         })
         .collect::<Vec<_>>()
@@ -648,9 +651,9 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             &format!(
                 "{} · {} · {} · log {}",
                 prepared.settings.profile.display_name,
-                prepared.settings.mode.label(),
-                prepared.sandbox_label,
-                prepared.settings.log_path.display()
+                render::short_label(prepared.settings.mode.label()),
+                render::short_label(&prepared.sandbox_label),
+                render::short_path(&prepared.settings.log_path, &prepared.settings.workspace)
             )
         )
     );

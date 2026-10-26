@@ -66,6 +66,10 @@ pub fn run(args: &ReplayArgs) -> Result<ExitCode> {
             .emit(event)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
+    // A log can end mid-line, with no finish record to draw the last of it.
+    renderer
+        .flush()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     println!();
     Ok(ExitCode::SUCCESS)
 }
