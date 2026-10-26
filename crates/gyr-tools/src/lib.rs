@@ -136,16 +136,20 @@ impl WorkspaceTools {
             },
             ToolDefinition {
                 name: "search".into(),
-                description:
-                    "Search UTF-8 workspace files for a literal string, respecting ignore files. \
-                     path narrows it to a directory or a single file."
-                        .into(),
+                description: "Search UTF-8 workspace files, respecting ignore files. The query is \
+                     literal unless regex is true. path narrows it to a directory or a single \
+                     file, and glob to files whose workspace path matches, such as *.rs or \
+                     src/**/*.ts."
+                    .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "minLength": 1},
                         "path": {"type": "string"},
-                        "max_results": {"type": "integer", "minimum": 1}
+                        "max_results": {"type": "integer", "minimum": 1},
+                        "regex": {"type": "boolean", "description": "Read query as a Rust regular expression."},
+                        "ignore_case": {"type": "boolean"},
+                        "glob": {"type": "string", "description": "Only files whose workspace path matches."}
                     },
                     "required": ["query"],
                     "additionalProperties": false
@@ -162,6 +166,10 @@ impl WorkspaceTools {
                     "properties": {
                         "path": {"type": "string"},
                         "depth": {"type": "integer", "minimum": 1},
+                        "pattern": {
+                            "type": "string",
+                            "description": "Only files whose workspace path matches this glob, at any depth, such as **/*_test.go."
+                        },
                         "all": {
                             "type": "boolean",
                             "description": "Include ignored and hidden entries."
@@ -322,6 +330,16 @@ impl WorkspaceTools {
             .max_results
             .unwrap_or(self.limits.max_search_matches)
             .min(self.limits.max_search_matches);
+        let pattern = if arguments.regex {
+            arguments.query.clone()
+        } else {
+            regex::escape(&arguments.query)
+        };
+        let needle = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(arguments.ignore_case)
+            .build()
+            .map_err(|error| ToolError::new(format!("invalid search pattern: {error}")))?;
+        let files = arguments.glob.as_deref().map(glob_matcher).transpose()?;
         let mut builder = WalkBuilder::new(search_root);
         builder
             .follow_links(false)
@@ -345,19 +363,26 @@ impl WorkspaceTools {
                 truncated = true;
                 break;
             }
+            let relative = self.root.relative(entry.path())?;
+            if files
+                .as_ref()
+                .is_some_and(|files| !files.is_match(&relative))
+            {
+                continue;
+            }
             files_scanned += 1;
             let Ok(text) = fs::read_to_string(entry.path()) else {
                 continue;
             };
             for (line_index, line) in text.lines().enumerate() {
-                for (column, _) in line.match_indices(&arguments.query) {
+                for column in needle.find_iter(line).map(|found| found.start()) {
                     total_matches += 1;
                     if matches.len() == result_limit {
                         truncated = true;
                         continue;
                     }
                     let found = SearchMatch {
-                        path: self.root.relative(entry.path())?,
+                        path: relative.clone(),
                         line: line_index + 1,
                         column: column + 1,
                         text: line.to_owned(),
@@ -412,6 +437,7 @@ impl WorkspaceTools {
         if let Some(depth) = arguments.depth {
             builder.max_depth(Some(depth));
         }
+        let pattern = arguments.pattern.as_deref().map(glob_matcher).transpose()?;
 
         let mut entries = Vec::new();
         let mut total_entries = 0_usize;
@@ -427,6 +453,11 @@ impl WorkspaceTools {
             let Some(kind) = entry.file_type() else {
                 continue;
             };
+            if let Some(pattern) = &pattern
+                && !(kind.is_file() && pattern.is_match(self.root.relative(entry.path())?))
+            {
+                continue;
+            }
             total_entries += 1;
             if entries.len() == self.limits.max_list_entries {
                 truncated = true;
@@ -646,6 +677,22 @@ impl ToolRuntime for WorkspaceTools {
     }
 }
 
+/// A glob over workspace paths. `*` stops at `/` and `**` crosses it, so
+/// `*.rs` means a file at the top and `**/*.rs` means one anywhere; a pattern
+/// with no `/` matches a file name at any depth, as people expect of `*.rs`.
+fn glob_matcher(pattern: &str) -> Result<globset::GlobMatcher, ToolError> {
+    let pattern = if pattern.contains('/') {
+        pattern.to_owned()
+    } else {
+        format!("**/{pattern}")
+    };
+    globset::GlobBuilder::new(&pattern)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .map_err(|error| ToolError::new(format!("invalid glob {pattern:?}: {error}")))
+}
+
 fn parse_arguments<T>(arguments: &Value, tool: &str) -> Result<T, ToolError>
 where
     T: for<'de> Deserialize<'de>,
@@ -762,6 +809,13 @@ struct SearchArguments {
     query: String,
     path: Option<String>,
     max_results: Option<usize>,
+    /// Read the query as a regular expression rather than literally.
+    #[serde(default)]
+    regex: bool,
+    #[serde(default)]
+    ignore_case: bool,
+    /// Only files whose workspace path matches this glob, such as `*.rs`.
+    glob: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -786,6 +840,8 @@ struct SearchMatch {
 struct ListArguments {
     path: Option<String>,
     depth: Option<usize>,
+    /// Only files whose workspace path matches this glob, at any depth.
+    pattern: Option<String>,
     /// Include ignored and hidden entries.
     ///
     /// Added because an eval run caught the model reaching for
@@ -1213,6 +1269,60 @@ mod tests {
         assert_eq!(output["matches"].as_array().unwrap().len(), 1);
         assert_eq!(output["matches"][0]["path"], "src/lib.rs");
         assert_eq!(output["truncated"], true);
+    }
+
+    #[test]
+    fn search_takes_a_regex_a_case_and_a_glob_when_asked() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn parse_one() {}\nfn Parse_Two() {}\n");
+        workspace.write("src/deep/mod.rs", "fn parse_three() {}\n");
+        workspace.write("README.md", "fn parse_in_prose\n");
+        let tools = workspace.tools();
+        let search = |arguments: Value| {
+            output_json(&tools.execute_sync(&call("search", arguments)).unwrap())
+        };
+
+        // Literal by default: the dot and brackets are just characters.
+        assert_eq!(search(json!({"query": "parse_.*"}))["total_matches"], 0);
+        assert_eq!(
+            search(json!({"query": r"fn parse_\w+", "regex": true}))["total_matches"],
+            3
+        );
+        assert_eq!(
+            search(json!({"query": "parse_", "ignore_case": true, "glob": "*.rs"}))["total_matches"],
+            3
+        );
+        let top_only = search(json!({"query": "parse", "glob": "src/*.rs", "ignore_case": true}));
+        assert_eq!(top_only["total_matches"], 2, "{top_only}");
+        assert!(
+            tools
+                .execute_sync(&call("search", json!({"query": "(", "regex": true})))
+                .unwrap_err()
+                .to_string()
+                .contains("invalid search pattern")
+        );
+    }
+
+    #[test]
+    fn list_finds_files_by_pattern_at_any_depth() {
+        let workspace = TestWorkspace::new();
+        workspace.write("a_test.go", "");
+        workspace.write("pkg/b_test.go", "");
+        workspace.write("pkg/b.go", "");
+        let tools = workspace.tools();
+
+        let output = output_json(
+            &tools
+                .execute_sync(&call("list", json!({"pattern": "*_test.go"})))
+                .unwrap(),
+        );
+        let paths: Vec<&str> = output["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .collect();
+        assert_eq!(paths, ["a_test.go", "pkg/b_test.go"]);
     }
 
     #[test]
