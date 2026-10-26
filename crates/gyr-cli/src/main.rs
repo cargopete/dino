@@ -9,6 +9,7 @@ mod render;
 mod replay;
 mod session;
 mod settings;
+mod spinner;
 mod style;
 mod summary;
 

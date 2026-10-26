@@ -46,6 +46,7 @@ pub struct Renderer {
     open_call: Option<ToolCall>,
     /// When the current submission started, for the closing line.
     started: Option<std::time::Instant>,
+    spinner: crate::spinner::Spinner,
     /// Accumulated across every submission, because a session's cost is the
     /// question a person actually has. Shared so `/status` can read the same
     /// number the turn summary prints, rather than keeping a second tally that
@@ -74,6 +75,7 @@ impl Renderer {
             markdown: crate::markdown::Markdown::default(),
             open_call: None,
             started: None,
+            spinner: crate::spinner::Spinner::default(),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             context_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -104,6 +106,7 @@ impl Renderer {
     ///
     /// Returns [`SinkError`] when the terminal cannot be written.
     pub fn flush(&mut self) -> Result<(), SinkError> {
+        self.spinner.stop();
         self.break_stream()
     }
 
@@ -127,6 +130,16 @@ impl Renderer {
     }
 
     fn stream_delta(&mut self, kind: Stream, delta: &str) -> Result<(), SinkError> {
+        // Models often open a message with blank lines before calling a tool,
+        // which would otherwise be drawn as empty space.
+        let delta = if self.stream == kind {
+            delta
+        } else {
+            delta.trim_start()
+        };
+        if delta.is_empty() {
+            return Ok(());
+        }
         if self.stream != kind || self.open_call.is_some() {
             self.break_stream()?;
             self.stream = kind;
@@ -215,8 +228,46 @@ impl Renderer {
     }
 }
 
+impl Renderer {
+    /// Whether an event puts anything on screen. Those that do not, such as
+    /// hidden reasoning, token counts and a call's arguments arriving, leave
+    /// the spinner ticking.
+    /// Stops the spinner before anything is drawn, and starts it when the
+    /// model begins a turn.
+    fn tick(&mut self, event: &AgentEvent) -> Result<(), SinkError> {
+        if self.draws(event) {
+            self.spinner.stop();
+        }
+        if let AgentEvent::Model {
+            event: ModelEvent::Started { .. },
+            ..
+        } = event
+        {
+            self.break_stream()?;
+            self.spinner.thinking();
+        }
+        Ok(())
+    }
+
+    fn draws(&self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::Model { event, .. } => match event {
+                ModelEvent::ReasoningDelta { .. } => self.show_reasoning,
+                ModelEvent::Usage { .. }
+                | ModelEvent::Started { .. }
+                | ModelEvent::ToolCallStarted { .. }
+                | ModelEvent::ToolCallArgumentsDelta { .. }
+                | ModelEvent::ToolCallCompleted { .. } => false,
+                ModelEvent::TextDelta { .. } | ModelEvent::Finished { .. } => true,
+            },
+            _ => true,
+        }
+    }
+}
+
 impl EventSink for Renderer {
     fn emit(&mut self, event: &AgentEvent) -> Result<(), SinkError> {
+        self.tick(event)?;
         match event {
             // The person's own words, in the person's colour.
             AgentEvent::Submitted { text } => {
@@ -239,11 +290,10 @@ impl EventSink for Renderer {
                 self.break_stream()?;
                 // The machine is about to do something, so the machine's colour.
                 // The line stays open for the result to finish it.
-                write_out(&style::paint(
-                    SLATE,
-                    &format!("  › {}", describe_call(call)),
-                ))?;
+                let line = style::paint(SLATE, &format!("  › {}", describe_call(call)));
+                write_out(&line)?;
                 self.open_call = Some(call.clone());
+                self.spinner.after(line);
                 Ok(())
             }
             AgentEvent::ContextWarning {
@@ -321,6 +371,7 @@ impl EventSink for Renderer {
     }
 
     fn finish(&mut self, outcome: &RunOutcome) -> Result<(), SinkError> {
+        self.spinner.stop();
         self.break_stream()?;
         let usage = self
             .usage
