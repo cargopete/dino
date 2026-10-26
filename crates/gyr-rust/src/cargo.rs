@@ -365,6 +365,7 @@ impl CargoTool {
                 diagnostics: Vec::new(),
                 dropped_diagnostics: 0,
                 packages: None,
+                added: Vec::new(),
                 output: format!("no result: killed after {} seconds", timeout.as_secs()),
                 truncated: execution.truncated,
                 restored_protected_paths: execution.restored,
@@ -379,6 +380,7 @@ impl CargoTool {
             diagnostics: Vec::new(),
             dropped_diagnostics: 0,
             packages: None,
+            added: Vec::new(),
             output: String::new(),
             truncated: execution.truncated,
             restored_protected_paths: execution.restored,
@@ -418,6 +420,9 @@ impl CargoTool {
                 let combined = format!("{}{}", execution.stdout, execution.stderr);
                 output.output = capped(&combined, self.limits.max_output_bytes);
                 output.truncated |= combined.len() > self.limits.max_output_bytes;
+                if request.command == CargoCommand::Add {
+                    output.added = added(&execution.stderr);
+                }
             }
         }
         json_output(&output)
@@ -674,6 +679,22 @@ fn cargo_cache() -> Result<Vec<PathBuf>, ToolError> {
     Ok(directories.into_iter().chain(locks).collect())
 }
 
+/// `cargo add`'s own lines for what it added, as `name version (section)`.
+///
+/// Its other `Adding` lines, without a section, are the lockfile's transitive
+/// packages, and are left out.
+fn added(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("Adding ")?;
+            let (name, rest) = rest.split_once(" v")?;
+            let (version, section) = rest.split_once(" to ")?;
+            Some(format!("{name} {version} ({section})"))
+        })
+        .collect()
+}
+
 #[derive(Debug, Serialize)]
 struct CargoOutput {
     command: String,
@@ -686,6 +707,10 @@ struct CargoOutput {
     dropped_diagnostics: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     packages: Option<Vec<PackageSummary>>,
+    /// What `add` put in the manifest, at the versions it resolved, which are
+    /// the APIs the code must be written against.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    added: Vec<String>,
     output: String,
     truncated: bool,
     /// Protected paths this command changed, which have been put back.
@@ -775,4 +800,21 @@ fn capped(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}\n… (truncated)", &value[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::added;
+
+    #[test]
+    fn add_reports_the_versions_it_chose_and_not_the_lockfile() {
+        let stderr = "    Updating crates.io index\n      Adding axum v0.8.9 to dependencies\n             Features:\n             + json\n      Adding reqwest v0.13.5 to dev-dependencies\n     Locking 103 packages to latest Rust 1.98.1 compatible versions\n      Adding aws-lc-rs v1.18.2\n";
+        assert_eq!(
+            added(stderr),
+            [
+                "axum 0.8.9 (dependencies)",
+                "reqwest 0.13.5 (dev-dependencies)"
+            ]
+        );
+    }
 }

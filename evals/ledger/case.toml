@@ -8,7 +8,8 @@ are integer minor units and never go negative; a transfer is atomic.
 
 One binary serves an HTTP JSON API with axum and a gRPC API with tonic, on \
 separate addresses, sharing one store behind a trait with an in-memory \
-implementation. It is a library crate named ledger plus a thin main.
+implementation. It is a library crate named ledger plus a thin main, and the \
+binary is named ledger too, Cargo's default for this package.
 
 Contract. Black-box tests will hold you to it exactly.
 
