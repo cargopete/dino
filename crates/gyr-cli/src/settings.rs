@@ -171,6 +171,22 @@ impl Layers {
     }
 }
 
+/// Flag, then `GYR_MODEL`, then whichever config file set `model`.
+///
+/// An empty `GYR_MODEL` is still the environment: it names nothing, and the
+/// profile lookup fails, rather than quietly falling through to a file.
+pub fn selected_model(flag: Option<&str>, layers: &Layers) -> (Option<String>, Source) {
+    if let Some(model) = flag {
+        (Some(model.to_owned()), Source::Flag)
+    } else if let Ok(model) = std::env::var("GYR_MODEL") {
+        (Some(model), Source::Environment)
+    } else if let Some((model, source)) = layers.pick(|file| file.model.clone()) {
+        (Some(model), source)
+    } else {
+        (None, Source::Default)
+    }
+}
+
 fn user_config_path() -> Option<PathBuf> {
     user_dir().map(|dir| dir.join("config.toml"))
 }
@@ -334,6 +350,37 @@ mod tests {
         // A typo that is silently ignored is a setting that mysteriously does
         // not apply, which is a worse afternoon than an error.
         assert!(error.to_string().contains("cfg.toml"), "{error}");
+    }
+
+    #[test]
+    fn the_model_comes_from_the_flag_then_the_environment_then_the_files() {
+        let project_wins = layered("model = \"qwen3.7-max\"\n", "model = \"qwen3.8-27b\"\n");
+        let user_only = layered("plain = true\n", "model = \"qwen3.7-max\"\n");
+        let silent = layered("plain = true\n", "plain = true\n");
+
+        let (flagged, source) = selected_model(Some("glm-5.3"), &project_wins);
+        assert_eq!(flagged.as_deref(), Some("glm-5.3"));
+        assert_eq!(source, Source::Flag);
+
+        // The variable is process-wide, so a test must not set it. Whichever
+        // state this process inherited is the one the assertion can check.
+        let (chosen, source) = selected_model(None, &project_wins);
+        if let Ok(from_env) = std::env::var("GYR_MODEL") {
+            assert_eq!(chosen.as_deref(), Some(from_env.as_str()));
+            assert_eq!(source, Source::Environment);
+            let (again, again_source) = selected_model(None, &silent);
+            assert_eq!(again.as_deref(), Some(from_env.as_str()));
+            assert_eq!(again_source, Source::Environment);
+        } else {
+            assert_eq!(chosen.as_deref(), Some("qwen3.7-max"));
+            assert_eq!(source, Source::ProjectFile);
+            let (user, user_source) = selected_model(None, &user_only);
+            assert_eq!(user.as_deref(), Some("qwen3.7-max"));
+            assert_eq!(user_source, Source::UserFile);
+            let (none, none_source) = selected_model(None, &silent);
+            assert_eq!(none, None);
+            assert_eq!(none_source, Source::Default);
+        }
     }
 
     #[test]

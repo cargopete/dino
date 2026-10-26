@@ -140,7 +140,7 @@ struct CommonArgs {
 
 #[derive(Debug, clap::Args)]
 struct PromptArgs {
-    /// Model key from `gyr models`. Defaults to `GYR_MODEL`.
+    /// Model key from `gyr models`. Flag, then `GYR_MODEL`, then the config file.
     #[arg(long)]
     model: Option<String>,
     /// Workspace root. Defaults to the current directory.
@@ -230,8 +230,10 @@ fn list_models(json: bool) -> Result<()> {
 }
 
 fn print_prompt(args: &PromptArgs) -> Result<()> {
-    let profile = config::resolve_profile(args.model.as_deref())?;
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
+    let layers = Layers::load(&workspace)?;
+    let (model, _) = settings::selected_model(args.model.as_deref(), &layers);
+    let profile = config::resolve_profile(model.as_deref())?;
     let sandbox = config::build_sandbox(args.sandbox, &workspace, &[])?;
     let tools = tool_set(
         &workspace,
@@ -785,15 +787,7 @@ fn hooks_for(layers: &Layers, event: settings::HookEvent) -> Vec<gyr_exec::Hook>
 fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
     let layers = Layers::load(workspace)?;
 
-    let model = if let Some(model) = args.model.clone() {
-        (Some(model), Source::Flag)
-    } else if let Ok(model) = std::env::var("GYR_MODEL") {
-        (Some(model), Source::Environment)
-    } else if let Some((model, source)) = layers.pick(|file| file.model.clone()) {
-        (Some(model), source)
-    } else {
-        (None, Source::Default)
-    };
+    let model = settings::selected_model(args.model.as_deref(), &layers);
 
     let approvals = if args.dangerously_allow_all {
         (ApprovalMode::AllowAll, Source::Flag)

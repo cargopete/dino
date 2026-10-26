@@ -169,6 +169,16 @@ fn cargo(call: &ToolCall, value: &Value) -> (Tone, String) {
         .unwrap_or_default();
     let summary = match command {
         "test" => {
+            if value.get("repeated").and_then(Value::as_bool) == Some(true) {
+                return (
+                    if exit.is_some_and(|code| code != 0) {
+                        Tone::Failed
+                    } else {
+                        Tone::Fine
+                    },
+                    "not run again".to_owned(),
+                );
+            }
             let (passed, failed) = test_counts(output);
             if failed > 0 || exit.is_some_and(|code| code != 0) {
                 return (
@@ -380,6 +390,22 @@ mod tests {
         assert_eq!(
             gist("cargo", json!({"command": "test"}), failing),
             Some((Tone::Failed, "1 failed, 2 passed".into()))
+        );
+        assert_eq!(
+            gist(
+                "cargo",
+                json!({"command": "test"}),
+                json!({"exit_code": 0, "repeated": true, "output": ""})
+            ),
+            Some((Tone::Fine, "not run again".into()))
+        );
+        assert_eq!(
+            gist(
+                "cargo",
+                json!({"command": "test"}),
+                json!({"exit_code": 101, "repeated": true, "output": ""})
+            ),
+            Some((Tone::Failed, "not run again".into()))
         );
 
         let broken = json!({"exit_code": 101, "counts": {"errors": 2, "warnings": 1}});

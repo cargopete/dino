@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use gyr_core::ToolError;
 use gyr_core::ToolFuture;
@@ -17,6 +19,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
 
 use crate::diagnostics;
 use crate::diagnostics::Diagnostic;
@@ -29,6 +32,17 @@ const MAX_ARGUMENT_BYTES: usize = 128;
 
 /// Appended to the approval subject of a command that reaches the network.
 const FETCH_NOTE: &str = " (network: HTTPS, Cargo cache)";
+
+/// What a clean `cargo test` tells the model, once.
+const PASS_NOTE: &str = "visible tests passed. Probe an edge you have not executed, then stop. \
+     A repeated test on this unchanged tree will not run again.";
+
+/// What a second identical `cargo test` says, instead of the log.
+const REPEAT_PASS_NOTE: &str = "visible tests already passed on this unchanged tree, so this \
+     test was not run again. Probe an edge you have not executed, then stop.";
+
+const REPEAT_FAIL_NOTE: &str = "this test already failed on this unchanged tree, so it was not \
+     run again. Edit the code first.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CargoLimits {
@@ -60,6 +74,17 @@ pub struct CargoTool {
     manifest: PathBuf,
     limits: CargoLimits,
     sandbox: Arc<dyn Sandbox>,
+    /// The last `test` and the tree it ran against. A model that has already
+    /// seen the result runs the same command again instead of stopping.
+    last_test: Mutex<Option<TestMemory>>,
+}
+
+/// One `cargo test` invocation and the tree it left behind.
+#[derive(Clone, Debug)]
+struct TestMemory {
+    key: String,
+    fingerprint: String,
+    exit_code: i32,
 }
 
 /// The outcome of [`CargoTool::run_tests`].
@@ -96,6 +121,7 @@ impl CargoTool {
             manifest,
             limits,
             sandbox,
+            last_test: Mutex::new(None),
         })
     }
 
@@ -338,6 +364,11 @@ impl CargoTool {
 
     async fn run(&self, request: CargoRequest) -> Result<ToolOutput, ToolError> {
         self.require_manifest()?;
+        if request.command == CargoCommand::Test
+            && let Some(output) = self.repeated_test(&request)?
+        {
+            return json_output(&output);
+        }
         let arguments = self.arguments(&request);
         let sandbox = self.sandbox_for(request.command)?;
         // A program that does not exit, such as a server, is cut short sooner.
@@ -369,6 +400,8 @@ impl CargoTool {
                 output: format!("no result: killed after {} seconds", timeout.as_secs()),
                 truncated: execution.truncated,
                 restored_protected_paths: execution.restored,
+                note: None,
+                repeated: false,
             });
         }
 
@@ -384,6 +417,8 @@ impl CargoTool {
             output: String::new(),
             truncated: execution.truncated,
             restored_protected_paths: execution.restored,
+            note: None,
+            repeated: false,
         };
 
         match request.command {
@@ -425,8 +460,155 @@ impl CargoTool {
                 }
             }
         }
+        if request.command == CargoCommand::Test {
+            self.remember_test(&request, &mut output)?;
+        }
         json_output(&output)
     }
+
+    /// The previous identical test, when the tree has not changed since it ran.
+    fn repeated_test(&self, request: &CargoRequest) -> Result<Option<CargoOutput>, ToolError> {
+        let Some(memory) = self.last_test.lock().ok().and_then(|memory| memory.clone()) else {
+            return Ok(None);
+        };
+        if memory.key != test_key(request) || memory.fingerprint != source_fingerprint(&self.root)?
+        {
+            return Ok(None);
+        }
+        let passed = memory.exit_code == 0;
+        let note = if passed {
+            REPEAT_PASS_NOTE
+        } else {
+            REPEAT_FAIL_NOTE
+        };
+        Ok(Some(CargoOutput {
+            command: self.subject_for(request),
+            exit_code: Some(memory.exit_code),
+            timed_out: false,
+            counts: DiagnosticCounts::default(),
+            diagnostics: Vec::new(),
+            dropped_diagnostics: 0,
+            packages: None,
+            added: Vec::new(),
+            output: String::new(),
+            truncated: false,
+            restored_protected_paths: Vec::new(),
+            note: Some(note.to_owned()),
+            repeated: true,
+        }))
+    }
+
+    /// Records a finished test, and says so on a clean one.
+    fn remember_test(
+        &self,
+        request: &CargoRequest,
+        output: &mut CargoOutput,
+    ) -> Result<(), ToolError> {
+        let Some(exit_code) = output.exit_code else {
+            return Ok(());
+        };
+        if exit_code == 0 {
+            if !output.output.is_empty() && !output.output.ends_with('\n') {
+                output.output.push('\n');
+            }
+            output.output.push_str(PASS_NOTE);
+            output.output.push('\n');
+            output.note = Some(PASS_NOTE.to_owned());
+        }
+        if let Ok(mut memory) = self.last_test.lock() {
+            *memory = Some(TestMemory {
+                key: test_key(request),
+                fingerprint: source_fingerprint(&self.root)?,
+                exit_code,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Command, package, filter and args. Two tests that differ in any of those
+/// are not the same command, even when the tree is.
+fn test_key(request: &CargoRequest) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}\u{1}{}",
+        request.command.subcommand(),
+        request.package.as_deref().unwrap_or(""),
+        request.filter.as_deref().unwrap_or(""),
+        request.args.join("\u{1}")
+    )
+}
+
+/// Files a person or the model can edit. `target/` and `.gyr/` move while a
+/// test runs, and must not make the next identical test look like a new tree.
+fn source_fingerprint(root: &Path) -> Result<String, ToolError> {
+    let mut files = Vec::new();
+    collect_sources(root, root, &mut files)?;
+    files.sort();
+    let mut hasher = sha2::Sha256::new();
+    for (path, len, secs, nanos) in &files {
+        hasher.update(path.as_bytes());
+        hasher.update(len.to_le_bytes());
+        hasher.update(secs.to_le_bytes());
+        hasher.update(nanos.to_le_bytes());
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+fn collect_sources(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<(String, u64, u64, u32)>,
+) -> Result<(), ToolError> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| ToolError::new(format!("cannot list {}: {error}", dir.display())))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| ToolError::new(format!("cannot list {}: {error}", dir.display())))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(
+            name.as_ref(),
+            "target" | "node_modules" | "dist" | ".git" | ".gyr"
+        ) {
+            continue;
+        }
+        let kind = entry.file_type().map_err(|error| {
+            ToolError::new(format!("cannot stat {}: {error}", entry.path().display()))
+        })?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            collect_sources(root, &entry.path(), files)?;
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
+        let meta = entry.metadata().map_err(|error| {
+            ToolError::new(format!("cannot stat {}: {error}", entry.path().display()))
+        })?;
+        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let since = modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let relative = entry.path().strip_prefix(root).map_or_else(
+            |_| entry.path().display().to_string(),
+            |path| path.display().to_string(),
+        );
+        files.push((relative, meta.len(), since.as_secs(), since.subsec_nanos()));
+    }
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
 }
 
 impl ToolRuntime for CargoTool {
@@ -439,8 +621,9 @@ impl ToolRuntime for CargoTool {
                  and test runs test code. Everything runs offline except fetch, which \
                  downloads the locked dependencies, and add, which adds crates to Cargo.toml; \
                  use those when a build fails for a missing dependency. fmt formats, so read a \
-                 file again after it; fmt_check only reports. run is for programs that exit \
-                 and is stopped after two minutes. Containment: {}.",
+                 file again after it; fmt_check only reports. test that already ran against \
+                 the current files is not run again. run is for programs that exit and is \
+                 stopped after two minutes. Containment: {}.",
                 self.sandbox.label()
             ),
             input_schema: json!({
@@ -716,6 +899,18 @@ struct CargoOutput {
     /// Protected paths this command changed, which have been put back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     restored_protected_paths: Vec<String>,
+    /// What a test result means for the next step, when the log does not say it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    /// This test was not run, because the same one already ran on this tree.
+    #[serde(skip_serializing_if = "is_false")]
+    repeated: bool,
+}
+
+// `skip_serializing_if` is given a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Serialize)]

@@ -70,6 +70,9 @@ pub struct WorkspaceTools {
     /// edit that lands on one of them has undone work, which a model going in
     /// circles does not notice on its own.
     versions: Mutex<HashMap<PathBuf, Vec<String>>>,
+    /// Ranges already returned, with the fingerprint they were read at. The
+    /// same range of an unchanged file is how a turn gets spent twice.
+    reads: Mutex<HashMap<PathBuf, Vec<ReadSpan>>>,
 }
 
 impl WorkspaceTools {
@@ -86,6 +89,7 @@ impl WorkspaceTools {
             seen: Mutex::new(HashMap::new()),
             protected: Vec::new(),
             versions: Mutex::new(HashMap::new()),
+            reads: Mutex::new(HashMap::new()),
         })
     }
 
@@ -122,13 +126,21 @@ impl WorkspaceTools {
         vec![
             ToolDefinition {
                 name: "read".into(),
-                description: "Read a bounded range from a UTF-8 file in the workspace.".into(),
+                description: "Read a bounded range from a UTF-8 file in the workspace. The same \
+                              range of an unchanged file returns a note instead of the bytes; \
+                              pass again to read it once more. A read that stops early names \
+                              the next start_line."
+                    .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "start_line": {"type": "integer", "minimum": 1},
-                        "end_line": {"type": "integer", "minimum": 1}
+                        "end_line": {"type": "integer", "minimum": 1},
+                        "again": {
+                            "type": "boolean",
+                            "description": "Return the bytes even when this range was already read and the file has not changed."
+                        }
                     },
                     "required": ["path"],
                     "additionalProperties": false
@@ -136,9 +148,10 @@ impl WorkspaceTools {
             },
             ToolDefinition {
                 name: "search".into(),
-                description: "Search UTF-8 workspace files, respecting ignore files. The query is \
-                     literal unless regex is true. path narrows it to a directory or a single \
-                     file, and glob to files whose workspace path matches, such as *.rs or \
+                description: "Search UTF-8 workspace files, respecting ignore files. A directory \
+                     walk also leaves out target, node_modules and dist. The query is literal \
+                     unless regex is true. path narrows it to a directory or a single file, \
+                     and glob to files whose workspace path matches, such as *.rs or \
                      src/**/*.ts."
                     .into(),
                 input_schema: json!({
@@ -159,7 +172,9 @@ impl WorkspaceTools {
                 name: "list".into(),
                 description: "List the files and directories in the workspace. Ignored and \
                               hidden entries are left out unless you ask for them with all, \
-                              which is how to see build output, dotfiles and .gitignore."
+                              which is how to see build output, dotfiles and .gitignore. \
+                              target, node_modules and dist are left out even when nothing \
+                              ignores them."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -303,9 +318,45 @@ impl WorkspaceTools {
             }
         }
         let byte_truncated = truncate_utf8(&mut content, self.limits.max_read_bytes);
-        let truncated = byte_truncated || end_line < requested_end.min(total_lines);
+        // An omitted end is the rest of the file. The default window is the cap,
+        // so comparing against it would never notice that the file went on.
+        let wanted_end = arguments.end_line.unwrap_or(total_lines);
+        let line_truncated = end_line < wanted_end.min(total_lines);
+        let truncated = byte_truncated || line_truncated;
+        // The bytes were cut, so the next line number would skip what was lost.
+        if line_truncated && !byte_truncated {
+            use std::fmt::Write as _;
+            let next = end_line + 1;
+            writeln!(
+                content,
+                "stopped at line {end_line} of {total_lines}; pass start_line {next} to continue"
+            )
+            .expect("writing to a String cannot fail");
+        }
         let sha256 = fingerprint(&bytes);
         self.remember(&path, &sha256);
+        let span = ReadSpan {
+            start_line,
+            end_line,
+            sha256: sha256.clone(),
+        };
+        if !arguments.again && self.already_read(&path, &span) {
+            let content = format!(
+                "unchanged since the read of lines {start_line}-{end_line} at SHA-256 \
+                 {sha256}. Pass again to read it once more.\n"
+            );
+            return json_output(&ReadOutput {
+                path: self.root.relative(&path)?,
+                start_line,
+                end_line,
+                total_lines,
+                truncated,
+                sha256,
+                content,
+                repeated: true,
+            });
+        }
+        self.remember_read(&path, span);
         let output = ReadOutput {
             path: self.root.relative(&path)?,
             start_line,
@@ -314,8 +365,27 @@ impl WorkspaceTools {
             truncated,
             sha256,
             content,
+            repeated: false,
         };
         json_output(&output)
+    }
+
+    /// Whether this exact range was already returned for these bytes.
+    fn already_read(&self, path: &Path, span: &ReadSpan) -> bool {
+        self.reads
+            .lock()
+            .is_ok_and(|reads| reads.get(path).is_some_and(|spans| spans.contains(span)))
+    }
+
+    fn remember_read(&self, path: &Path, span: ReadSpan) {
+        let Ok(mut reads) = self.reads.lock() else {
+            return;
+        };
+        let spans = reads.entry(path.to_path_buf()).or_default();
+        spans.retain(|known| known.sha256 == span.sha256);
+        if !spans.contains(&span) {
+            spans.push(span);
+        }
     }
 
     fn search(&self, arguments: SearchArguments) -> Result<ToolOutput, ToolError> {
@@ -340,13 +410,18 @@ impl WorkspaceTools {
             .build()
             .map_err(|error| ToolError::new(format!("invalid search pattern: {error}")))?;
         let files = arguments.glob.as_deref().map(glob_matcher).transpose()?;
-        let mut builder = WalkBuilder::new(search_root);
+        let mut builder = WalkBuilder::new(&search_root);
         builder
             .follow_links(false)
             .parents(false)
             .require_git(false)
             .max_filesize(Some(self.limits.max_search_file_bytes))
             .sort_by_file_path(std::cmp::Ord::cmp);
+        // A named file is what was asked for, build output included. A
+        // directory walk is not, or a search becomes a tour of target/.
+        if search_root.is_dir() {
+            hide_build_dirs(&mut builder, self.root.path())?;
+        }
 
         let mut matches = Vec::new();
         let mut total_matches = 0_usize;
@@ -433,6 +508,8 @@ impl WorkspaceTools {
                 .git_ignore(false)
                 .git_exclude(false)
                 .git_global(false);
+        } else {
+            hide_build_dirs(&mut builder, self.root.path())?;
         }
         if let Some(depth) = arguments.depth {
             builder.max_depth(Some(depth));
@@ -790,6 +867,17 @@ struct ReadArguments {
     path: String,
     start_line: Option<usize>,
     end_line: Option<usize>,
+    /// Return the bytes even when this range was already read unchanged.
+    #[serde(default)]
+    again: bool,
+}
+
+/// One range already handed back, at the bytes it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadSpan {
+    start_line: usize,
+    end_line: usize,
+    sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -801,6 +889,34 @@ struct ReadOutput {
     truncated: bool,
     sha256: String,
     content: String,
+    /// The bytes were withheld because this range was already returned.
+    #[serde(default, skip_serializing_if = "is_false")]
+    repeated: bool,
+}
+
+// `skip_serializing_if` is given a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Build directories a fresh crate does not gitignore, and which are most of
+/// a listing once `cargo` has run. `all` is how a caller asks to see them.
+///
+/// Override globs invert `!`. Without the bang these would be whitelists, and
+/// one whitelist hides every file that does not match.
+fn hide_build_dirs(builder: &mut WalkBuilder, root: &Path) -> Result<(), ToolError> {
+    let mut overrides = ignore::overrides::OverrideBuilder::new(root);
+    for pattern in ["!target/", "!node_modules/", "!dist/"] {
+        overrides
+            .add(pattern)
+            .map_err(|error| ToolError::new(format!("cannot ignore {pattern}: {error}")))?;
+    }
+    let overrides = overrides
+        .build()
+        .map_err(|error| ToolError::new(format!("cannot ignore build directories: {error}")))?;
+    builder.overrides(overrides);
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -998,6 +1114,51 @@ mod tests {
         // whole reason this is not `exec ls`.
         assert!(!paths.contains(&"target"), "{paths:?}");
         assert!(!paths.contains(&".gitignore"), "{paths:?}");
+    }
+
+    #[test]
+    fn list_skips_build_directories_even_without_a_gitignore() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\n");
+        workspace.write("src/distinct.rs", "kept\n");
+        workspace.write("notes/dist.md", "a file, not a build directory\n");
+        workspace.write("target/debug/artifact", "build\n");
+        workspace.write("node_modules/pkg/index.js", "modules\n");
+        workspace.write("dist/app.js", "bundled\n");
+        workspace.write("nested/target/debug/artifact", "nested build\n");
+        let tools = workspace.tools();
+
+        let ordinary = output_json(&tools.execute_sync(&call("list", json!({}))).unwrap());
+        let everything = output_json(
+            &tools
+                .execute_sync(&call("list", json!({"all": true})))
+                .unwrap(),
+        );
+        let names = |output: &Value| {
+            output["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let shown = names(&ordinary);
+        assert!(shown.contains(&"src/lib.rs".to_owned()), "{shown:?}");
+        assert!(shown.contains(&"src/distinct.rs".to_owned()), "{shown:?}");
+        assert!(shown.contains(&"notes/dist.md".to_owned()), "{shown:?}");
+        assert!(
+            !shown.iter().any(|path| path
+                .split('/')
+                .any(|part| { matches!(part, "target" | "node_modules" | "dist") })),
+            "{shown:?}"
+        );
+        let all = names(&everything);
+        assert!(all.iter().any(|path| path.starts_with("target")), "{all:?}");
+        assert!(
+            all.iter().any(|path| path.starts_with("node_modules")),
+            "{all:?}"
+        );
+        assert!(all.iter().any(|path| path.starts_with("dist/")), "{all:?}");
     }
 
     #[test]
@@ -1215,6 +1376,101 @@ mod tests {
         assert_eq!(output["total_lines"], 3);
         assert_eq!(output["truncated"], false);
         assert_eq!(output["sha256"].as_str().unwrap().len(), 64);
+        assert!(output.get("repeated").is_none());
+    }
+
+    #[test]
+    fn a_repeated_read_of_an_unchanged_range_returns_a_note() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\ntwo\n");
+        let tools = workspace.tools();
+        let read =
+            |arguments: Value| output_json(&tools.execute_sync(&call("read", arguments)).unwrap());
+
+        let first = read(json!({"path": "src/lib.rs"}));
+        let second = read(json!({"path": "src/lib.rs"}));
+        let forced = read(json!({"path": "src/lib.rs", "again": true}));
+        let other_range = read(json!({"path": "src/lib.rs", "start_line": 2, "end_line": 2}));
+
+        assert_eq!(second["repeated"], true);
+        assert_eq!(second["sha256"], first["sha256"]);
+        assert!(
+            second["content"]
+                .as_str()
+                .unwrap()
+                .contains("Pass again to read it once more"),
+            "{}",
+            second["content"]
+        );
+        assert!(!second["content"].as_str().unwrap().contains("one"));
+        assert_eq!(forced["content"], first["content"]);
+        assert!(forced.get("repeated").is_none());
+        assert_eq!(other_range["content"], "     2\ttwo\n");
+        assert!(other_range.get("repeated").is_none());
+
+        workspace.write("src/lib.rs", "one\ntwo\nthree\n");
+        let changed = read(json!({"path": "src/lib.rs"}));
+        assert!(changed.get("repeated").is_none(), "{changed}");
+        assert!(changed["content"].as_str().unwrap().contains("three"));
+    }
+
+    #[test]
+    fn a_truncated_read_names_the_next_line() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\ntwo\nthree\nfour\n");
+        let tools = WorkspaceTools::new(
+            &workspace.path,
+            ToolLimits {
+                max_read_lines: 2,
+                ..ToolLimits::default()
+            },
+        )
+        .unwrap();
+
+        let output = output_json(
+            &tools
+                .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+                .unwrap(),
+        );
+
+        assert_eq!(output["truncated"], true);
+        assert_eq!(output["end_line"], 2);
+        assert_eq!(output["total_lines"], 4);
+        assert!(
+            output["content"]
+                .as_str()
+                .unwrap()
+                .ends_with("stopped at line 2 of 4; pass start_line 3 to continue\n"),
+            "{}",
+            output["content"]
+        );
+    }
+
+    #[test]
+    fn a_byte_truncated_read_does_not_name_a_next_line() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\ntwo\nthree\nfour\n");
+        let tools = WorkspaceTools::new(
+            &workspace.path,
+            ToolLimits {
+                max_read_bytes: 8,
+                ..ToolLimits::default()
+            },
+        )
+        .unwrap();
+
+        let output = output_json(
+            &tools
+                .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+                .unwrap(),
+        );
+
+        assert_eq!(output["truncated"], true);
+        assert!(
+            !output["content"].as_str().unwrap().contains("start_line"),
+            "{}",
+            output["content"]
+        );
     }
 
     #[test]
@@ -1269,6 +1525,35 @@ mod tests {
         assert_eq!(output["matches"].as_array().unwrap().len(), 1);
         assert_eq!(output["matches"][0]["path"], "src/lib.rs");
         assert_eq!(output["truncated"], true);
+    }
+
+    #[test]
+    fn search_skips_build_directories_even_without_a_gitignore() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "needle in source\n");
+        workspace.write("target/debug/lib.rs", "needle in target\n");
+        workspace.write("node_modules/pkg/index.js", "needle in modules\n");
+        let tools = workspace.tools();
+
+        let output = output_json(
+            &tools
+                .execute_sync(&call("search", json!({"query": "needle"})))
+                .unwrap(),
+        );
+
+        assert_eq!(output["total_matches"], 1);
+        assert_eq!(output["matches"][0]["path"], "src/lib.rs");
+
+        let named = output_json(
+            &tools
+                .execute_sync(&call(
+                    "search",
+                    json!({"query": "needle", "path": "target/debug/lib.rs"}),
+                ))
+                .unwrap(),
+        );
+        assert_eq!(named["total_matches"], 1, "{named}");
+        assert_eq!(named["matches"][0]["path"], "target/debug/lib.rs");
     }
 
     #[test]

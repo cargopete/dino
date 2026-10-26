@@ -60,6 +60,10 @@ impl Fixture {
         CargoTool::new(&self.path, limits, sandbox).unwrap()
     }
 
+    fn set_source(&self, body: &str) {
+        fs::write(self.path.join("src/lib.rs"), body).unwrap();
+    }
+
     // Gated with its callers. Left ungated it is dead code everywhere the
     // sandbox is unimplemented, which is what CI caught on its first Linux run.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -478,4 +482,121 @@ async fn fmt_formats_the_file() {
 
     let source = std::fs::read_to_string(fixture.path.join("src/lib.rs")).unwrap();
     assert_eq!(source, "pub fn two() -> u32 {\n    2\n}\n");
+}
+
+#[tokio::test]
+async fn a_repeated_test_on_an_unchanged_tree_does_not_run_again() {
+    let fixture = Fixture::new("#[test]\nfn passes() {}\n");
+    let tool = fixture.tool();
+
+    let first = parse(
+        &tool
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+    let second = parse(
+        &tool
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+    let checked = parse(
+        &tool
+            .execute(&call(json!({"command": "check"})))
+            .await
+            .unwrap(),
+    );
+    let filtered = parse(
+        &tool
+            .execute(&call(json!({"command": "test", "filter": "missing"})))
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(first["exit_code"], 0, "{}", first["output"]);
+    assert!(first["output"].as_str().unwrap().contains("test result:"));
+    assert!(
+        first["note"]
+            .as_str()
+            .unwrap()
+            .contains("visible tests passed")
+    );
+    assert!(first.get("repeated").is_none());
+
+    assert_eq!(second["repeated"], true);
+    assert_eq!(second["exit_code"], 0);
+    assert!(!second["output"].as_str().unwrap().contains("test result:"));
+    assert!(second["note"].as_str().unwrap().contains("already passed"));
+    assert!(
+        second["note"]
+            .as_str()
+            .unwrap()
+            .contains("was not run again")
+    );
+
+    assert_eq!(checked["exit_code"], 0, "{}", checked["output"]);
+    assert!(
+        checked["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("cargo check")
+    );
+    assert!(checked.get("note").is_none(), "{checked}");
+    assert!(checked.get("repeated").is_none(), "{checked}");
+
+    assert!(filtered.get("repeated").is_none(), "{filtered}");
+    assert!(
+        filtered["output"]
+            .as_str()
+            .unwrap()
+            .contains("test result:"),
+        "{filtered}"
+    );
+
+    fixture.set_source("#[test]\nfn passes() {}\n#[test]\nfn also_passes() {}\n");
+    let edited = parse(
+        &tool
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+    assert!(edited.get("repeated").is_none(), "{edited}");
+    assert!(edited["output"].as_str().unwrap().contains("test result:"));
+    assert!(edited["output"].as_str().unwrap().contains("also_passes"));
+}
+
+#[tokio::test]
+async fn a_repeated_failing_test_on_an_unchanged_tree_does_not_run_again() {
+    let fixture = Fixture::new("#[test]\nfn fails() { assert_eq!(1, 2); }\n");
+    let tool = fixture.tool();
+
+    let first = parse(
+        &tool
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+    let second = parse(
+        &tool
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+
+    assert_ne!(first["exit_code"], 0);
+    assert!(first.get("note").is_none(), "{first}");
+    assert!(first.get("repeated").is_none());
+    assert!(first["output"].as_str().unwrap().contains("test result:"));
+
+    assert_eq!(second["repeated"], true);
+    assert_eq!(second["exit_code"], first["exit_code"]);
+    assert!(!second["output"].as_str().unwrap().contains("test result:"));
+    assert!(second["note"].as_str().unwrap().contains("already failed"));
+    assert!(
+        second["note"]
+            .as_str()
+            .unwrap()
+            .contains("was not run again")
+    );
 }
