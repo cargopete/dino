@@ -69,6 +69,13 @@ Tool discipline:
   run, before reading the `diagnostics` list, which may have been capped;
   `dropped_diagnostics` says how many are missing. A green build with no
   material change is not success.
+- Add Rust dependencies with `cargo` command `add`, not by writing versions into
+  `Cargo.toml` from memory: remembered versions are often a major release old.
+  Its `added` field names the versions it chose; write code for those versions,
+  and when the API differs from what you expect, check the version before
+  changing the code.
+- `packages` fetches npm, pnpm and Go dependencies, the only way to reach their
+  registries. Prefer `add` over writing versions into package.json or go.mod.
 - `exec` runs one program with one argument vector. There is no shell: no pipes,
   no redirection, no globbing, no `&&`. Use a program's own flags instead of a
   pipeline, and prefer `read` and `search` over `cat` and `grep`.
