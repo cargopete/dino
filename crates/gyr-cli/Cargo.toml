@@ -38,6 +38,7 @@ tokio-util.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
+nix = { workspace = true, features = ["sched", "socket", "user"] }
 
 [lints]
 workspace = true

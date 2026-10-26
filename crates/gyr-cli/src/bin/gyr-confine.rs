@@ -10,13 +10,28 @@
 //!
 //! ```text
 //! gyr-confine --allow-write <path>... [--allow-connect <port>]... [--deny-read <path>]...
-//!     -- <program> [args]...
+//!     [--loopback] -- <program> [args]...
+//! gyr-confine --check-loopback
 //! ```
+//!
+//! `--loopback` gives the process a network namespace of its own with only
+//! `lo` up, so servers can bind and connect on 127.0.0.1 while nothing reaches
+//! another host, over TCP or anything else. `--check-loopback` says whether this
+//! machine allows that, by trying it.
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments == ["--check-loopback"] {
+        return match isolate_loopback() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("gyr-confine: {message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let Some(request) = Request::parse(&arguments) else {
         eprintln!(
             "gyr-confine: usage: gyr-confine --allow-write <path>... [--allow-connect <port>]... \
@@ -41,6 +56,8 @@ struct Request {
     connect: Vec<u16>,
     /// Paths no read is granted beneath, such as credential directories.
     deny_read: Vec<String>,
+    /// A network namespace with only loopback, in place of denying TCP.
+    loopback: bool,
     program: String,
     arguments: Vec<String>,
 }
@@ -50,12 +67,14 @@ impl Request {
         let mut writable = Vec::new();
         let mut connect = Vec::new();
         let mut deny_read = Vec::new();
+        let mut loopback = false;
         let mut rest = arguments.iter();
         loop {
             match rest.next()?.as_str() {
                 "--allow-write" => writable.push(rest.next()?.clone()),
                 "--allow-connect" => connect.push(rest.next()?.parse().ok()?),
                 "--deny-read" => deny_read.push(rest.next()?.clone()),
+                "--loopback" => loopback = true,
                 "--" => break,
                 _ => return None,
             }
@@ -65,6 +84,7 @@ impl Request {
             writable,
             connect,
             deny_read,
+            loopback,
             program,
             arguments: rest.cloned().collect(),
         })
@@ -98,15 +118,27 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
     // that can deny the network without a second mechanism.
     let abi = ABI::V4;
 
-    let mut ruleset = Ruleset::default()
+    // In a namespace holding only loopback there is nowhere else to connect,
+    // so TCP is left to the namespace rather than denied outright.
+    if request.loopback {
+        isolate_loopback()?;
+    }
+
+    let ruleset = Ruleset::default()
         // Without this the crate degrades to best effort on an older kernel and
         // enforces whatever it can, silently. The whole point of a floor is that
         // falling below it is an error.
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(abi))
-        .map_err(|error| format!("cannot handle filesystem access: {error}"))?
-        .handle_access(AccessNet::from_all(abi))
-        .map_err(|error| format!("cannot handle network access: {error}"))?
+        .map_err(|error| format!("cannot handle filesystem access: {error}"))?;
+    let ruleset = if request.loopback {
+        ruleset
+    } else {
+        ruleset
+            .handle_access(AccessNet::from_all(abi))
+            .map_err(|error| format!("cannot handle network access: {error}"))?
+    };
+    let mut ruleset = ruleset
         .create()
         .map_err(|error| format!("cannot create a Landlock ruleset: {error}"))?;
 
@@ -216,6 +248,103 @@ fn expand(
     }
 }
 
+/// Moves this process into new user and network namespaces, maps its own user
+/// and group into them, and brings `lo` up, leaving it no route anywhere else.
+///
+/// The user namespace is what lets an unprivileged process own a network
+/// namespace; mapping the same ids keeps file ownership as it was outside.
+#[cfg(target_os = "linux")]
+fn isolate_loopback() -> Result<(), String> {
+    use nix::sched::CloneFlags;
+    use nix::sched::unshare;
+
+    let (uid, gid) = (nix::unistd::getuid(), nix::unistd::getgid());
+    unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNET).map_err(|error| {
+        format!("cannot create a network namespace ({error}); user namespaces may be disabled")
+    })?;
+    let write = |path: &str, value: String| {
+        std::fs::write(path, value).map_err(|error| format!("cannot write {path}: {error}"))
+    };
+    write("/proc/self/setgroups", "deny".to_owned())?;
+    write("/proc/self/uid_map", format!("{uid} {uid} 1"))?;
+    write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
+    loopback_up()
+}
+
+/// Sets `lo` up with one `RTM_NEWLINK` request over route netlink. In a new
+/// namespace it is always interface 1.
+#[cfg(target_os = "linux")]
+fn loopback_up() -> Result<(), String> {
+    use nix::sys::socket::AddressFamily;
+    use nix::sys::socket::MsgFlags;
+    use nix::sys::socket::NetlinkAddr;
+    use nix::sys::socket::SockFlag;
+    use nix::sys::socket::SockProtocol;
+    use nix::sys::socket::SockType;
+    use nix::sys::socket::recv;
+    use nix::sys::socket::sendto;
+    use nix::sys::socket::socket;
+    use std::os::fd::AsRawFd as _;
+
+    const RTM_NEWLINK: u16 = 16;
+    const NLM_F_REQUEST_ACK: u16 = 1 | 4;
+    const NLMSG_ERROR: u16 = 2;
+    const IFF_UP: u32 = 1;
+    const LOOPBACK_INDEX: i32 = 1;
+
+    let socket = socket(
+        AddressFamily::Netlink,
+        SockType::Raw,
+        SockFlag::empty(),
+        SockProtocol::NetlinkRoute,
+    )
+    .map_err(|error| format!("cannot open a netlink socket: {error}"))?;
+
+    // nlmsghdr (len, type, flags, seq, pid), then ifinfomsg (family, pad,
+    // type, index, flags, change), in the machine's byte order.
+    let mut message = Vec::with_capacity(32);
+    message.extend_from_slice(&32_u32.to_ne_bytes());
+    message.extend_from_slice(&RTM_NEWLINK.to_ne_bytes());
+    message.extend_from_slice(&NLM_F_REQUEST_ACK.to_ne_bytes());
+    message.extend_from_slice(&1_u32.to_ne_bytes());
+    message.extend_from_slice(&0_u32.to_ne_bytes());
+    message.extend_from_slice(&[0, 0, 0, 0]);
+    message.extend_from_slice(&LOOPBACK_INDEX.to_ne_bytes());
+    message.extend_from_slice(&IFF_UP.to_ne_bytes());
+    message.extend_from_slice(&IFF_UP.to_ne_bytes());
+
+    sendto(
+        socket.as_raw_fd(),
+        &message,
+        &NetlinkAddr::new(0, 0),
+        MsgFlags::empty(),
+    )
+    .map_err(|error| format!("cannot ask for lo to come up: {error}"))?;
+    let mut reply = [0_u8; 256];
+    let read = recv(socket.as_raw_fd(), &mut reply, MsgFlags::empty())
+        .map_err(|error| format!("no answer about lo: {error}"))?;
+    let field = |at: usize, width: usize| reply.get(at..at + width);
+    let kind = field(4, 2).map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]]));
+    let code =
+        field(16, 4).map(|bytes| i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    match (read >= 20, kind, code) {
+        (true, Some(NLMSG_ERROR), Some(0)) => Ok(()),
+        (true, Some(NLMSG_ERROR), Some(code)) => Err(format!(
+            "the kernel refused to bring lo up: {}",
+            std::io::Error::from_raw_os_error(-code)
+        )),
+        _ => Err("an unexpected answer about lo".to_owned()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn isolate_loopback() -> Result<(), String> {
+    Err(format!(
+        "there are no network namespaces on {}",
+        std::env::consts::OS
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, String> {
     let command = std::iter::once(request.program.as_str())
@@ -223,12 +352,18 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
         .collect::<Vec<_>>()
         .join(" ");
     Err(format!(
-        "there is no Landlock on {}, so `{command}` was not run and {} write path(s) and {} \
-         port(s) and {} read denial(s) were not applied; gyr-confine is a Linux binary",
+        "there is no Landlock on {}, so `{command}` was not run and {} write path(s), {} \
+         port(s), {} read denial(s) and loopback isolation ({}) were not applied; gyr-confine \
+         is a Linux binary",
         std::env::consts::OS,
         request.writable.len(),
         request.connect.len(),
-        request.deny_read.len()
+        request.deny_read.len(),
+        if request.loopback {
+            "asked for"
+        } else {
+            "not asked for"
+        }
     ))
 }
 

@@ -33,6 +33,9 @@ pub struct Landlock {
     /// Credential paths that exist under the home directory, denied to reads.
     deny_read: Vec<PathBuf>,
     fetching: bool,
+    /// Whether this machine lets a process have a network namespace of its
+    /// own, so processes get loopback rather than no TCP at all.
+    loopback: bool,
 }
 
 impl Landlock {
@@ -71,6 +74,7 @@ impl Landlock {
                 temp_dir.display()
             ))
         })?;
+        let loopback = loopback_available(&helper);
         Ok(Self {
             helper,
             writable,
@@ -80,6 +84,7 @@ impl Landlock {
             fetch_writable: Vec::new(),
             deny_read: credential_paths(),
             fetching: false,
+            loopback,
         })
     }
 }
@@ -100,8 +105,10 @@ impl Sandbox for Landlock {
         // readable home. Said here rather than implied by Seatbelt's label.
         let network = if self.fetching {
             "fetching: TCP 443 out and writes to Cargo's cache"
+        } else if self.loopback {
+            "network: loopback only, in a namespace of its own"
         } else {
-            "TCP denied"
+            "TCP denied, loopback included: user namespaces are unavailable"
         };
         let credentials = if self.deny_read.is_empty() {
             "no credential paths found to deny"
@@ -162,6 +169,8 @@ impl Sandbox for Landlock {
         }
         if self.fetching {
             wrapped.extend(["--allow-connect".to_owned(), "443".to_owned()]);
+        } else if self.loopback {
+            wrapped.push("--loopback".to_owned());
         }
         for path in &self.deny_read {
             let path = path.to_str().ok_or_else(|| {
@@ -176,6 +185,19 @@ impl Sandbox for Landlock {
             arguments: wrapped,
         })
     }
+}
+
+/// Whether the helper can give a process a loopback-only network namespace
+/// here. Asked once, by trying it, because kernels and distributions differ on
+/// unprivileged user namespaces and only the attempt is sure.
+fn loopback_available(helper: &Path) -> bool {
+    std::process::Command::new(helper)
+        .arg("--check-loopback")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The credential paths that exist under `$HOME`. Only existing ones, because
