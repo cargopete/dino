@@ -47,11 +47,14 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
             };
             fine(format!("{verb}, {}", lines(written)))
         }
-        "apply_patch" => fine(format!(
-            "+{} −{}",
-            text_lines(call, "new_text"),
-            text_lines(call, "old_text")
-        )),
+        "apply_patch" => {
+            let changes = patch_preview(call, usize::MAX);
+            let added = changes
+                .iter()
+                .filter(|change| matches!(change, Change::Added(_)))
+                .count();
+            fine(format!("+{added} −{}", changes.len() - added))
+        }
         "search" => {
             number("total_matches").and_then(|matches| fine(count(matches, "match", "matches")))
         }
@@ -70,6 +73,58 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
         "exec" | "shell" | "packages" | "github" => Some(process(&value)),
         _ => fine(size(output)),
     }
+}
+
+/// One line of a patch preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Removed(String),
+    Added(String),
+    /// Lines not shown, to keep the preview short.
+    More(usize),
+}
+
+/// The lines a patch changes, without the lines its old and new text share at
+/// either end, at most `limit` of them.
+#[must_use]
+pub fn patch_preview(call: &ToolCall, limit: usize) -> Vec<Change> {
+    let text = |key: &str| {
+        call.arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (old, new) = (text("old_text"), text("new_text"));
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let changes: Vec<Change> = old[head..old.len() - tail]
+        .iter()
+        .cloned()
+        .map(Change::Removed)
+        .chain(
+            new[head..new.len() - tail]
+                .iter()
+                .cloned()
+                .map(Change::Added),
+        )
+        .collect();
+    if changes.len() <= limit {
+        return changes;
+    }
+    let hidden = changes.len() - limit;
+    changes
+        .into_iter()
+        .take(limit)
+        .chain(std::iter::once(Change::More(hidden)))
+        .collect()
 }
 
 fn cargo(call: &ToolCall, value: &Value) -> (Tone, String) {
@@ -267,7 +322,7 @@ mod tests {
                 json!({"old_text": "a\nb", "new_text": "a\nb\nc\nd"}),
                 json!({})
             ),
-            Some((Tone::Fine, "+4 −2".into()))
+            Some((Tone::Fine, "+2 −0".into()))
         );
         assert_eq!(
             gist(
@@ -276,6 +331,30 @@ mod tests {
                 json!({"created": true})
             ),
             Some((Tone::Fine, "created, 1 line".into()))
+        );
+    }
+
+    #[test]
+    fn a_patch_preview_shows_only_the_changed_lines() {
+        let patch = call(
+            "apply_patch",
+            json!({"old_text": "fn a() {\n    1\n}", "new_text": "fn a() {\n    2\n    + 3\n}"}),
+        );
+        assert_eq!(
+            patch_preview(&patch, 10),
+            [
+                Change::Removed("    1".into()),
+                Change::Added("    2".into()),
+                Change::Added("    + 3".into())
+            ]
+        );
+        assert_eq!(
+            patch_preview(&patch, 2),
+            [
+                Change::Removed("    1".into()),
+                Change::Added("    2".into()),
+                Change::More(1)
+            ]
         );
     }
 
