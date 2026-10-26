@@ -193,6 +193,7 @@ enum Input {
     Resume(Option<String>),
     Plan(Option<String>),
     Compact,
+    Init,
     Log,
     Exit,
     Unknown(String),
@@ -233,6 +234,7 @@ fn parse(line: &str) -> Input {
         "diff" => Input::Diff,
         "cost" => Input::Cost,
         "compact" => Input::Compact,
+        "init" => Input::Init,
         "model" => Input::Model(argument),
         "resume" => Input::Resume(argument),
         "plan" => {
@@ -245,6 +247,15 @@ fn parse(line: &str) -> Input {
         _ => submission(),
     }
 }
+
+/// What `/init` asks for: the instructions file a later session reads first.
+const INIT_REQUEST: &str = "Survey this repository and write AGENTS.md at its root, for a coding \
+    agent that works here later. Include what the project is, in two sentences; the exact \
+    commands to build, test, lint and format it, checked by running them where that is safe; \
+    which directories hold what; and the conventions you can see in the code, such as error \
+    handling, naming and how tests are written. Leave out anything true of every project in \
+    this language. Keep it under 60 lines, plain and specific. If AGENTS.md already exists, \
+    improve it and keep what is still true.";
 
 /// What `/compact` asks for. Specific, because a vague summary loses exactly
 /// the file paths and decisions the next turn needs.
@@ -381,6 +392,7 @@ where
                 style::paint(FAINT, &format!("no such command: /{name}. Try /help."))
             ),
             Input::Submit(text) => self.submit(text).await,
+            Input::Init => self.submit(INIT_REQUEST.to_owned()).await,
         }
         Ok(false)
     }
@@ -872,6 +884,10 @@ fn help() -> String {
             "/plan <task>: plan read-only, then accept, revise or drop it",
         ),
         ("/diff", "what has changed in the working tree"),
+        (
+            "/init",
+            "survey the repository and write or improve AGENTS.md",
+        ),
         ("/cost", "requests and tokens so far"),
         (
             "/compact",
@@ -948,6 +964,7 @@ mod tests {
         assert_eq!(parse("/diff"), Input::Diff);
         assert_eq!(parse("/cost"), Input::Cost);
         assert_eq!(parse("/compact"), Input::Compact);
+        assert_eq!(parse("/init"), Input::Init);
         assert_eq!(parse("/model"), Input::Model(None));
         assert_eq!(
             parse("/model  claude-opus "),
