@@ -4,6 +4,7 @@
 //! recorded and what is executed, with no parsing step in between where those
 //! three could come to differ.
 
+mod background;
 mod exec;
 mod github;
 mod hooks;
@@ -13,6 +14,7 @@ pub mod process;
 mod shell;
 mod web;
 
+pub use crate::background::BackgroundTool;
 pub use crate::exec::ExecLimits;
 pub use crate::exec::ExecTool;
 pub use crate::github::GithubLimits;
