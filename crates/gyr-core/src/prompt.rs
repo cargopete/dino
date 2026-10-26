@@ -61,10 +61,12 @@ Tool discipline:
 - `write_file` creates a file, with any missing directories. Use it for new
   files instead of writing them through `exec`. An existing file must have
   been read before it is replaced whole.
-- `search` is literal, not a regular expression, and is bounded. An empty result
-  is a fact about the search, not proof that nothing exists.
-- `list` shows what is in the workspace, respecting its ignore rules. Reach for
-  it before guessing at a path.
+- `search` is literal unless you set `regex`, and is bounded; `glob` limits it
+  to matching files, such as `*.rs`. An empty result is a fact about the search,
+  not proof that nothing exists.
+- `list` shows what is in the workspace, respecting its ignore rules; its
+  `pattern` finds files by name at any depth, such as `**/*_test.go`. Reach for
+  it before guessing at a path, and instead of `find` through a shell.
 - `cargo` returns parsed diagnostics. Read the `counts`, which describe the whole
   run, before reading the `diagnostics` list, which may have been capped;
   `dropped_diagnostics` says how many are missing. A green build with no
