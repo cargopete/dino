@@ -119,14 +119,26 @@ impl Renderer {
         if self.stream == Stream::Idle {
             return Ok(());
         }
+        let mut drew = false;
         if self.stream == Stream::Text {
             let rest = std::mem::take(&mut self.pending);
-            if !rest.is_empty() {
-                write_out(&self.markdown.line(&rest))?;
+            let mut drawn = if rest.is_empty() {
+                Vec::new()
+            } else {
+                self.markdown.lines(&rest)
+            };
+            drawn.extend(self.markdown.flush());
+            for line in &drawn {
+                write_out(&format!("{line}\n"))?;
             }
+            drew = !drawn.is_empty();
             self.markdown.reset();
         }
         self.stream = Stream::Idle;
+        // Each drawn line ended itself; otherwise the open line needs ending.
+        if drew {
+            return Ok(());
+        }
         write_out("\n")
     }
 
@@ -154,8 +166,9 @@ impl Renderer {
         self.pending.push_str(delta);
         while let Some(end) = self.pending.find('\n') {
             let line: String = self.pending.drain(..=end).collect();
-            let drawn = self.markdown.line(line.trim_end_matches('\n'));
-            write_out(&format!("{drawn}\n"))?;
+            for drawn in self.markdown.lines(line.trim_end_matches('\n')) {
+                write_out(&format!("{drawn}\n"))?;
+            }
         }
         Ok(())
     }
