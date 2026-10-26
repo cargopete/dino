@@ -77,7 +77,10 @@ pub const ITALIC: &str = "\u{1b}[3m";
 /// `NO_COLOR` and `--plain` win over everything, then a dumb or absent `TERM`,
 /// then `COLORTERM` for the exact palette, then the indexed approximation.
 pub fn enable(force_plain: bool) {
+    use std::io::IsTerminal as _;
+    // Piped into a file or another program, escape sequences are noise.
     let usable = !force_plain
+        && std::io::stdout().is_terminal()
         && std::env::var_os("NO_COLOR").is_none()
         && std::env::var("TERM").is_ok_and(|term| term != "dumb");
     let depth = if !usable {
@@ -94,6 +97,18 @@ pub fn enable(force_plain: bool) {
 
 fn depth() -> Depth {
     *DEPTH.get().unwrap_or(&Depth::None)
+}
+
+/// Whether anything is being coloured at all.
+#[must_use]
+pub fn enabled() -> bool {
+    depth() != Depth::None
+}
+
+/// Colour on, for a test that checks what is drawn.
+#[cfg(test)]
+pub fn force_colour_for_tests() {
+    let _ = DEPTH.set(Depth::True);
 }
 
 impl Colour {

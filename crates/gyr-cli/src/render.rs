@@ -31,7 +31,6 @@ use crate::style::MUTED;
 use crate::style::OK;
 use crate::style::RUST;
 use crate::style::SLATE;
-use crate::style::TEXT;
 use crate::style::WARN;
 
 const MAX_SUMMARY_BYTES: usize = 120;
@@ -39,6 +38,14 @@ const MAX_SUMMARY_BYTES: usize = 120;
 pub struct Renderer {
     show_reasoning: bool,
     stream: Stream,
+    /// Model text not yet ended by a newline. Text is drawn a line at a time,
+    /// because Markdown cannot be drawn from a fragment.
+    pending: String,
+    markdown: crate::markdown::Markdown,
+    /// The call whose line is open, waiting for its result to finish it.
+    open_call: Option<ToolCall>,
+    /// When the current submission started, for the closing line.
+    started: Option<std::time::Instant>,
     /// Accumulated across every submission, because a session's cost is the
     /// question a person actually has. Shared so `/status` can read the same
     /// number the turn summary prints, rather than keeping a second tally that
@@ -63,6 +70,10 @@ impl Renderer {
         Self {
             show_reasoning,
             stream: Stream::Idle,
+            pending: String::new(),
+            markdown: crate::markdown::Markdown::default(),
+            open_call: None,
+            started: None,
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             context_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -87,27 +98,52 @@ impl Renderer {
         Arc::clone(&self.usage)
     }
 
+    /// Draws whatever is held back: a partial line of text, an open call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SinkError`] when the terminal cannot be written.
+    pub fn flush(&mut self) -> Result<(), SinkError> {
+        self.break_stream()
+    }
+
     /// Closes any open streaming line before printing a structured one.
     fn break_stream(&mut self) -> Result<(), SinkError> {
+        if self.open_call.take().is_some() {
+            write_out("\n")?;
+        }
         if self.stream == Stream::Idle {
             return Ok(());
+        }
+        if self.stream == Stream::Text {
+            let rest = std::mem::take(&mut self.pending);
+            if !rest.is_empty() {
+                write_out(&self.markdown.line(&rest))?;
+            }
+            self.markdown.reset();
         }
         self.stream = Stream::Idle;
         write_out("\n")
     }
 
     fn stream_delta(&mut self, kind: Stream, delta: &str) -> Result<(), SinkError> {
-        if self.stream != kind {
-            if self.stream != Stream::Idle {
+        if self.stream != kind || self.open_call.is_some() {
+            self.break_stream()?;
+            self.stream = kind;
+            if kind == Stream::Text {
                 write_out("\n")?;
             }
-            self.stream = kind;
         }
-        let painted = match kind {
-            Stream::Reasoning => style::paint_with(FAINT, &[ITALIC], delta),
-            _ => style::paint(TEXT, delta),
-        };
-        write_out(&painted)
+        if kind == Stream::Reasoning {
+            return write_out(&style::paint_with(FAINT, &[ITALIC], delta));
+        }
+        self.pending.push_str(delta);
+        while let Some(end) = self.pending.find('\n') {
+            let line: String = self.pending.drain(..=end).collect();
+            let drawn = self.markdown.line(line.trim_end_matches('\n'));
+            write_out(&format!("{drawn}\n"))?;
+        }
+        Ok(())
     }
 
     fn model_event(&mut self, event: &ModelEvent) -> Result<(), SinkError> {
@@ -185,6 +221,7 @@ impl EventSink for Renderer {
             // The person's own words, in the person's colour.
             AgentEvent::Submitted { text } => {
                 self.break_stream()?;
+                self.started = Some(std::time::Instant::now());
                 submitted(text)
             }
             AgentEvent::Model { event, .. } => self.model_event(event),
@@ -201,10 +238,13 @@ impl EventSink for Renderer {
             AgentEvent::ToolStarted { call, .. } => {
                 self.break_stream()?;
                 // The machine is about to do something, so the machine's colour.
+                // The line stays open for the result to finish it.
                 write_out(&style::paint(
                     SLATE,
-                    &format!("  › {}\n", describe_call(call)),
-                ))
+                    &format!("  › {}", describe_call(call)),
+                ))?;
+                self.open_call = Some(call.clone());
+                Ok(())
             }
             AgentEvent::ContextWarning {
                 input_tokens,
@@ -276,7 +316,7 @@ impl EventSink for Renderer {
                     ),
                 ))
             }
-            AgentEvent::ToolFinished { result, .. } => tool_finished(result),
+            AgentEvent::ToolFinished { result, .. } => self.tool_finished(result),
         }
     }
 
@@ -286,6 +326,7 @@ impl EventSink for Renderer {
             .usage
             .lock()
             .map_or_else(|_| TokenUsage::default(), |total| *total);
+        let elapsed = self.started.take().map(|started| started.elapsed());
         let ending = match (&outcome.error, outcome.stop_reason) {
             (Some(error), _) => format!("failed: {error}"),
             (None, Some(reason)) => stop_reason_label(reason).to_owned(),
@@ -298,10 +339,16 @@ impl EventSink for Renderer {
             (None, Some(StopReason::EndTurn)) => style::paint(OK, &ending),
             _ => style::paint(FAINT, &ending),
         };
+        let time = elapsed.map_or_else(String::new, |elapsed| format!(" · {}", duration(elapsed)));
+        let turns = if outcome.model_turns == 1 {
+            "turn"
+        } else {
+            "turns"
+        };
         let tail = style::paint(
             FAINT,
             &format!(
-                " · {} model turn(s) · {}\n",
+                "{time} · {} {turns} · {}\n",
                 outcome.model_turns,
                 describe_usage(usage)
             ),
@@ -313,10 +360,81 @@ impl EventSink for Renderer {
 /// One line of running cost, in the words the summary uses.
 #[must_use]
 pub fn describe_usage(usage: TokenUsage) -> String {
+    let cached = (usage.cached_input_tokens * 100)
+        .checked_div(usage.input_tokens)
+        .map_or_else(String::new, |percent| format!(", {percent}% cached"));
+    let reasoning = if usage.reasoning_tokens == 0 {
+        String::new()
+    } else {
+        format!(" ({} reasoning)", compact(usage.reasoning_tokens))
+    };
     format!(
-        "{} in ({} cached), {} out, {} reasoning",
-        usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, usage.reasoning_tokens
+        "{} in{cached} · {} out{reasoning}",
+        compact(usage.input_tokens),
+        compact(usage.output_tokens)
     )
+}
+
+/// A label's first clause, for a one-line banner: `workspace (seatbelt:
+/// writes confined, …)` becomes `workspace (seatbelt)`. `/status` keeps the whole.
+#[must_use]
+pub fn short_label(label: &str) -> String {
+    match label.split_once(" (") {
+        Some((head, rest)) => {
+            let first = rest
+                .split([':', ')', ','])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if first.is_empty() || first.len() > 24 {
+                head.to_owned()
+            } else {
+                format!("{head} ({first})")
+            }
+        }
+        None => label.to_owned(),
+    }
+}
+
+/// A path relative to the workspace where it is inside it, else with the home
+/// directory written `~`.
+#[must_use]
+pub fn short_path(path: &std::path::Path, workspace: &std::path::Path) -> String {
+    if !workspace.as_os_str().is_empty()
+        && let Ok(inside) = path.strip_prefix(workspace)
+    {
+        return inside.display().to_string();
+    }
+    match std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        Some(home) => match path.strip_prefix(&home) {
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
+        },
+        None => path.display().to_string(),
+    }
+}
+
+/// A count as a person reads it at a glance: 852, 19.7k, 1.2M.
+#[must_use]
+pub fn compact(number: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let value = number as f64;
+    match number {
+        0..1_000 => number.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", value / 1_000.0),
+        _ => format!("{:.1}M", value / 1_000_000.0),
+    }
+}
+
+/// Elapsed time to the second, in the largest units that say it.
+#[must_use]
+pub fn duration(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3_600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60),
+    }
 }
 
 /// The session banner and `/status`, in one place so they cannot drift apart.
@@ -481,22 +599,25 @@ fn todo_started(call: &gyr_protocol::ToolCall) -> Result<(), SinkError> {
     write_out(&style::paint(SLATE, &format!("  › todo\n{indented}")))
 }
 
-fn tool_finished(result: &ToolResult) -> Result<(), SinkError> {
-    let (colour, summary) = if result.output.is_error {
-        (
-            WARN,
-            format!(
-                "    {}\n",
-                cap(first_line(&result.output.content), MAX_SUMMARY_BYTES)
-            ),
-        )
-    } else {
-        (
-            FAINT,
-            format!("    {} bytes\n", result.output.content.len()),
-        )
-    };
-    write_out(&style::paint(colour, &summary))
+impl Renderer {
+    /// Finishes the call's open line with the gist of its result.
+    fn tool_finished(&mut self, result: &ToolResult) -> Result<(), SinkError> {
+        let Some(call) = self.open_call.take() else {
+            // A refused call has had its line already, and a todo its list.
+            return Ok(());
+        };
+        let Some((tone, gist)) = crate::summary::summarise(&call, &result.output) else {
+            return write_out("\n");
+        };
+        let colour = match tone {
+            crate::summary::Tone::Fine => FAINT,
+            crate::summary::Tone::Failed => WARN,
+        };
+        write_out(&format!(
+            "{}\n",
+            style::paint(colour, &format!("  · {}", cap(&gist, MAX_SUMMARY_BYTES)))
+        ))
+    }
 }
 
 fn first_line(value: &str) -> &str {
