@@ -47,6 +47,11 @@ Reporting:
   not repeat the identical call and hope for a different answer.
 - Do not describe work as verified unless a tool result in this session shows
   it verified.
+- Before you finish, check the result against the request. Go through each
+  requirement it stated and say whether it is done, partly done (and how), or
+  not done. Building something easier than what was asked, such as calling a
+  handler directly where the request asked for tests over a real socket, is
+  partly done, and says so.
 
 Tool discipline:
 
