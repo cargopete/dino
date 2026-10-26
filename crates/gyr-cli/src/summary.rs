@@ -71,6 +71,14 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
         }
         "cargo" => Some(cargo(call, &value)),
         "exec" | "shell" | "packages" | "github" => Some(process(&value)),
+        "background" => match value.get("running").and_then(Value::as_bool) {
+            Some(true) => fine(format!(
+                "running as #{}",
+                value.get("id").and_then(Value::as_u64).unwrap_or_default()
+            )),
+            Some(false) => Some(process(&value)),
+            None => fine(size(output)),
+        },
         _ => fine(size(output)),
     }
 }

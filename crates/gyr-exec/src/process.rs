@@ -142,20 +142,20 @@ pub async fn run(
     run_with(program, arguments, directory, sandbox, limit, timeout, &[]).await
 }
 
-/// [`run`], with variables set on top of the child's usual environment.
+/// The command a sandboxed child runs as, ready to spawn, and the snapshot of
+/// protected paths to restore once it has finished.
 ///
 /// # Errors
 ///
-/// As [`run`].
-pub async fn run_with(
+/// Returns [`ToolError`] when the sandbox cannot wrap the command or its
+/// temporary directory cannot be made.
+pub fn prepare(
     program: &str,
     arguments: &[String],
     directory: &Path,
     sandbox: &dyn Sandbox,
-    limit: usize,
-    timeout: Duration,
     extra: &[(&str, &str)],
-) -> Result<Execution, ToolError> {
+) -> Result<(Command, Option<gyr_sandbox::Snapshot>), ToolError> {
     let wrapped = sandbox
         .wrap(program, arguments)
         .map_err(|error| ToolError::new(error.to_string()))?;
@@ -177,7 +177,7 @@ pub async fn run_with(
             }
         }
     }
-    let mut snapshot = sandbox
+    let snapshot = sandbox
         .snapshot()
         .map_err(|error| ToolError::new(error.to_string()))?;
     let mut command = Command::new(&wrapped.program);
@@ -200,9 +200,28 @@ pub async fn run_with(
         command.env(name, value);
     }
 
+    Ok((command, snapshot))
+}
+
+/// [`run`], with variables set on top of the child's usual environment.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn run_with(
+    program: &str,
+    arguments: &[String],
+    directory: &Path,
+    sandbox: &dyn Sandbox,
+    limit: usize,
+    timeout: Duration,
+    extra: &[(&str, &str)],
+) -> Result<Execution, ToolError> {
+    let (mut command, mut snapshot) = prepare(program, arguments, directory, sandbox, extra)?;
+
     let mut child = spawn(&mut command)
         .await
-        .map_err(|error| ToolError::new(format!("cannot run {}: {error}", wrapped.program)))?;
+        .map_err(|error| ToolError::new(format!("cannot run {program}: {error}")))?;
     let stdout = child
         .stdout
         .take()
