@@ -313,7 +313,7 @@ where
         }));
         let _ = editor.load_history(&self.history_path);
 
-        println!("{}", self.banner());
+        println!("{}", self.opening());
         // The prompt is the person's own line, so it wears the person's colour.
         let prompt = match style::RUST.sequence() {
             sequence if sequence.is_empty() => "› ".to_owned(),
@@ -762,6 +762,32 @@ where
             ("requests", requests.to_string()),
             ("tokens", describe_usage(usage)),
         ])
+    }
+
+    /// What a person needs as a session opens: what is answering, where, and
+    /// under which rules. The rest is in `/status`.
+    fn opening(&self) -> String {
+        let workspace = crate::render::short_path(
+            std::path::Path::new(&self.workspace),
+            std::path::Path::new(""),
+        );
+        let rule = style::paint(crate::style::FAINT, "  ─────────");
+        format!(
+            "\n{}  {}\n{}\n  {}\n  {}\n  {}\n",
+            style::paint_with(crate::style::RUST, &[crate::style::BOLD], "  GYRFALCON"),
+            style::paint(crate::style::FAINT, env!("CARGO_PKG_VERSION")),
+            rule,
+            style::paint(crate::style::TEXT, &format!("{} · {workspace}", self.model)),
+            style::paint(
+                crate::style::MUTED,
+                &format!(
+                    "{} · {}",
+                    crate::render::short_label(&self.approvals),
+                    crate::render::short_label(&self.sandbox)
+                )
+            ),
+            style::paint(crate::style::FAINT, "/help for commands · ctrl-d to leave"),
+        )
     }
 
     fn banner(&self) -> String {

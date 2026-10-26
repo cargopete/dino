@@ -667,8 +667,36 @@ impl Renderer {
         write_out(&format!(
             "{}\n",
             style::paint(colour, &format!("  · {}", cap(&gist, MAX_SUMMARY_BYTES)))
-        ))
+        ))?;
+        if call.name == "apply_patch" && tone == crate::summary::Tone::Fine {
+            write_out(&patch_preview(&call))?;
+        }
+        Ok(())
     }
+}
+
+/// The changed lines of a patch, beneath its call: removed in terracotta,
+/// added in green, behind a faint gutter.
+fn patch_preview(call: &ToolCall) -> String {
+    use crate::summary::Change;
+    const PREVIEW_LINES: usize = 12;
+    crate::summary::patch_preview(call, PREVIEW_LINES)
+        .into_iter()
+        .fold(String::new(), |mut block, change| {
+            let line = match change {
+                Change::Removed(text) => {
+                    style::paint(RUST, &format!("- {}", cap(&text, MAX_SUMMARY_BYTES)))
+                }
+                Change::Added(text) => {
+                    style::paint(OK, &format!("+ {}", cap(&text, MAX_SUMMARY_BYTES)))
+                }
+                Change::More(hidden) => style::paint(FAINT, &format!("… {hidden} more")),
+            };
+            block.push_str(&style::paint(FAINT, "      │ "));
+            block.push_str(&line);
+            block.push('\n');
+            block
+        })
 }
 
 fn first_line(value: &str) -> &str {
