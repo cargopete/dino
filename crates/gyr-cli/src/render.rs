@@ -34,6 +34,7 @@ use crate::style::SLATE;
 use crate::style::WARN;
 
 const MAX_SUMMARY_BYTES: usize = 120;
+const BELL_AFTER_SECONDS: u64 = 15;
 
 pub struct Renderer {
     show_reasoning: bool,
@@ -404,7 +405,14 @@ impl EventSink for Renderer {
                 describe_usage(usage)
             ),
         );
-        write_out(&format!("\n  {painted_ending}{tail}"))
+        write_out(&format!("\n  {painted_ending}{tail}"))?;
+        // A long turn rings, so a person who looked away hears it finish.
+        if style::enabled()
+            && elapsed.is_some_and(|elapsed| elapsed.as_secs() >= BELL_AFTER_SECONDS)
+        {
+            write_out("\u{7}")?;
+        }
+        Ok(())
     }
 }
 
