@@ -1,0 +1,25 @@
+name = "change-one-number"
+prompt = """
+The fare in src/lib.rs is 100 cents. Change it to 250. Leave the rest of \
+the file alone.
+"""
+max_turns = 12
+
+# A patch that puts the same bytes back leaves the fare at 100. The tool
+# refuses that patch, so a green build is not a way through the case.
+[expect]
+cargo_check = "clean"
+files_changed = ["src/lib.rs"]
+files_unchanged = ["Cargo.toml"]
+
+[[expect.contains]]
+file = "src/lib.rs"
+text = "250"
+
+[[expect.contains]]
+file = "src/lib.rs"
+text = "pub fn fare_cents"
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "100"

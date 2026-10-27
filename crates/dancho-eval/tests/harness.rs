@@ -234,6 +234,7 @@ async fn a_run_that_exceeds_its_turn_limit_fails_and_names_the_limit() {
     .await;
 
     assert!(!outcome.passed);
+    assert_eq!(outcome.stopped, None);
     assert!(
         outcome
             .failures
@@ -490,4 +491,213 @@ async fn a_blocker_the_case_expects_passes_and_one_it_does_not_fails() {
         "failures: {:?}",
         carried_on.failures
     );
+}
+
+#[test]
+fn a_case_can_name_its_own_wall_and_zero_is_refused() {
+    let scratch = Scratch::new();
+    let directory = scratch.path.join("walled");
+    fs::create_dir_all(directory.join("workspace")).unwrap();
+    fs::write(
+        directory.join("case.toml"),
+        "name = \"walled\"\nprompt = \"y\"\nmax_turns = 4\nmax_wall_secs = 90\n",
+    )
+    .unwrap();
+
+    let case = Case::load(&directory).unwrap();
+    assert_eq!(case.max_wall_secs, Some(90));
+    assert_eq!(
+        case.wall_limit().unwrap(),
+        std::time::Duration::from_secs(90)
+    );
+
+    let mut zero = case;
+    zero.max_wall_secs = Some(0);
+    let error = zero.wall_limit().unwrap_err();
+    assert!(error.to_string().contains("zero"), "said: {error}");
+}
+
+/// A provider that never answers, so only the wall can end the run.
+struct Stalling {
+    profile: ModelProfile,
+}
+
+impl ModelSession for Stalling {
+    fn profile(&self) -> &ModelProfile {
+        &self.profile
+    }
+
+    fn next(&mut self, _input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
+        Box::pin(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(Box::pin(stream::iter(std::iter::empty())) as ModelEventStream)
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_run_that_hits_its_wall_fails_as_a_wall_and_nothing_else() {
+    let scratch = Scratch::new();
+    let mut case = Case::load(corpus().join("add-a-function")).unwrap();
+    case.max_wall_secs = Some(1);
+    case.expect = dancho_eval::Expectations::default();
+    let build = |_prompt: String, _tools: Vec<dancho_protocol::ToolDefinition>| {
+        Ok(Box::new(Stalling {
+            profile: dancho_model::builtin_profiles().remove(0),
+        }) as Box<dyn ModelSession>)
+    };
+
+    let outcome = run_case(
+        &case,
+        &scratch.path,
+        Arc::new(Unconfined),
+        &dancho_eval::Variant::default(),
+        &build,
+    )
+    .await
+    .unwrap();
+
+    assert!(!outcome.passed);
+    assert_eq!(outcome.stopped, Some(dancho_eval::EarlyStop::WallTime));
+    assert_eq!(
+        outcome.failures,
+        vec!["hit the wall-time limit after 1 second".to_owned()]
+    );
+    assert!(outcome.score.is_none());
+    assert!(
+        outcome.duration_ms < 10_000,
+        "the wall did not stop the run: {} ms",
+        outcome.duration_ms
+    );
+}
+
+fn tool_text(input: &TurnInput) -> String {
+    match input {
+        TurnInput::ToolResults { results } => results
+            .last()
+            .map(|result| result.output.content.clone())
+            .unwrap_or_default(),
+        TurnInput::User { content } | TurnInput::UserWithImages { content, .. } => content.clone(),
+    }
+}
+
+fn profile() -> ModelProfile {
+    dancho_model::builtin_profiles().remove(0)
+}
+
+/// Tries a byte-identical patch, and the real edit only when that is refused.
+struct FixesAfterRefusal {
+    profile: ModelProfile,
+    step: u32,
+}
+
+impl ModelSession for FixesAfterRefusal {
+    fn profile(&self) -> &ModelProfile {
+        &self.profile
+    }
+
+    fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
+        let step = self.step;
+        self.step += 1;
+        let heard = tool_text(&input);
+        let events = match step {
+            0 => tool_turn("c1", "read", json!({"path": "src/lib.rs"})),
+            1 => tool_turn(
+                "c2",
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": "100", "new_text": "100"}),
+            ),
+            2 if heard.contains("would not change the file") => tool_turn(
+                "c3",
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": "100", "new_text": "250"}),
+            ),
+            _ => text_turn("Done."),
+        };
+        Box::pin(async move {
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))) as ModelEventStream)
+        })
+    }
+}
+
+/// Reads the same file until the tool says that range was already returned.
+struct RereadsUntilTold {
+    profile: ModelProfile,
+    step: u32,
+}
+
+impl ModelSession for RereadsUntilTold {
+    fn profile(&self) -> &ModelProfile {
+        &self.profile
+    }
+
+    fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
+        let step = self.step;
+        self.step += 1;
+        let heard = tool_text(&input);
+        let id = format!("c{step}");
+        let events = if step == 0 || !heard.contains("Pass again to read it once more") {
+            tool_turn(&id, "read", json!({"path": "src/lib.rs"}))
+        } else {
+            text_turn("1847")
+        };
+        Box::pin(async move {
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))) as ModelEventStream)
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_noop_patch_does_not_pass_until_it_is_refused() {
+    let scratch = Scratch::new();
+    let case = Case::load(corpus().join("change-one-number")).unwrap();
+    let build = |_prompt: String, _tools: Vec<dancho_protocol::ToolDefinition>| {
+        Ok(Box::new(FixesAfterRefusal {
+            profile: profile(),
+            step: 0,
+        }) as Box<dyn ModelSession>)
+    };
+
+    let outcome = run_case(
+        &case,
+        &scratch.path,
+        Arc::new(Unconfined),
+        &dancho_eval::Variant::default(),
+        &build,
+    )
+    .await
+    .unwrap();
+
+    // Drop the refusal and this script stops after the identical patch.
+    assert_eq!(outcome.metrics.tool_errors, 1);
+    assert_eq!(outcome.metrics.model_turns, 4);
+    assert!(outcome.passed, "failures: {:?}", outcome.failures);
+}
+
+#[tokio::test]
+async fn a_reread_does_not_pass_until_the_range_is_withheld() {
+    let scratch = Scratch::new();
+    let case = Case::load(corpus().join("answer-from-the-file")).unwrap();
+    let build = |_prompt: String, _tools: Vec<dancho_protocol::ToolDefinition>| {
+        Ok(Box::new(RereadsUntilTold {
+            profile: profile(),
+            step: 0,
+        }) as Box<dyn ModelSession>)
+    };
+
+    let outcome = run_case(
+        &case,
+        &scratch.path,
+        Arc::new(Unconfined),
+        &dancho_eval::Variant::default(),
+        &build,
+    )
+    .await
+    .unwrap();
+
+    // Without the note the script reads until the turn limit and never answers.
+    assert_eq!(outcome.metrics.tool_calls.get("read"), Some(&2));
+    assert_eq!(outcome.metrics.tool_errors, 0);
+    assert_eq!(outcome.metrics.model_turns, 3);
+    assert!(outcome.passed, "failures: {:?}", outcome.failures);
 }

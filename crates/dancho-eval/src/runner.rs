@@ -2,12 +2,16 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use dancho_core::Agent;
 use dancho_core::AgentConfig;
+use dancho_core::AgentError;
+use dancho_core::RunResult;
 use dancho_core::ToolError;
 use dancho_core::ToolFuture;
 use dancho_core::ToolRuntime;
@@ -26,6 +30,7 @@ use dancho_exec::ShellTool;
 use dancho_exec::WebFetchTool;
 use dancho_exec::WebLimits;
 use dancho_model::ModelSession;
+use dancho_protocol::StopReason;
 use dancho_protocol::ToolAction;
 use dancho_protocol::ToolCall;
 use dancho_protocol::ToolDefinition;
@@ -37,6 +42,7 @@ use dancho_tools::ToolLimits;
 use dancho_tools::WorkspaceTools;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::Case;
 use crate::CheckExpectation;
@@ -73,7 +79,27 @@ pub struct Outcome {
     /// rescore the run without running it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured: Option<crate::score::Measured>,
+    /// Set when the run was stopped before its assertions were judged, so a
+    /// timeout is not read as an ordinary miss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<EarlyStop>,
+    /// What the run cost, when the invocation named a rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::cost::RunCost>,
 }
+
+/// Why a run was stopped before its assertions were judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EarlyStop {
+    /// The case's wall-time limit fired. Not the turn limit.
+    WallTime,
+}
+
+/// After the wall fires, how long the run has to notice and close its log
+/// before the future is dropped. The drop is what stops a call the cancel
+/// did not reach.
+const WALL_GRACE: Duration = Duration::from_secs(2);
 
 /// How a run differs from the harness as shipped, for ablations.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,6 +169,10 @@ impl ToolRuntime for Without {
         }
         self.inner.execute(call)
     }
+
+    fn history_lost(&self) {
+        self.inner.history_lost();
+    }
 }
 
 /// Builds the provider session for one case.
@@ -175,10 +205,42 @@ pub async fn run_case(
 
     let finish = build_check(&workspace, Arc::clone(&sandbox))?;
     let mut agent = eval_agent(case, session, tools, log, finish)?;
-
+    let limit = case.wall_limit()?;
+    let cancel = CancellationToken::new();
     let started = Instant::now();
-    let run = agent.run(prompt_for(case, variant.score)).await;
+    let ran = await_within_wall(
+        agent.run_cancellable(prompt_for(case, variant.score), &cancel),
+        limit,
+        &cancel,
+    )
+    .await;
     let duration_ms = started.elapsed().as_millis();
+
+    if stopped_by_the_wall(&ran, &cancel) {
+        // A dropped run can leave a torn last line. The wall is the result
+        // either way; an unreadable log is not a second failure.
+        let metrics = match &ran {
+            Ran::Dropped => metrics::from_log(&log_path).unwrap_or_default(),
+            Ran::Finished(_) => metrics::from_log(&log_path)?,
+        };
+        return wall_outcome(
+            case,
+            variant,
+            Finished {
+                workspace,
+                before,
+                answer: String::new(),
+                failures: Vec::new(),
+                metrics,
+                duration_ms,
+                log_path,
+            },
+            limit,
+        );
+    }
+    let Ran::Finished(run) = ran else {
+        unreachable!("a run dropped inside the wall is returned above");
+    };
 
     let mut failures = Vec::new();
     let answer = match &run {
@@ -296,6 +358,78 @@ pub(crate) async fn conclude(
             .as_ref()
             .map(|measured| crate::score::score(case, measured)),
         measured,
+        stopped: None,
+        cost: None,
+    })
+}
+
+enum Ran {
+    Finished(Result<RunResult, AgentError>),
+    Dropped,
+}
+
+/// Runs until the model finishes or the wall fires. The turn limit is the
+/// agent's own, and it does not stop a turn that never returns.
+async fn await_within_wall(
+    run: impl Future<Output = Result<RunResult, AgentError>>,
+    limit: Duration,
+    cancel: &CancellationToken,
+) -> Ran {
+    let mut run = std::pin::pin!(run);
+    tokio::select! {
+        biased;
+        result = run.as_mut() => Ran::Finished(result),
+        () = tokio::time::sleep(limit) => {
+            cancel.cancel();
+            match tokio::time::timeout(WALL_GRACE, run.as_mut()).await {
+                Ok(result) => Ran::Finished(result),
+                Err(_) => Ran::Dropped,
+            }
+        }
+    }
+}
+
+fn stopped_by_the_wall(ran: &Ran, cancel: &CancellationToken) -> bool {
+    match ran {
+        Ran::Dropped => true,
+        Ran::Finished(Ok(result)) => {
+            result.stop_reason == StopReason::Cancelled && cancel.is_cancelled()
+        }
+        Ran::Finished(Err(_)) => cancel.is_cancelled(),
+    }
+}
+
+pub(crate) fn wall_failure(limit: Duration) -> String {
+    let seconds = limit.as_secs();
+    let unit = if seconds == 1 { "second" } else { "seconds" };
+    format!("hit the wall-time limit after {seconds} {unit}")
+}
+
+/// A wall hit is a failure of its own. Assertions are not checked: a
+/// half-written tree would otherwise be reported as an ordinary miss.
+pub(crate) fn wall_outcome(
+    case: &Case,
+    variant: &Variant,
+    finished: Finished,
+    limit: Duration,
+) -> Result<Outcome, EvalError> {
+    let after = fingerprint_tree(&finished.workspace)?;
+    let files_changed = changed_files(&finished.before, &after);
+    Ok(Outcome {
+        case: case.name.clone(),
+        passed: false,
+        failures: vec![wall_failure(limit)],
+        files_changed,
+        metrics: finished.metrics,
+        duration_ms: finished.duration_ms,
+        log_path: finished.log_path.display().to_string(),
+        without: variant.without.clone(),
+        max_diagnostics: variant.max_diagnostics,
+        thinking_budget: variant.thinking_budget,
+        score: None,
+        measured: None,
+        stopped: Some(EarlyStop::WallTime),
+        cost: None,
     })
 }
 

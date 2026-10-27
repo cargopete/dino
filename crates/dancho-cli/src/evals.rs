@@ -8,8 +8,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use anyhow::bail;
 use dancho_eval::Case;
+use dancho_eval::EarlyStop;
 use dancho_eval::Outcome;
+use dancho_eval::RunRate;
 use dancho_eval::run_case;
+use dancho_eval::total_cost;
+use dancho_eval::wilson;
+use dancho_eval::wilson_interval;
 use dancho_model::ModelSession;
 
 use crate::config;
@@ -70,6 +75,23 @@ pub struct EvalArgs {
     /// Run every case this many times.
     #[arg(long, default_value_t = 1)]
     pub trials: u32,
+    /// Stop each case after this many seconds, instead of the case's own
+    /// wall-time limit. A turn budget does not stop one turn that never returns.
+    #[arg(long)]
+    pub max_wall_secs: Option<u64>,
+    /// USD per million input tokens, with `--usd-per-million-out`. Cached
+    /// tokens are priced as input. List price, not a measured bill.
+    #[arg(long)]
+    pub usd_per_million_in: Option<f64>,
+    /// USD per million output tokens, with `--usd-per-million-in`.
+    #[arg(long)]
+    pub usd_per_million_out: Option<f64>,
+    /// Draw of the machine, in watts. Wall time becomes estimated watt-hours.
+    #[arg(long)]
+    pub watts: Option<f64>,
+    /// GPU hire, in USD per hour of wall time.
+    #[arg(long)]
+    pub dollars_per_hour: Option<f64>,
     /// Score each case's untouched workspace and its reference solution, with
     /// no model, and fail unless every floor is under 10 and every ceiling 95
     /// or more. RFC-0019 section 5.
@@ -117,7 +139,9 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         (None, Some(harness), Some(model)) => format!("{model} ({harness:?})"),
         (None, _, _) => bail!("--harness needs --model, the harness's own model name"),
     };
-    let cases = select(&args)?;
+    let mut cases = select(&args)?;
+    apply_wall(&mut cases, args.max_wall_secs)?;
+    let rate = run_rate(&args)?;
     let scratch = match &args.scratch {
         Some(path) => path.clone(),
         None => std::env::temp_dir().join(format!("danchoai-evals-{}", std::process::id())),
@@ -171,10 +195,7 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
                 model,
             )
             .await?;
-            if !args.json {
-                print_case(&outcome);
-            }
-            outcomes.push(outcome);
+            outcomes.push(record(outcome, rate.as_ref(), args.json));
             continue;
         }
         let Some(profile) = &profile else {
@@ -194,10 +215,7 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
             score: args.score,
         };
         let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?;
-        if !args.json {
-            print_case(&outcome);
-        }
-        outcomes.push(outcome);
+        outcomes.push(record(outcome, rate.as_ref(), args.json));
     }
 
     report(&args, &label, trials, &cases, &outcomes)?;
@@ -227,6 +245,7 @@ fn report(
                     "model": label,
                     "trials": trials,
                     "summary": summary,
+                    "rates": rates_json(outcomes),
                     "outcomes": outcomes,
                 }))?
             ),
@@ -236,6 +255,42 @@ fn report(
         print_summary(outcomes);
         if let Some(summary) = &summary {
             print_score(label, summary);
+        }
+    }
+    Ok(())
+}
+
+fn run_rate(args: &EvalArgs) -> Result<Option<RunRate>> {
+    dancho_eval::parse_rate(
+        args.usd_per_million_in,
+        args.usd_per_million_out,
+        args.watts,
+        args.dollars_per_hour,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+fn record(mut outcome: Outcome, rate: Option<&RunRate>, json: bool) -> Outcome {
+    if let Some(rate) = rate {
+        outcome.cost = Some(dancho_eval::cost_of(
+            &outcome.metrics.tokens,
+            outcome.duration_ms,
+            *rate,
+        ));
+    }
+    if !json {
+        print_case(&outcome);
+    }
+    outcome
+}
+
+fn apply_wall(cases: &mut [Case], seconds: Option<u64>) -> Result<()> {
+    if seconds == Some(0) {
+        bail!("--max-wall-secs must be at least 1");
+    }
+    if let Some(seconds) = seconds {
+        for case in cases {
+            case.max_wall_secs = Some(seconds);
         }
     }
     Ok(())
@@ -401,10 +456,10 @@ fn print_score(model: &str, summary: &dancho_eval::score::Summary) {
 }
 
 fn print_case(outcome: &Outcome) {
-    let (colour, mark) = if outcome.passed {
-        (OK, "pass")
-    } else {
-        (WARN, "fail")
+    let (colour, mark) = match (outcome.passed, outcome.stopped) {
+        (true, _) => (OK, "pass"),
+        (_, Some(EarlyStop::WallTime)) => (WARN, "wall"),
+        _ => (WARN, "fail"),
     };
     println!(
         "  {}  {}  {}",
@@ -413,9 +468,14 @@ fn print_case(outcome: &Outcome) {
         style::paint(
             FAINT,
             &format!(
-                "{} turn(s) · {} ms · {}",
+                "{} turn(s) · {} ms{} · {}",
                 outcome.metrics.model_turns,
                 outcome.duration_ms,
+                outcome
+                    .cost
+                    .as_ref()
+                    .map(|cost| format!(" · {}", cost.phrase()))
+                    .unwrap_or_default(),
                 tool_histogram(outcome)
             )
         )
@@ -463,6 +523,21 @@ fn tool_histogram(outcome: &Outcome) -> String {
 
 fn print_summary(outcomes: &[Outcome]) {
     let passed = outcomes.iter().filter(|outcome| outcome.passed).count();
+    let walls = outcomes
+        .iter()
+        .filter(|outcome| outcome.stopped == Some(EarlyStop::WallTime))
+        .count();
+    let wall = if walls > 0 {
+        format!(", {walls} hit the wall")
+    } else {
+        String::new()
+    };
+    let headline = format!(
+        "{}/{} passed {}{wall}",
+        passed,
+        outcomes.len(),
+        wilson_interval(as_count(passed), as_count(outcomes.len()))
+    );
     let verdicts: Vec<&str> = outcomes
         .iter()
         .flat_map(|outcome| outcome.metrics.gate_verdicts.iter().map(String::as_str))
@@ -489,16 +564,74 @@ fn print_summary(outcomes: &[Outcome]) {
         .iter()
         .map(|outcome| outcome.metrics.tokens.output_tokens)
         .sum();
+    let priced = total_cost(outcomes.iter().filter_map(|outcome| outcome.cost.as_ref()))
+        .map(|cost| format!(" · {}", cost.phrase()))
+        .unwrap_or_default();
     println!(
         "\n  {}  {}\n  {}",
-        style::paint(
-            if passed == outcomes.len() { OK } else { WARN },
-            &format!("{passed}/{} passed", outcomes.len())
-        ),
+        style::paint(if passed == outcomes.len() { OK } else { WARN }, &headline),
         style::paint(MUTED, &gate),
         style::paint(
             FAINT,
-            &format!("{input} input token(s), {output} output token(s) across the corpus")
+            &format!("{input} input token(s), {output} output token(s) across the corpus{priced}")
         )
     );
+    let rows = case_counts(outcomes);
+    if rows.iter().any(|(_, _, total)| *total > 1) {
+        for (name, successes, total) in rows {
+            println!(
+                "  {}  {}",
+                style::paint(MUTED, &format!("{name:<28}")),
+                style::paint(
+                    FAINT,
+                    &format!(
+                        "{successes}/{total} passed {}",
+                        wilson_interval(successes, total)
+                    )
+                )
+            );
+        }
+    }
+}
+
+fn as_count(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// Passes and trials per case, in the order the cases were first run.
+fn case_counts(outcomes: &[Outcome]) -> Vec<(String, u64, u64)> {
+    let mut rows: Vec<(String, u64, u64)> = Vec::new();
+    for outcome in outcomes {
+        let passed = u64::from(outcome.passed);
+        if let Some(row) = rows.iter_mut().find(|row| row.0 == outcome.case) {
+            row.1 += passed;
+            row.2 += 1;
+        } else {
+            rows.push((outcome.case.clone(), passed, 1));
+        }
+    }
+    rows
+}
+
+fn rates_json(outcomes: &[Outcome]) -> serde_json::Value {
+    let passed = outcomes.iter().filter(|outcome| outcome.passed).count();
+    let (low, high) = wilson(as_count(passed), as_count(outcomes.len()));
+    let cases: Vec<serde_json::Value> = case_counts(outcomes)
+        .into_iter()
+        .map(|(name, successes, total)| {
+            let (low, high) = wilson(successes, total);
+            serde_json::json!({
+                "case": name,
+                "passed": successes,
+                "total": total,
+                "wilson95": [low, high],
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "passed": as_count(passed),
+        "total": as_count(outcomes.len()),
+        "wilson95": [low, high],
+        "cases": cases,
+    })
 }

@@ -9,7 +9,6 @@
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
 use std::time::Instant;
 
 use dancho_sandbox::Sandbox;
@@ -27,6 +26,7 @@ use crate::case::fingerprint_tree;
 use crate::runner::Finished;
 use crate::runner::conclude;
 use crate::runner::prompt_for;
+use crate::runner::wall_outcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -228,9 +228,9 @@ pub async fn run_external(
         .stdout
         .take()
         .ok_or_else(|| EvalError::Setup("the harness had no stdout".into()))?;
-    // Generous, because a large case can take an hour; the case's turn budget
-    // is not enforceable on another harness.
-    let limit = Duration::from_secs(u64::from(case.max_turns.max(10)) * 60);
+    // The case's own clock. A turn budget is not enforceable on another
+    // harness, and it would not stop one turn that never returns.
+    let limit = case.wall_limit()?;
     let mut stream = String::new();
     let timed_out = tokio::time::timeout(limit, async {
         let _ = stdout.read_to_string(&mut stream).await;
@@ -239,25 +239,40 @@ pub async fn run_external(
     .await
     .is_err();
     let duration_ms = started.elapsed().as_millis();
+    if timed_out {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
     let _ = std::fs::write(&log_path, &stream);
 
     let parsed = match harness {
         Harness::ClaudeCode => parse_claude_code(&stream),
         Harness::Codex => parse_codex(&stream),
     };
-    let mut failures = Vec::new();
-    if timed_out {
-        failures.push(format!(
-            "the harness was stopped after {} minutes",
-            limit.as_secs() / 60
-        ));
-    } else if !parsed.completed {
-        failures.push("the harness did not complete the run".to_owned());
-    }
     let variant = Variant {
         score: true,
         ..Variant::default()
     };
+    if timed_out {
+        return wall_outcome(
+            case,
+            &variant,
+            Finished {
+                workspace,
+                before,
+                answer: parsed.answer,
+                failures: Vec::new(),
+                metrics: parsed.metrics,
+                duration_ms,
+                log_path,
+            },
+            limit,
+        );
+    }
+    let mut failures = Vec::new();
+    if !parsed.completed {
+        failures.push("the harness did not complete the run".to_owned());
+    }
     conclude(
         case,
         scratch,

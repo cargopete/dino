@@ -6,8 +6,10 @@
 //! which is measuring the weather.
 
 mod case;
+mod cost;
 pub mod external;
 mod metrics;
+mod rate;
 mod runner;
 pub mod score;
 
@@ -18,8 +20,16 @@ pub use crate::case::CheckExpectation;
 pub use crate::case::Expectations;
 pub use crate::case::TextExpectation;
 pub use crate::case::fingerprint_tree;
+pub use crate::cost::RunCost;
+pub use crate::cost::RunRate;
+pub use crate::cost::cost_of;
+pub use crate::cost::parse_rate;
+pub use crate::cost::total_cost;
 pub use crate::metrics::Metrics;
+pub use crate::rate::wilson;
+pub use crate::rate::wilson_interval;
 pub use crate::runner::Calibration;
+pub use crate::runner::EarlyStop;
 pub use crate::runner::Outcome;
 pub use crate::runner::ToolOptions;
 pub use crate::runner::Variant;

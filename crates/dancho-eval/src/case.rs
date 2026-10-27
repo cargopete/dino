@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -16,6 +17,10 @@ pub struct Case {
     pub prompt: String,
     /// The agent's model-turn budget for this case.
     pub max_turns: u32,
+    /// Seconds of wall time, distinct from [`Self::max_turns`]. One turn can
+    /// spend all of it. Absent means [`DEFAULT_WALL_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_secs: Option<u64>,
     #[serde(default)]
     pub expect: Expectations,
     /// Workspace-relative paths the model may not write, such as the tests the
@@ -29,6 +34,10 @@ pub struct Case {
     #[serde(skip)]
     pub directory: PathBuf,
 }
+
+/// Wall bound when a case names none. A turn budget does not stop one turn
+/// that never returns, and the measured cases fit inside two hours.
+pub const DEFAULT_WALL_SECS: u64 = 7_200;
 
 /// What decides pass or fail.
 ///
@@ -86,6 +95,22 @@ pub struct TextExpectation {
 }
 
 impl Case {
+    /// The clock for one run of this case.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError::Case`] when the case sets a limit of zero seconds.
+    pub fn wall_limit(&self) -> Result<Duration, EvalError> {
+        match self.max_wall_secs {
+            Some(0) => Err(EvalError::Case(format!(
+                "case {} sets a wall-time limit of zero seconds",
+                self.name
+            ))),
+            Some(seconds) => Ok(Duration::from_secs(seconds)),
+            None => Ok(Duration::from_secs(DEFAULT_WALL_SECS)),
+        }
+    }
+
     /// Loads one case directory.
     ///
     /// # Errors

@@ -552,6 +552,7 @@ mod tests {
             name: "c".into(),
             prompt: String::new(),
             max_turns,
+            max_wall_secs: None,
             expect: crate::Expectations {
                 hidden_tests: hidden,
                 ..crate::Expectations::default()

@@ -111,6 +111,12 @@ pub trait ToolRuntime: Send + Sync {
     fn classify(&self, call: &ToolCall) -> Result<ToolAction, ToolError>;
 
     fn execute(&self, call: &ToolCall) -> ToolFuture<'_>;
+
+    /// The model's history no longer holds earlier tool results: a new
+    /// conversation, or results elided to fit the window. A runtime that holds
+    /// back output it has already returned must stop, or it withholds bytes
+    /// the model no longer has.
+    fn history_lost(&self) {}
 }
 
 /// Several tool runtimes behind one, dispatching by tool name.
@@ -177,6 +183,12 @@ impl ToolRuntime for ToolSet {
         match self.owner(call) {
             Ok(runtime) => runtime.execute(call),
             Err(error) => Box::pin(async move { Err(error) }),
+        }
+    }
+
+    fn history_lost(&self) {
+        for runtime in &self.runtimes {
+            runtime.history_lost();
         }
     }
 }
@@ -416,6 +428,7 @@ where
     /// Swaps in another model session, for a new conversation or another
     /// model, and returns the old one. Tools, policy and sink are kept.
     pub fn replace_session(&mut self, session: S) -> S {
+        self.tools.history_lost();
         std::mem::replace(&mut self.session, session)
     }
 
@@ -902,6 +915,7 @@ where
             .elide_tool_results(self.config.keep_recent_results)
         {
             Ok(elision) if elision.results_elided + elision.calls_elided > 0 => {
+                self.tools.history_lost();
                 self.emit(
                     AgentEvent::Elided {
                         model_turn,

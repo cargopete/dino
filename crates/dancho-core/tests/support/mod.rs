@@ -116,6 +116,8 @@ impl ModelSession for ScriptedSession {
 #[derive(Default)]
 pub struct ScriptedTools {
     pub executed: Mutex<Vec<ToolCall>>,
+    /// How often the agent said the model's history lost earlier results.
+    pub histories_lost: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedTools {
@@ -163,6 +165,11 @@ impl ToolRuntime for ScriptedTools {
             .expect("executed tool lock")
             .push(call.clone());
         Box::pin(async { Ok(ToolOutput::success("fn main() {}")) })
+    }
+
+    fn history_lost(&self) {
+        self.histories_lost
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

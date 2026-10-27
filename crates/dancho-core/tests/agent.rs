@@ -604,6 +604,29 @@ async fn crossing_the_higher_mark_elides_and_records_it() {
         agent.session().elide_requests,
         vec![AgentConfig::default().keep_recent_results]
     );
+    assert_eq!(lost(&agent), 1, "the tools are told results were elided");
+}
+
+fn lost(agent: &Agent<ScriptedSession, ScriptedTools>) -> usize {
+    agent
+        .tools()
+        .histories_lost
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn a_new_conversation_tells_the_tools_their_results_are_gone() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![text_turn("first")]),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+    agent.run("hello").await.unwrap();
+    assert_eq!(lost(&agent), 0);
+
+    agent.replace_session(ScriptedSession::new(vec![text_turn("second")]));
+
+    assert_eq!(lost(&agent), 1);
 }
 
 #[tokio::test]
@@ -616,6 +639,7 @@ async fn a_provider_that_cannot_elide_does_not_fail_the_run() {
     assert!(elisions(&result).is_empty());
     assert_eq!(warnings(&result).len(), 1);
     assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(lost(&agent), 0, "nothing was elided, so nothing was lost");
 }
 
 #[tokio::test]

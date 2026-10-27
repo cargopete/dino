@@ -70,6 +70,9 @@ pub struct WorkspaceTools {
     /// edit that lands on one of them has undone work, which a model going in
     /// circles does not notice on its own.
     versions: Mutex<HashMap<PathBuf, Vec<String>>>,
+    /// Ranges already returned in this session, with the fingerprint they were
+    /// read at. The same range of an unchanged file is how a turn gets spent twice.
+    reads: Mutex<HashMap<PathBuf, Vec<ReadSpan>>>,
 }
 
 impl WorkspaceTools {
@@ -86,6 +89,7 @@ impl WorkspaceTools {
             seen: Mutex::new(HashMap::new()),
             protected: Vec::new(),
             versions: Mutex::new(HashMap::new()),
+            reads: Mutex::new(HashMap::new()),
         })
     }
 
@@ -122,13 +126,20 @@ impl WorkspaceTools {
         vec![
             ToolDefinition {
                 name: "read".into(),
-                description: "Read a bounded range from a UTF-8 file in the workspace.".into(),
+                description: "Read a bounded range from a UTF-8 file in the workspace. The same \
+                              range of an unchanged file returns a note instead of the bytes; \
+                              pass again to read it once more."
+                    .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "start_line": {"type": "integer", "minimum": 1},
-                        "end_line": {"type": "integer", "minimum": 1}
+                        "end_line": {"type": "integer", "minimum": 1},
+                        "again": {
+                            "type": "boolean",
+                            "description": "Return the bytes even when this range was already read and the file has not changed."
+                        }
                     },
                     "required": ["path"],
                     "additionalProperties": false
@@ -305,7 +316,31 @@ impl WorkspaceTools {
         let byte_truncated = truncate_utf8(&mut content, self.limits.max_read_bytes);
         let truncated = byte_truncated || end_line < requested_end.min(total_lines);
         let sha256 = fingerprint(&bytes);
+        // Recorded before the stall, so a withheld re-read still counts as
+        // having seen the file. `apply_patch` would otherwise demand another read.
         self.remember(&path, &sha256);
+        let span = ReadSpan {
+            start_line,
+            end_line,
+            sha256: sha256.clone(),
+        };
+        if !arguments.again && self.already_read(&path, &span) {
+            let content = format!(
+                "unchanged since the read of lines {start_line}-{end_line} at SHA-256 \
+                 {sha256}. Pass again to read it once more.\n"
+            );
+            return json_output(&ReadOutput {
+                path: self.root.relative(&path)?,
+                start_line,
+                end_line,
+                total_lines,
+                truncated,
+                sha256,
+                content,
+                repeated: true,
+            });
+        }
+        self.remember_read(&path, span);
         let output = ReadOutput {
             path: self.root.relative(&path)?,
             start_line,
@@ -314,8 +349,29 @@ impl WorkspaceTools {
             truncated,
             sha256,
             content,
+            repeated: false,
         };
         json_output(&output)
+    }
+
+    /// Whether this exact resolved range was already returned for these bytes.
+    fn already_read(&self, path: &Path, span: &ReadSpan) -> bool {
+        self.reads
+            .lock()
+            .is_ok_and(|reads| reads.get(path).is_some_and(|spans| spans.contains(span)))
+    }
+
+    fn remember_read(&self, path: &Path, span: ReadSpan) {
+        let Ok(mut reads) = self.reads.lock() else {
+            return;
+        };
+        let spans = reads.entry(path.to_path_buf()).or_default();
+        // A new fingerprint retires ranges read at the old one. The file
+        // changed, so those ranges are not the bytes on disk.
+        spans.retain(|known| known.sha256 == span.sha256);
+        if !spans.contains(&span) {
+            spans.push(span);
+        }
     }
 
     fn search(&self, arguments: SearchArguments) -> Result<ToolOutput, ToolError> {
@@ -675,6 +731,14 @@ impl ToolRuntime for WorkspaceTools {
         let result = self.execute_sync(call);
         Box::pin(async move { result })
     }
+
+    /// Repeat reads are withheld only while the model still holds the first
+    /// one. `seen` stays: it is about the bytes on disk, not the conversation.
+    fn history_lost(&self) {
+        if let Ok(mut reads) = self.reads.lock() {
+            reads.clear();
+        }
+    }
 }
 
 /// A glob over workspace paths. `*` stops at `/` and `**` crosses it, so
@@ -790,6 +854,17 @@ struct ReadArguments {
     path: String,
     start_line: Option<usize>,
     end_line: Option<usize>,
+    /// Return the bytes even when this range was already read unchanged.
+    #[serde(default)]
+    again: bool,
+}
+
+/// One range already handed back, at the bytes it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadSpan {
+    start_line: usize,
+    end_line: usize,
+    sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -801,6 +876,15 @@ struct ReadOutput {
     truncated: bool,
     sha256: String,
     content: String,
+    /// The bytes were withheld because this range was already returned.
+    #[serde(default, skip_serializing_if = "is_false")]
+    repeated: bool,
+}
+
+// `skip_serializing_if` is given a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Deserialize)]
@@ -1215,6 +1299,157 @@ mod tests {
         assert_eq!(output["total_lines"], 3);
         assert_eq!(output["truncated"], false);
         assert_eq!(output["sha256"].as_str().unwrap().len(), 64);
+        assert!(output.get("repeated").is_none());
+    }
+
+    #[test]
+    fn a_repeated_read_of_an_unchanged_range_returns_a_note() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\ntwo\n");
+        workspace.write("src/other.rs", "one\ntwo\n");
+        let tools = workspace.tools();
+        let read =
+            |arguments: Value| output_json(&tools.execute_sync(&call("read", arguments)).unwrap());
+
+        let first = read(json!({"path": "src/lib.rs"}));
+        // Same resolved range, different spelling of the path.
+        let second = read(json!({"path": "./src/lib.rs", "end_line": 2}));
+        let forced = read(json!({"path": "src/lib.rs", "again": true}));
+        let other_range = read(json!({"path": "src/lib.rs", "start_line": 2, "end_line": 2}));
+        let other_file = read(json!({"path": "src/other.rs"}));
+
+        assert_eq!(second["repeated"], true);
+        assert_eq!(second["sha256"], first["sha256"]);
+        assert!(
+            second["content"]
+                .as_str()
+                .unwrap()
+                .contains("Pass again to read it once more"),
+            "{}",
+            second["content"]
+        );
+        assert!(!second["content"].as_str().unwrap().contains("one"));
+        assert_eq!(forced["content"], first["content"]);
+        assert!(forced.get("repeated").is_none());
+        assert_eq!(other_range["content"], "     2\ttwo\n");
+        assert!(other_range.get("repeated").is_none());
+        assert!(other_file["content"].as_str().unwrap().contains("one"));
+        assert!(other_file.get("repeated").is_none());
+
+        workspace.write("src/lib.rs", "one\ntwo\nthree\n");
+        let changed = read(json!({"path": "src/lib.rs"}));
+        assert!(changed.get("repeated").is_none(), "{changed}");
+        assert!(changed["content"].as_str().unwrap().contains("three"));
+    }
+
+    #[test]
+    fn a_lost_history_returns_the_bytes_again() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\ntwo\n");
+        let tools = workspace.tools();
+        let read = || {
+            output_json(
+                &tools
+                    .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+                    .unwrap(),
+            )
+        };
+        read();
+        assert_eq!(read()["repeated"], true);
+
+        // A new conversation, or elided results: the model no longer has them.
+        tools.history_lost();
+
+        let after = read();
+        assert!(after.get("repeated").is_none(), "{after}");
+        assert!(after["content"].as_str().unwrap().contains("two"));
+    }
+
+    #[test]
+    fn a_stall_is_the_resolved_range_not_the_arguments() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\ntwo\nthree\nfour\n");
+        let tools = WorkspaceTools::new(
+            &workspace.path,
+            ToolLimits {
+                max_read_lines: 2,
+                ..ToolLimits::default()
+            },
+        )
+        .unwrap();
+        let read =
+            |arguments: Value| output_json(&tools.execute_sync(&call("read", arguments)).unwrap());
+
+        let first = read(json!({"path": "src/lib.rs"}));
+        let same_window = read(json!({"path": "src/lib.rs", "end_line": 2}));
+        let next_window = read(json!({"path": "src/lib.rs", "start_line": 3}));
+
+        assert_eq!(first["end_line"], 2);
+        assert_eq!(same_window["repeated"], true);
+        assert!(next_window.get("repeated").is_none(), "{next_window}");
+        assert!(
+            next_window["content"].as_str().unwrap().contains("three"),
+            "{next_window}"
+        );
+    }
+
+    #[test]
+    fn a_stalled_read_still_counts_as_having_seen_the_file() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+        let second = output_json(
+            &tools
+                .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+                .unwrap(),
+        );
+        assert_eq!(second["repeated"], true);
+
+        tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": "a()", "new_text": "b()"}),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "fn b() {}\n"
+        );
+    }
+
+    #[test]
+    fn a_patch_that_leaves_the_file_unchanged_is_an_error() {
+        let workspace = TestWorkspace::new();
+        let original = "pub fn fare_cents() -> u32 {\n    100\n}\n";
+        workspace.write("src/lib.rs", original);
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+
+        let error = tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({
+                    "path": "src/lib.rs",
+                    "old_text": "100",
+                    "new_text": "100"
+                }),
+            ))
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("would not change the file"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            original
+        );
     }
 
     #[test]

@@ -154,6 +154,10 @@ impl ToolRuntime for AfterEdit {
             })
         })
     }
+
+    fn history_lost(&self) {
+        self.inner.history_lost();
+    }
 }
 
 /// Commands that must pass before the model may end its turn. A failure sends

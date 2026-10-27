@@ -1,0 +1,12 @@
+name = "answer-from-the-file"
+prompt = """
+How many seats does this crate declare? State the number. Do not change \
+any file.
+"""
+max_turns = 8
+
+# Its deliverable is an answer. The same range of an unchanged file comes
+# back as a note, so the turns cannot all be spent reading it again.
+[expect]
+files_unchanged = ["src/lib.rs", "Cargo.toml"]
+answer_contains = ["1847"]

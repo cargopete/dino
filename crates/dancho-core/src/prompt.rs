@@ -55,9 +55,12 @@ Tool discipline:
   the tools remember it, so `apply_patch` may leave `expected_sha256` out. Your
   own edits keep a file current; anything else that changes it, such as a
   formatter or a build script, makes it stale, and you must read it again.
+  A range already returned for those same bytes comes back as a note; pass
+  `again` to read it once more.
 - `apply_patch` replaces one exact occurrence. If the text you intend to replace
   is not unique, include enough surrounding context to make it unique rather
   than guessing which occurrence the tool will choose. It will not guess either.
+  A replacement that leaves the file unchanged is an error.
 - `write_file` creates a file, with any missing directories. Use it for new
   files instead of writing them through `exec`. An existing file must have
   been read before it is replaced whole.
