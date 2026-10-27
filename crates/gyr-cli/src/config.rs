@@ -99,6 +99,9 @@ pub struct RunSettings {
     pub api_base: Option<String>,
     /// Asks a toggling model not to think. Absent leaves the server's default.
     pub disable_thinking: bool,
+    /// Forces thinking on or off. `None` leaves [`RunSettings::disable_thinking`]
+    /// in charge, which is every run except a probe comparing the two.
+    pub enable_thinking: Option<bool>,
     /// Emit no terminal colour. Resolved like everything else, so a config file
     /// can ask for it.
     pub plain: bool,
@@ -181,9 +184,11 @@ fn build_session_from(
                 None => require_env(env, "QWEN_API_BASE", profile)?,
             };
             let mut config = QwenConfig::new(api_base, profile.clone());
-            if settings.disable_thinking {
-                config.enable_thinking = Some(false);
-            }
+            config.enable_thinking = match (settings.enable_thinking, settings.disable_thinking) {
+                (Some(enabled), _) => Some(enabled),
+                (None, true) => Some(false),
+                (None, false) => None,
+            };
             config.api_key = env("QWEN_API_KEY").filter(|key| !key.is_empty());
             config.thinking_budget = Some(thinking_budget(settings.thinking_budget));
             config.system_prompt = system_prompt;
@@ -275,6 +280,7 @@ mod tests {
             show_reasoning: false,
             api_base: None,
             disable_thinking: false,
+            enable_thinking: None,
             plain: true,
         }
     }

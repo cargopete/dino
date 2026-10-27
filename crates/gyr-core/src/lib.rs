@@ -38,6 +38,7 @@ use gyr_protocol::ToolDefinition;
 use gyr_protocol::ToolOutput;
 use gyr_protocol::ToolResult;
 use gyr_protocol::TurnInput;
+use gyr_protocol::WindowSource;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -198,7 +199,7 @@ impl ToolError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentConfig {
     pub max_model_turns: NonZeroU32,
-    /// Percentage of the documented window past which a person is told.
+    /// Percentage of the window in force past which a person is told.
     ///
     /// A percentage rather than a fraction, because that is what a person
     /// setting it would write, and because integer arithmetic against a token
@@ -483,13 +484,11 @@ where
         let mut input = self.first_input(user_message);
         let mut text = String::new();
         let mut seen_call_ids = HashSet::new();
-        // Asked for before the window is read, because a self-hosted server
-        // often serves far less than the model's native window.
+        // Snapshot first. `discover_limits` overwrites the profile with what the
+        // server serves, and the warning has to be able to say which number it used.
+        let documented = self.session.profile().context_window_tokens;
         self.session.discover_limits().await?;
-        // A window has one documented size or none. Without one, none of this
-        // runs: guessing a window and cutting history against the guess would
-        // be worse than an honest refusal later.
-        let window = self.session.profile().context_window_tokens;
+        let budget = budget_window(documented, self.session.profile().context_window_tokens);
         let mut warned = false;
         self.sent_back = false;
 
@@ -514,9 +513,9 @@ where
                 Streamed::Cancelled { turns } => return Ok(cancelled(events, text, turns)),
             };
 
-            let elided = match window {
-                Some(window) => {
-                    self.mind_the_budget(model_turn, window, &mut warned, &mut events)?
+            let elided = match budget {
+                Some(budget) => {
+                    self.mind_the_budget(model_turn, budget, &mut warned, &mut events)?
                 }
                 None => false,
             };
@@ -524,7 +523,9 @@ where
             let stop_reason = stop_reason.ok_or(AgentError::StreamEndedWithoutFinish)?;
             let cut_off = self.recover_from_a_full_window(
                 model_turn,
-                window.filter(|_| stop_reason == StopReason::MaxTokens),
+                budget
+                    .filter(|_| stop_reason == StopReason::MaxTokens)
+                    .map(|budget| budget.tokens),
                 elided,
                 &mut events,
             )?;
@@ -862,12 +863,12 @@ where
     fn mind_the_budget(
         &mut self,
         model_turn: u32,
-        window: u32,
+        window: BudgetWindow,
         warned: &mut bool,
         events: &mut Vec<AgentEvent>,
     ) -> Result<bool, AgentError> {
         let used = last_usage(events).map_or(0, |usage| usage.input_tokens);
-        let filled = |percent: u8| u64::from(window) * u64::from(percent.min(100)) / 100;
+        let filled = |percent: u8| u64::from(window.tokens) * u64::from(percent.min(100)) / 100;
 
         if !*warned && used >= filled(self.config.warn_at_percent) {
             *warned = true;
@@ -875,7 +876,9 @@ where
                 AgentEvent::ContextWarning {
                     model_turn,
                     input_tokens: used,
-                    window_tokens: window,
+                    window_tokens: window.tokens,
+                    source: Some(window.source),
+                    documented_tokens: window.documented,
                 },
                 events,
             )?;
@@ -884,7 +887,9 @@ where
         // The next turn replays this one's output and writes about as much
         // again, so on a small window a percentage alone leaves too little.
         let next_turn = 2 * peak_output_tokens(events);
-        if used < filled(self.config.elide_at_percent) && used + next_turn < u64::from(window) {
+        if used < filled(self.config.elide_at_percent)
+            && used + next_turn < u64::from(window.tokens)
+        {
             return Ok(false);
         }
         self.elide(model_turn, events)
@@ -1073,6 +1078,34 @@ fn usages(events: &[AgentEvent]) -> impl DoubleEndedIterator<Item = &TokenUsage>
 ///
 /// A self-hosted server shrinks a turn's output allowance to whatever the
 /// window has left, so a length stop there says nothing about the model.
+/// The window the budget watches: the smaller of the catalogue figure and what
+/// the server reported. `documented` on the result is set only when the served
+/// window won, so a warning can name both.
+#[derive(Clone, Copy)]
+struct BudgetWindow {
+    tokens: u32,
+    source: WindowSource,
+    documented: Option<u32>,
+}
+
+fn budget_window(documented: Option<u32>, reported: Option<u32>) -> Option<BudgetWindow> {
+    // No catalogue figure, no budget. A server number alone is still a guess
+    // the catalogue declined to make, and eliding against a guess cuts history.
+    let documented = documented?;
+    match reported {
+        Some(served) if served > 0 && served < documented => Some(BudgetWindow {
+            tokens: served,
+            source: WindowSource::Served,
+            documented: Some(documented),
+        }),
+        _ => Some(BudgetWindow {
+            tokens: documented,
+            source: WindowSource::Documented,
+            documented: None,
+        }),
+    }
+}
+
 fn filled_window(events: &[AgentEvent], window: u32) -> Option<TokenUsage> {
     let usage = last_usage(events)?;
     let filled = usage.input_tokens + usage.output_tokens;

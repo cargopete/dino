@@ -562,6 +562,7 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "futures-util",
  "gyr-core",
  "gyr-eval",
  "gyr-exec",

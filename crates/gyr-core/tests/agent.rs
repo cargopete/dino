@@ -27,6 +27,7 @@ use gyr_protocol::ToolClass;
 use gyr_protocol::ToolOutput;
 use gyr_protocol::ToolResult;
 use gyr_protocol::TurnInput;
+use gyr_protocol::WindowSource;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -457,6 +458,21 @@ fn budgeted(turns: Vec<Turn>) -> Agent<ScriptedSession, ScriptedTools> {
     )
 }
 
+fn window_of(result: &gyr_core::RunResult) -> Vec<(WindowSource, Option<u32>)> {
+    result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextWarning {
+                source,
+                documented_tokens,
+                ..
+            } => source.map(|source| (source, *documented_tokens)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn warnings(result: &gyr_core::RunResult) -> Vec<(u64, u32)> {
     result
         .events
@@ -513,6 +529,7 @@ async fn a_filling_window_is_reported_once_and_not_on_every_turn() {
     let result = agent.run("keep going").await.unwrap();
 
     assert_eq!(warnings(&result), vec![(750, WINDOW)]);
+    assert_eq!(window_of(&result), vec![(WindowSource::Documented, None)]);
 }
 
 #[tokio::test]
@@ -526,6 +543,37 @@ async fn the_window_the_server_reports_is_the_one_measured_against() {
     let result = agent.run("keep going").await.unwrap();
 
     assert_eq!(warnings(&result), vec![(750, WINDOW)]);
+    assert_eq!(
+        window_of(&result),
+        vec![(WindowSource::Served, Some(WINDOW * 10))]
+    );
+}
+
+#[tokio::test]
+async fn a_larger_server_window_does_not_raise_the_budget() {
+    // 750 of the documented 1000 crosses 70%. Of the 10000 the server claims,
+    // it would not, and the warning would never say the catalogue won.
+    let mut session = ScriptedSession::new(vec![usage_turn(750, "done")]).with_window(Some(WINDOW));
+    session.served_window = Some(WINDOW * 10);
+    let mut agent = Agent::new(session, ScriptedTools::default(), AgentConfig::default());
+
+    let result = agent.run("keep going").await.unwrap();
+
+    assert_eq!(warnings(&result), vec![(750, WINDOW)]);
+    assert_eq!(window_of(&result), vec![(WindowSource::Documented, None)]);
+    assert!(elisions(&result).is_empty());
+}
+
+#[tokio::test]
+async fn a_server_reporting_nothing_usable_leaves_the_catalogue_window() {
+    let mut session = ScriptedSession::new(vec![usage_turn(750, "done")]).with_window(Some(WINDOW));
+    session.served_window = Some(0);
+    let mut agent = Agent::new(session, ScriptedTools::default(), AgentConfig::default());
+
+    let result = agent.run("keep going").await.unwrap();
+
+    assert_eq!(warnings(&result), vec![(750, WINDOW)]);
+    assert_eq!(window_of(&result), vec![(WindowSource::Documented, None)]);
 }
 
 #[tokio::test]
@@ -584,6 +632,23 @@ async fn a_model_with_no_documented_window_is_left_alone() {
 
     // Guessing a window and cutting history against the guess would be worse
     // than an honest refusal from the provider later.
+    assert!(warnings(&result).is_empty());
+    assert!(elisions(&result).is_empty());
+    assert!(agent.session().elide_requests.is_empty());
+}
+
+#[tokio::test]
+async fn a_server_window_without_a_documented_one_is_not_a_budget() {
+    let mut session = ScriptedSession::new(vec![usage_turn(900, "enormous")]).with_window(None);
+    session.served_window = Some(WINDOW);
+    let mut agent = Agent::new(
+        session.eliding(3, 4_096),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("hello").await.unwrap();
+
     assert!(warnings(&result).is_empty());
     assert!(elisions(&result).is_empty());
     assert!(agent.session().elide_requests.is_empty());

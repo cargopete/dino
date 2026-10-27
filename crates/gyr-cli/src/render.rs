@@ -22,6 +22,7 @@ use gyr_protocol::StopReason;
 use gyr_protocol::TokenUsage;
 use gyr_protocol::ToolCall;
 use gyr_protocol::ToolResult;
+use gyr_protocol::WindowSource;
 use serde_json::Value;
 
 use crate::style;
@@ -313,12 +314,14 @@ impl EventSink for Renderer {
             AgentEvent::ContextWarning {
                 input_tokens,
                 window_tokens,
+                source,
+                documented_tokens,
                 ..
             } => {
                 self.break_stream()?;
                 self.context_full
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                context_warning(*input_tokens, *window_tokens)
+                context_warning(*input_tokens, *window_tokens, *source, *documented_tokens)
             }
             AgentEvent::HandedOver {
                 session,
@@ -649,15 +652,37 @@ fn elided(results: usize, calls: usize, bytes: usize) -> Result<(), SinkError> {
     ))
 }
 
-fn context_warning(input_tokens: u64, window_tokens: u32) -> Result<(), SinkError> {
-    let percent = (input_tokens * 100) / u64::from(window_tokens).max(1);
+fn context_warning(
+    input_tokens: u64,
+    window_tokens: u32,
+    source: Option<WindowSource>,
+    documented_tokens: Option<u32>,
+) -> Result<(), SinkError> {
     write_out(&style::paint(
         WARN,
-        &format!(
-            "  the context window is {percent}% full ({input_tokens} of {window_tokens}); a new \
-             session starts clean\n"
-        ),
+        &context_line(input_tokens, window_tokens, source, documented_tokens),
     ))
+}
+
+fn context_line(
+    input_tokens: u64,
+    window_tokens: u32,
+    source: Option<WindowSource>,
+    documented_tokens: Option<u32>,
+) -> String {
+    let percent = (input_tokens * 100) / u64::from(window_tokens).max(1);
+    let which = match (source, documented_tokens) {
+        (Some(WindowSource::Served), Some(documented)) => {
+            format!(", served; documented {documented}")
+        }
+        (Some(WindowSource::Served), None) => ", served".to_owned(),
+        (Some(WindowSource::Documented), _) => ", documented".to_owned(),
+        (None, _) => String::new(),
+    };
+    format!(
+        "  the context window is {percent}% full ({input_tokens} of {window_tokens}{which}); a new \
+         session starts clean\n"
+    )
 }
 
 fn handed_over(session: u32, reason: &str, pending: usize) -> Result<(), SinkError> {
@@ -749,8 +774,10 @@ fn cap(value: &str, max_bytes: usize) -> String {
 mod tests {
     use gyr_core::session::EventSink as _;
     use gyr_protocol::AgentEvent;
+    use gyr_protocol::WindowSource;
 
     use super::Renderer;
+    use super::context_line;
 
     #[test]
     fn a_context_warning_raises_the_flag_auto_compaction_watches() {
@@ -762,9 +789,31 @@ mod tests {
                 model_turn: 3,
                 input_tokens: 190_000,
                 window_tokens: 262_144,
+                source: Some(WindowSource::Documented),
+                documented_tokens: None,
             })
             .unwrap();
 
         assert!(full.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_context_warning_names_which_window() {
+        let served = context_line(750, 1_000, Some(WindowSource::Served), Some(10_000));
+        assert!(
+            served.contains("750 of 1000, served; documented 10000"),
+            "{served}"
+        );
+        let documented = context_line(750, 1_000, Some(WindowSource::Documented), None);
+        assert!(
+            documented.contains("750 of 1000, documented"),
+            "{documented}"
+        );
+        assert!(!documented.contains("served"));
+        // A log from before the field existed keeps the old sentence.
+        let older = context_line(190_000, 262_144, None, None);
+        assert!(older.contains("190000 of 262144);"), "{older}");
+        assert!(!older.contains("documented"));
+        assert!(!older.contains("served"));
     }
 }

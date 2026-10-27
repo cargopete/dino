@@ -5,6 +5,7 @@ mod config;
 mod evals;
 mod handover;
 mod markdown;
+mod probe;
 mod render;
 mod replay;
 mod session;
@@ -87,6 +88,8 @@ enum Command {
     Run(RunArgs),
     /// Run the eval corpus against a model.
     Eval(crate::evals::EvalArgs),
+    /// Probe an endpoint: tool parser, thinking, prompt delivery, throughput, context.
+    Probe(probe::ProbeArgs),
     /// Show every setting, its value, and where that value came from.
     Config(PromptArgs),
     /// Print a past session from its log.
@@ -189,6 +192,17 @@ fn dispatch() -> Result<ExitCode> {
         }
         Some(Command::Run(args)) => on_runtime(run(args)),
         Some(Command::Eval(args)) => on_runtime(evals::run(args)),
+        Some(Command::Probe(args)) => {
+            let common = CommonArgs {
+                model: args.model.clone(),
+                workspace: args.workspace.clone(),
+                api_base: args.api_base.clone(),
+                plain: args.plain,
+                ..CommonArgs::default()
+            };
+            let run_settings = settings(&common, &SessionId::generate())?;
+            on_runtime(probe::execute(run_settings, args))
+        }
         Some(Command::Config(args)) => {
             print_config(&args)?;
             Ok(ExitCode::SUCCESS)
@@ -1029,6 +1043,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,
+        enable_thinking: None,
         plain: resolved.plain.0,
     })
 }

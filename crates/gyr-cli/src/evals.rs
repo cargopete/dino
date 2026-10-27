@@ -289,6 +289,7 @@ fn eval_settings(
                 .map(|(base, _)| base)
         }),
         disable_thinking: args.no_thinking,
+        enable_thinking: None,
         plain: args.plain,
     }
 }

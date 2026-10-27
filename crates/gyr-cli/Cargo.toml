@@ -21,6 +21,7 @@ path = "src/bin/gyr-confine.rs"
 base64.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 gyr-core.workspace = true
 gyr-eval.workspace = true
 gyr-exec.workspace = true

@@ -225,6 +225,16 @@ pub enum ToolClass {
     Network,
 }
 
+/// Which window a context warning measured against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowSource {
+    /// The catalogue window.
+    Documented,
+    /// A smaller window the server reported for this session.
+    Served,
+}
+
 /// A classified tool call, with the narrow subject a session rule may be keyed on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ToolAction {
@@ -355,6 +365,13 @@ pub enum AgentEvent {
         model_turn: u32,
         input_tokens: u64,
         window_tokens: u32,
+        /// Which figure `window_tokens` is. Logs written before the budget
+        /// recorded this omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<WindowSource>,
+        /// Catalogue size, when the served window is the smaller one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        documented_tokens: Option<u32>,
     },
     /// A long task moved to a fresh session, carried by its progress record.
     /// RFC-0018 section 5.
@@ -406,4 +423,30 @@ pub enum AgentEvent {
         output_tokens: u64,
         window_tokens: u32,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentEvent;
+
+    #[test]
+    fn an_old_context_warning_still_reads() {
+        let event: AgentEvent = serde_json::from_str(
+            r#"{"type":"context_warning","model_turn":1,"input_tokens":10,"window_tokens":100}"#,
+        )
+        .expect("old warning");
+        match event {
+            AgentEvent::ContextWarning {
+                window_tokens,
+                source,
+                documented_tokens,
+                ..
+            } => {
+                assert_eq!(window_tokens, 100);
+                assert!(source.is_none());
+                assert!(documented_tokens.is_none());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }
