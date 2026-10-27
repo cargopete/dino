@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | built 2026-10-24 as `gyr run --handover`, after §7 step 2 failed (benches v5 to v8); steps 3 and 4 not yet run |
+| Status | built 2026-10-24 as `dancho run --handover`, after §7 step 2 failed (benches v5 to v8); steps 3 and 4 not yet run |
 | Date | 2026-10-20 |
 | Depends on | RFC-0013, RFC-0014, RFC-0017 |
 | Scope | an opt-in mode that splits one task across several short sessions, carried by a progress record |
@@ -15,7 +15,7 @@ Each session takes the next item from a plan, verifies it, records what it did
 and ends. The next one starts from the record and the workspace, not from the
 old conversation.
 
-gyr's default target makes the idea attractive. Qwen3.8-27B is served with a
+dancho's default target makes the idea attractive. Qwen3.8-27B is served with a
 64k window (RFC-0017 §8.5), and the hard cases take 20 to 40 turns.
 
 ## 2. What the bench says today
@@ -53,7 +53,7 @@ There are two reasons for a tool:
 - **It cannot be broken by a bad patch.** In v1, 25 of Qwen's 29 tool errors
   were `apply_patch` failures.
 
-The record lives at `.gyr/sessions/<chain>/progress.json`, beside the
+The record lives at `.dancho/sessions/<chain>/progress.json`, beside the
 RFC-0014 state files and ignored by git. Items are pending, done or blocked.
 Notes are kept in order. Recording what was tried and why it failed is the
 point of notes: a fresh session loses exactly that knowledge, and it is how a
@@ -105,7 +105,7 @@ exists to drop.
   `Elided` and `TurnCutOff`.
 - **RFC-0014 state** is written per session. `--resume` resumes the latest
   session in the chain.
-- **Opt-in only.** The mode is `--handover` on `gyr run` and `gyr eval`.
+- **Opt-in only.** The mode is `--handover` on `dancho run` and `dancho eval`.
   Interactive sessions stay out of scope until the one-shot form has numbers.
 
 ## 6. Not summarisation

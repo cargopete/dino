@@ -1,6 +1,6 @@
-# Gyrfalcon
+# DanchoAI
 
-Gyrfalcon is an open-source terminal coding agent written in Rust and designed
+DanchoAI is an open-source terminal coding agent written in Rust and designed
 for Rust work. It is built around open-weight models: by default Qwen3.8 27B,
 whose Apache-2.0 weights you serve yourself, on your own GPU or one rented by
 the hour. Hosted Claude models are kept as the baseline the open model is
@@ -20,7 +20,7 @@ and a corpus of twenty before any such claim.
 
 **On harder cases it is slower and less reliable.** Six cases with hidden tests
 the model never sees, three trials each: after a round of harness changes made
-for it, Qwen in `gyr` passed 15 of 18 (16 counting runs whose final code passes
+for it, Qwen in `dancho` passed 15 of 18 (16 counting runs whose final code passes
 the hidden tests), where Opus 5.5 in Claude Code passed 18 of 18 in about a
 thirtieth of the time (RFC-0017 §8.6). On a case written to be longer than one
 context window, a TOML parser, no Qwen run has yet passed: every one runs out
@@ -34,13 +34,13 @@ those are written down too.
 
 ## Status
 
-`gyr` opens an interactive session. It selects a model, builds a provider-native
+`dancho` opens an interactive session. It selects a model, builds a provider-native
 session, streams each turn, classifies every tool call, enforces an approval
 policy in code, runs processes inside an operating-system sandbox, records
 everything to an append-only log, and cancels a turn on Ctrl-C without inventing
 a terminal event the provider never sent or losing the conversation.
 
-`gyr run` is the same machinery as one submission and an exit code, for scripts,
+`dancho run` is the same machinery as one submission and an exit code, for scripts,
 CI and evals.
 
 ### What works
@@ -67,12 +67,12 @@ CI and evals.
   `report_blocker` lets the model stop and say a task contradicts itself,
   rather than bend a test to fit. `todo` keeps a checklist for a task of
   several steps, shown in the transcript as it changes. `remember` appends a
-  dated note to `~/.config/gyr/memory/`, one file for you and one per workspace,
+  dated note to `~/.config/dancho/memory/`, one file for you and one per workspace,
   both read back into later sessions. `skill` loads one of the skills in
-  `~/.config/gyr/skills/` or the repository's `.gyr/skills/`, folders with a
+  `~/.config/dancho/skills/` or the repository's `.dancho/skills/`, folders with a
   `SKILL.md` as Claude Code uses them; only their names and descriptions sit in
   the system prompt. `github` reads the checkout's own issues and
-  pull requests through a fixed set of read-only `gh` commands, run by `gyr`
+  pull requests through a fixed set of read-only `gh` commands, run by `dancho`
   rather than by a confined process, and is offered only where `gh` is
   installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
   host, because a URL can carry workspace text out; a redirect to another host
@@ -82,13 +82,13 @@ CI and evals.
   rule is keyed on the tool and the resolved target, never on a description of
   what a command probably does. A refusal returns to the model as an ordinary
   tool result under its original call ID. Answering `r` keeps the rule for the
-  workspace in `~/.config/gyr/approvals/`, outside the repository, so a checkout
+  workspace in `~/.config/dancho/approvals/`, outside the repository, so a checkout
   cannot approve its own commands; the file is plain JSON, to read or prune.
 - **A line-based session.** Not an alternate-screen interface, deliberately: the
   transcript belongs in the terminal's scrollback, where a person goes to find
   what the agent did an hour ago and where selection and copying still work.
   Paste arrives as one message; a trailing backslash continues a typed line.
-- **Resumable sessions.** `gyr --resume` continues the most recent conversation
+- **Resumable sessions.** `dancho --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events
   and rebuilding a provider's content ordering from those would reconstruct
@@ -107,12 +107,12 @@ CI and evals.
   summarisation: no extra request, deterministic, and it does not quietly
   rewrite what the model believes happened. Summarising is `/compact`, asked
   for by a person and starting a fresh conversation, never done behind one.
-- **Instructions.** `~/.config/gyr/instructions.md` for your own rules, then
-  the repository's `AGENTS.md` and `.gyr/instructions.md`, each capped at 16 KiB
+- **Instructions.** `~/.config/dancho/instructions.md` for your own rules, then
+  the repository's `AGENTS.md` and `.dancho/instructions.md`, each capped at 16 KiB
   and named when a session starts. They go below the built-in rules and cannot
   change approvals or the sandbox. Evals read none of them, so a personal file
   cannot move a measurement.
-- **Handover for long tasks.** `gyr run --handover` has the model keep a plan in
+- **Handover for long tasks.** `dancho run --handover` has the model keep a plan in
   a `progress` tool and hands the task to a fresh session when one reaches
   `--session-turns` (16) or stops with items pending, at most four sessions and
   never more turns than `--max-turns`. Each new session starts from a seed the
@@ -122,7 +122,7 @@ CI and evals.
 - **A turn budget.** `--max-turns` bounds a submission. The model is told the
   limit in its system prompt and counted down over its last three turns, so it
   can finish and say what is done rather than be cut off.
-- **Unattended runs check their own build.** In `gyr run` and `gyr eval`, a
+- **Unattended runs check their own build.** In `dancho run` and `dancho eval`, a
   model that ends its turn while `cargo check` reports errors is sent back once
   with the first of them, and the countdown names them too. An interactive
   session hands the turn to you instead.
@@ -132,10 +132,10 @@ CI and evals.
   `thinking_budget` in a config file changes it.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
-  `gyr replay` renders a past session through the same renderer the live one
+  `dancho replay` renders a past session through the same renderer the live one
   uses, with `--last N` for the recent exchanges.
-- **Configuration, split by who wrote it.** `~/.config/gyr/config.toml` for your
-  defaults, `<workspace>/.gyr/config.toml` for a project's. The second arrives
+- **Configuration, split by who wrote it.** `~/.config/dancho/config.toml` for your
+  defaults, `<workspace>/.dancho/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
   `sandbox`, `api_base`, `hooks` or `mcp`: two weaken a boundary, one redirects
   where a credential is sent and two run commands. A project file that tries is an
@@ -154,14 +154,14 @@ CI and evals.
   `before_end_turn` hook must pass before the model ends its turn, or it is sent
   back once with the output (`cargo clippy` makes a good one); a
   `session_start` hook runs once and what it prints goes into the prompt.
-- **An eval harness.** `gyr eval` runs a corpus of cases: a fixture workspace, a
+- **An eval harness.** `dancho eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also
   how the log's sufficiency gets tested. A case may carry hidden tests, laid
   over the workspace only after the run, and protected paths the model may not
   change. `--without <tool>` hides a tool as completely as if it had never been
   built, which is how several of the findings below were obtained.
-  `scripts/bench.sh` runs cases through `gyr` on a self-hosted model and
+  `scripts/bench.sh` runs cases through `dancho` on a self-hosted model and
   through Claude Code as a baseline, and `scripts/analyse-bench.py` mines the
   logs (see [evals/README.md](evals/README.md)).
 
@@ -173,7 +173,7 @@ one trait. **Neither confines reads in general.** A build script can read most o
 the machine; what it cannot do is write outside the workspace or open a
 connection. But its output is sent to the model, and with a hosted model that is
 a transmission, so both sandboxes deny reads of known credential locations such
-as `~/.ssh`, `~/.aws` and `~/.config/gyr`. Landlock only grants, so on Linux the
+as `~/.ssh`, `~/.aws` and `~/.config/dancho`. Landlock only grants, so on Linux the
 helper grants reads around each of them; a file created later beside one of
 them in an enclosing directory is unreadable until the next session. RFC-0009 section 2 explains why a general read allow-list was rejected
 rather than attempted badly.
@@ -200,10 +200,10 @@ registry and git cache allowed, and nothing else. Their approval prompt ends in
 Paths can be **protected**: `protected = ["tests"]` in a config file or an eval
 case. The file tools refuse them everywhere. On macOS, Seatbelt also refuses
 them to every process. Landlock cannot carve a read-only hole out of a writable
-tree, so on Linux `gyr` copies them before each process and puts them back
+tree, so on Linux `dancho` copies them before each process and puts them back
 after it, removing anything added beneath them, and the tool result names what
 it restored. That undoes a write rather than preventing it: until the process
-exits, what it wrote is there. `gyr` says which kind of protection is in force
+exits, what it wrote is there. `dancho` says which kind of protection is in force
 when a session starts.
 
 Some paths are protected from processes whatever the configuration says:
@@ -213,7 +213,7 @@ the next commit, build or `cd`, so a build script that wrote one would have
 escaped containment without breaking it. The file tools may still edit them,
 under an approval that names the path.
 
-On every other platform the sandbox is unimplemented and Gyrfalcon refuses to run
+On every other platform the sandbox is unimplemented and DanchoAI refuses to run
 any process rather than quietly running it unconfined. `--sandbox none` remains
 available, is never the default, appears in the approval prompt as `unconfined`,
 and is written into the session log. Windows is not a target.
@@ -226,7 +226,7 @@ rather than merely to write. Rollback: the diagnostic
 gate refused rather than reverting, because a shadow copy of the workspace is a
 worse version of git. Resuming *from* a log as opposed to replaying one, which
 RFC-0014 section 2 argues cannot be done honestly. A conformance run against a live
-endpoint: the suite exists and has only ever seen recorded traffic. `gyr probe`,
+endpoint: the suite exists and has only ever seen recorded traffic. `dancho probe`,
 which would let you run it against your own endpoint, is RFC-0017's next step.
  Signing in with a Claude
 subscription: the Anthropic profiles take an API key and nothing else.
@@ -245,7 +245,7 @@ settle by argument, and it has overruled the argument several times.
 **A missing capability, not a missing syntax.** The one `exec` call across six
 cases was `find . -name "*.rs"`. Not a pipeline: a directory listing, which
 nothing else offered. `list` was built on that, and re-running the same corpus
-took `exec` to zero. A later run caught `exec find . -name .gyr`, because `list`
+took `exec` to zero. A later run caught `exec find . -name .dancho`, because `list`
 respects ignore rules and so cannot show what they hide; it now takes `all`.
 
 **`search` earns its place, and only at scale.** Withheld on a ten-file crate it
@@ -328,24 +328,24 @@ sampling left to Alibaba. A personal Token Plan serves it at
 `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`, with
 the plan-specific key (`sk-sp-...`) in `QWEN_API_KEY`. The older Coding Plan
 uses `https://coding-intl.dashscope.aliyuncs.com/v1` and allows interactive
-sessions only, which rules out `gyr run` and `gyr eval`. Driven live on
+sessions only, which rules out `dancho run` and `dancho eval`. Driven live on
 2026-10-23; not yet through the corpus.
 
 ## Using it
 
 ```console
-cargo install --path crates/gyr-cli --locked
+cargo install --path crates/dancho-cli --locked
 ```
 
-That installs two binaries: `gyr`, and `gyr-confine`, which is the Linux sandbox
-helper. They must sit together, because `gyr` looks for the helper beside itself;
-`cargo install` puts both in the same directory, and `GYR_CONFINE` overrides for
+That installs two binaries: `dancho`, and `dancho-confine`, which is the Linux sandbox
+helper. They must sit together, because `dancho` looks for the helper beside itself;
+`cargo install` puts both in the same directory, and `DANCHO_CONFINE` overrides for
 a packager who does otherwise. Without the helper, Linux refuses to run any
 process rather than running it unconfined.
 
 ```console
-gyr models
-gyr prompt --model claude-sonnet
+dancho models
+dancho prompt --model claude-sonnet
 ```
 
 The default needs a server for Qwen3.8 27B. This is the configuration that has
@@ -371,7 +371,7 @@ every session reports zero cached tokens. Measured 2026-10-20: a repeated
 ```console
 export QWEN_API_BASE=https://<pod>-8000.proxy.runpod.net/v1
 export QWEN_API_KEY="$VLLM_KEY"
-gyr
+dancho
 ```
 
 A rented server is public, which is what `--api-key` is for. This is one
@@ -383,11 +383,11 @@ endpoint. A missing one fails before any request is sent, naming the variable.
 
 ```console
 export ANTHROPIC_API_KEY=...
-gyr --model claude-sonnet
+dancho --model claude-sonnet
 ```
 
-Or put the model in `~/.config/gyr/config.toml` and run `gyr`. `gyr config`
-prints every setting and where its value came from. `gyr prompt` prints the
+Or put the model in `~/.config/dancho/config.toml` and run `dancho`. `dancho config`
+prints every setting and where its value came from. `dancho prompt` prints the
 system prompt a run would send, so its cost can be read rather than guessed.
 
 Inside a session: `/help`, `/status`, `/log`, `/exit`; `/clear` for a new
@@ -408,8 +408,8 @@ arrives as one message; end a typed line with a backslash to carry on.
 can edit it straight away, and Tab completes the path; `@src/` attaches a
 listing. `@~/Desktop/shot.png` attaches an image, from anywhere since you named
 it, for profiles that take images; PNG, JPEG, GIF and WebP up to 5 MiB. History
-persists to `.gyr/history` and the conversation to `.gyr/sessions`, so
-`gyr --resume` picks it up where you left it and `gyr replay` shows what
+persists to `.dancho/history` and the conversation to `.dancho/sessions`, so
+`dancho --resume` picks it up where you left it and `dancho replay` shows what
 happened.
 
 Mutations and processes ask before they happen. `--read-only` refuses both
@@ -421,13 +421,13 @@ a crate is a job for a person, or for `--sandbox none`.
 For a script, CI or an eval, one submission and an exit code:
 
 ```console
-gyr run --model claude-sonnet "what does gyr-core::Agent::run guarantee?"
+dancho run --model claude-sonnet "what does dancho-core::Agent::run guarantee?"
 ```
 
 Against a local endpoint:
 
 ```console
-gyr --model qwen3-8b --api-base http://thinkpad.local:11434/v1 \
+dancho --model qwen3-8b --api-base http://thinkpad.local:11434/v1 \
     --no-thinking --read-only
 ```
 
@@ -436,16 +436,16 @@ Ollama serves a context far smaller than the model's native window unless
 3.1 records what has and has not been measured there.
 
 The interface uses a warm dark palette because that is what it was drawn for.
-Gyrfalcon ships the ink and leaves the background to the terminal, since a
+DanchoAI ships the ink and leaves the background to the terminal, since a
 line-based program does not own its ground. On a light terminal, `--plain`.
 
-**What lands on disk.** `.gyr/` in the workspace holds the session log, the
+**What lands on disk.** `.dancho/` in the workspace holds the session log, the
 resumable state and the input history. The log records what you typed; the state
 holds the conversation, and the conversation holds your source, because tool
 results are file contents. It is git-ignored and mode 0600, and it is worth
 knowing it is there.
 
-The command is `gyr`; Gyrfalcon is the project.
+The command is `dancho`; DanchoAI is the project.
 
 ## Design record
 
@@ -481,7 +481,7 @@ correction rather than quietly reading as though it were right all along.
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-gyr eval --model claude-sonnet   # needs a credential; not part of cargo test
+dancho eval --model claude-sonnet   # needs a credential; not part of cargo test
 ```
 
 CI runs the first three on macOS and Linux against a pinned toolchain, and
@@ -493,21 +493,21 @@ runner offers.
 
 Nine crates:
 
-- `gyr-protocol`: values crossing crate and frontend boundaries.
-- `gyr-model`: provider session traits and the explicit model catalogue.
-- `gyr-core`: the act-observe loop, approval, the session log, the workspace
+- `dancho-protocol`: values crossing crate and frontend boundaries.
+- `dancho-model`: provider session traits and the explicit model catalogue.
+- `dancho-core`: the act-observe loop, approval, the session log, the workspace
   fence, the context budget, the turn countdown, the finish check and the
   system prompt.
-- `gyr-tools`: workspace filesystem tools and their hard output limits.
-- `gyr-sandbox`: operating-system containment, and the snapshot that restores
+- `dancho-tools`: workspace filesystem tools and their hard output limits.
+- `dancho-sandbox`: operating-system containment, and the snapshot that restores
   protected paths on Linux. Rewrites a command; never spawns.
-- `gyr-exec`: the process runner and the `exec` tool.
-- `gyr-rust`: the `cargo` tool, diagnostic parsing, the build check that sends
+- `dancho-exec`: the process runner and the `exec` tool.
+- `dancho-rust`: the `cargo` tool, diagnostic parsing, the build check that sends
   an unattended model back, and the withdrawn gate.
-- `gyr-eval`: the case format, the runner, the metrics read from a log, and the
+- `dancho-eval`: the case format, the runner, the metrics read from a log, and the
   one definition of what tools a session gets.
-- `gyr-cli`: the `gyr` executable, its session loop, renderer, palette and
-  approval prompt, and the `gyr-confine` helper that restricts itself with
+- `dancho-cli`: the `dancho` executable, its session loop, renderer, palette and
+  approval prompt, and the `dancho-confine` helper that restricts itself with
   Landlock and then `exec`s.
 
 Tests that invoke a real `cargo` build a dependency-free fixture in a temporary

@@ -1,0 +1,46 @@
+[package]
+name = "dancho-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dancho"
+path = "src/main.rs"
+
+# The Linux sandbox helper ships from here rather than its own crate so that one
+# `cargo install` produces a working agent. RFC-0009 section 5.1 argued for a
+# helper *process* over in-process unsafe; which crate builds it is packaging.
+[[bin]]
+name = "dancho-confine"
+path = "src/bin/dancho-confine.rs"
+
+[dependencies]
+base64.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+dancho-core.workspace = true
+dancho-eval.workspace = true
+dancho-exec.workspace = true
+dancho-model.workspace = true
+dancho-protocol.workspace = true
+dancho-rust.workspace = true
+dancho-sandbox.workspace = true
+dancho-tools.workspace = true
+rustyline.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+terminal_size.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+nix = { workspace = true, features = ["sched", "socket", "user"] }
+
+[lints]
+workspace = true

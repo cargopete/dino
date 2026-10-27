@@ -1,0 +1,30 @@
+[package]
+name = "dancho-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dancho-core.workspace = true
+dancho-exec.workspace = true
+dancho-model.workspace = true
+dancho-protocol.workspace = true
+dancho-rust.workspace = true
+dancho-sandbox.workspace = true
+dancho-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+sha2.workspace = true
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@
 
 This is a baseline for comparison, not part of the harness: it measures a model
 and Claude Code together, the way RFC-0017 section 8.5 reports them. It mirrors
-the checks in gyr-eval's runner and prints one JSON line per case.
+the checks in dancho-eval's runner and prints one JSON line per case.
 
 usage: python3.12 -I scripts/claude-code-eval.py <corpus> <out_dir> <model> [case ...]
 """
@@ -15,7 +15,7 @@ import sys
 import time
 import tomllib
 
-SKIP = {"target", ".gyr", ".claude"}
+SKIP = {"target", ".dancho", ".claude"}
 
 
 def fingerprint(root):

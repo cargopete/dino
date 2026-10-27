@@ -9,7 +9,7 @@ cargo init -q --name ledger
 git init -q && git add -A && git -c user.name=ledger -c user.email=ledger@localhost commit -qm "Empty crate"
 start=$(date +%s)
 set +e
-timeout 5400 gyr run --plain --model "$model" --dangerously-allow-all --max-turns "$turns" "$(cat "$brief")" > run.txt 2>&1
+timeout 5400 dancho run --plain --model "$model" --dangerously-allow-all --max-turns "$turns" "$(cat "$brief")" > run.txt 2>&1
 code=$?
 set -e
 echo "exit=$code seconds=$(( $(date +%s) - start ))" > run.meta

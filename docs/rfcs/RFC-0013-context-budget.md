@@ -133,7 +133,7 @@ back over it.
 The tokeniser deserves a note. Everything here counts tokens the provider
 reported for the previous request, which is a lagging measure: a single enormous
 tool result can take a session from 60% to over the limit in one turn, and
-nothing here will catch that. A local tokeniser would fix it and Gyrfalcon does
+nothing here will catch that. A local tokeniser would fix it and DanchoAI does
 not have one, so this is a mitigation rather than a guarantee.
 
 ## 8. Verification

@@ -12,7 +12,7 @@ mkdir -p "$out"
 run() {
     name=$1
     shift
-    gyr eval --plain --json --model "$model" --score --trials 3 --scratch "$out/$name-work" "$@" \
+    dancho eval --plain --json --model "$model" --score --trials 3 --scratch "$out/$name-work" "$@" \
         > "$out/$name.json" 2> "$out/$name.err"
 }
 run baseline &

@@ -17,7 +17,7 @@ This distinction produces two test layers:
 
 1. Official vendor CLIs verify that a named model is available to the local
    subscription and follows a bounded instruction.
-2. Gyrfalcon's provider transports are verified by recorded streams, local mock
+2. DanchoAI's provider transports are verified by recorded streams, local mock
    servers and, when separately supplied, vendor API credentials.
 
 Passing the first layer does not imply that the second has reached a live
@@ -32,7 +32,7 @@ first-party Claude subscription. Neither `OPENAI_API_KEY` nor
 
 OpenAI documents ChatGPT sign-in and API-key sign-in as supported Codex CLI
 authentication methods. It also states that general OpenAI API usage continues
-to use Platform API keys. Gyrfalcon must not read, copy or replay the private
+to use Platform API keys. DanchoAI must not read, copy or replay the private
 tokens held by Codex CLI or Claude Code. A future subscription-backed adapter
 must use an explicitly documented integration boundary, such as invoking an
 official CLI under a constrained protocol, rather than borrowing credentials
@@ -64,8 +64,8 @@ lying with admirable confidence.
 
 | Model | Result | Wall time | Reported usage |
 |---|---|---:|---|
-| Claude Sonnet 5 | exact `GYRFALCON_SONNET_OK` | 3.58 s | 2 ordinary input, 3,505 cache creation, 3,289 cache read, 17 output |
-| GPT-5.6 Terra | exact `GYRFALCON_TERRA_OK` | 4.34 s | 16,171 input, 9,984 cached input, 11 output, 0 reasoning output |
+| Claude Sonnet 5 | exact `DANCHOAI_SONNET_OK` | 3.58 s | 2 ordinary input, 3,505 cache creation, 3,289 cache read, 17 output |
+| GPT-5.6 Terra | exact `DANCHOAI_TERRA_OK` | 4.34 s | 16,171 input, 9,984 cached input, 11 output, 0 reasoning output |
 
 Claude Code reported canonical model `claude-sonnet-5`, a 1,000,000-token
 context window and a 64,000-token maximum output for this subscription run. The
@@ -76,7 +76,7 @@ sentinel and token usage but did not echo a model identifier.
 
 The large input counts demonstrate that official coding-agent CLIs add their
 own system context even for a trivial prompt. These figures therefore describe
-the vendor CLI envelopes, not raw model API overhead and not Gyrfalcon's future
+the vendor CLI envelopes, not raw model API overhead and not DanchoAI's future
 prompt budget.
 
 ## 5. Decision

@@ -29,8 +29,8 @@ Two rules the harness applies to every case, whether or not the case remembers:
   worst combination in this project.
 
 ```console
-gyr eval --model claude-opus
-gyr eval --case fix-type-errors --json
+dancho eval --model claude-opus
+dancho eval --case fix-type-errors --json
 ```
 
 Live runs need a credential, cost money and are not deterministic. They are not
@@ -39,11 +39,11 @@ that need no provider at all.
 
 ## Benchmarking against Claude Code
 
-`scripts/bench.sh <out> <trials> <case>...` runs cases through `gyr` against a
+`scripts/bench.sh <out> <trials> <case>...` runs cases through `dancho` against a
 self-hosted model (`QWEN_API_BASE`, `QWEN_API_KEY`) and through Claude Code as a
 baseline. It writes one result per model, trial and case, so an interrupted run
-can be restarted where it stopped. Pass an ablation to every `gyr` run with
-`GYR_EVAL_ARGS`, for example `--max-diagnostics 3`.
+can be restarted where it stopped. Pass an ablation to every `dancho` run with
+`DANCHO_EVAL_ARGS`, for example `--max-diagnostics 3`.
 
 `scripts/analyse-bench.py <out> --rescore` mines the session logs: tool errors
 by kind, peak prompt against the served context, reasoning share, repeated

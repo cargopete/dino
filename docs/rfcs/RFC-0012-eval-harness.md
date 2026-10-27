@@ -80,7 +80,7 @@ An eval runs unattended, so there is nobody to approve anything. Cases run with
 the allow-all policy.
 
 **Unattended and unconfined is the worst combination in this project**, so
-`gyr eval` requires a working sandbox and refuses to start without one. On a
+`dancho eval` requires a working sandbox and refuses to start without one. On a
 platform where RFC-0009 has no implementation it refuses, and `--sandbox none`
 is available for a person who has read this paragraph and decided anyway. It is
 recorded in every case's log, as everywhere else.
@@ -106,7 +106,7 @@ paid non-deterministic service cannot be trusted to report anything.
 ## 7. Command surface
 
 ```console
-gyr eval [--model KEY] [--case NAME]... [--corpus DIR] [--json]
+dancho eval [--model KEY] [--case NAME]... [--corpus DIR] [--json]
 ```
 
 Cases run in sequence rather than in parallel. Parallel runs would share a
@@ -149,7 +149,7 @@ a credential.
 - A malformed `case.toml` refused with the file named; a case with no
   `workspace/` likewise; and the shipped corpus asserted to parse.
 
-**Observed on 2026-08-27**, driving `gyr eval` against a local fake endpoint:
+**Observed on 2026-08-27**, driving `dancho eval` against a local fake endpoint:
 a passing case reporting `pass fix-type-errors  4 turn(s) · 156 ms ·
 apply_patch x2, gate x1`, and a failing run reporting `nothing in the workspace
 changed`, `src/lib.rs still contains "\"one\""` and `expected a clean build,
@@ -195,7 +195,7 @@ absence of a shell blocks tasks, and precisely one.
 
 The corpus grew to six and ran against `claude-sonnet-5`: 112,942 input and
 4,535 output tokens, about twenty-seven pence, six passes. Every result was
-correct code. Four findings, two of which are about Gyrfalcon rather than about
+correct code. Four findings, two of which are about DanchoAI rather than about
 the model, which is the more useful direction.
 
 **The gate was called in one case out of six.** `rename-across-files` was built
@@ -395,7 +395,7 @@ naming the lines. Every fixture here is under ten files. A finding that search
 is redundant on a ten-file crate is not a finding about search.
 
 **The one `exec` call was in the control arm**, where `list` was available and
-had already been used: `find . -maxdepth 3 -name .gyr`. `list` cannot answer
+had already been used: `find . -maxdepth 3 -name .dancho`. `list` cannot answer
 that, because it respects ignore rules. RFC-0005 section 6.1 has the fix and the
 argument for building it on a single observation.
 
@@ -408,7 +408,7 @@ one is not free.
 ### 9.12 The first time the corpus compared two models
 
 Nine cases against `claude-sonnet-5` and `claude-opus-5`, same build, same day.
-Until now the harness had been used entirely to debug Gyrfalcon and never once
+Until now the harness had been used entirely to debug DanchoAI and never once
 for the thing it is named after.
 
 | | Sonnet | Opus |

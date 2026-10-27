@@ -1,4 +1,4 @@
-"""Mine a bench's session logs for what gyr made hard, and re-score runs that did not complete.
+"""Mine a bench's session logs for what dancho made hard, and re-score runs that did not complete.
 
 usage: python3.12 -I scripts/analyse-bench.py <out_dir> [--rescore] [--context N]
 
@@ -118,7 +118,7 @@ def rescore(case, ws):
     """Run the hidden tests on a copy of the workspace as the model left it."""
     dst = os.path.join(B, "rescore", os.path.basename(os.path.dirname(ws)) + "-" + case)
     shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(ws, dst, ignore=shutil.ignore_patterns(".gyr"))
+    shutil.copytree(ws, dst, ignore=shutil.ignore_patterns(".dancho"))
     shutil.copytree(os.path.join(CORPUS, case, "hidden"), dst, dirs_exist_ok=True)
     r = subprocess.run(["cargo", "test", "--offline", "--workspace", "--no-fail-fast"], cwd=dst, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
     # Only the case's own test files count, not tests the model wrote.
@@ -167,11 +167,11 @@ def main():
             d = json.loads(text.splitlines()[-1])
         row = {"model": model, "trial": int(trial), "case": case,
                "pass": d.get("passed", d.get("pass")), "fails": d.get("failures", d.get("fails"))}
-        # A run through gyr leaves a session log beside its workspace; a Claude
+        # A run through dancho leaves a session log beside its workspace; a Claude
         # Code baseline does not.
         log = os.path.join(B, "work", f"{model}-{trial}", case + ".jsonl")
         if os.path.exists(log):
-            row["gyr"] = True
+            row["dancho"] = True
             row.update(mine(log))
             if "--rescore" in sys.argv and not row["pass"]:
                 row["rescore"] = rescore(case, os.path.join(B, "work", f"{model}-{trial}", case))
@@ -187,10 +187,10 @@ def main():
             rs = r["rescore"]
             note = f"final code {'PASSES' if rs['passes_hidden'] else 'fails'} hidden, tests {rs['tests']}; " + note
         L.append(f"| {r['model']} | {r['trial']} | {r['case']} | {r['pass']} | {r.get('turns')} | {r.get('wall_s')} | {note} |")
-    q = [r for r in runs if r.get("gyr") and "errors" in r]
+    q = [r for r in runs if r.get("dancho") and "errors" in r]
     errs = collections.Counter((e["tool"], e["kind"]) for r in q for e in r["errors"])
-    L += ["", "## gyr tool errors by kind", ""] + [f"- {n} x {t}: {k}" for (t, k), n in errs.most_common()]
-    L += ["", "## gyr runs", ""]
+    L += ["", "## dancho tool errors by kind", ""] + [f"- {n} x {t}: {k}" for (t, k), n in errs.most_common()]
+    L += ["", "## dancho runs", ""]
     for r in q:
         L.append(f"- {r['model']} {r['trial']}/{r['case']}: turns {r['turns']}, model {r['model_s']}s of {r['wall_s']}s, "
                  f"max prompt {r['max_prompt']} ({100 * r['max_prompt'] // CTX}% of ctx), out {r['output_tokens']} "

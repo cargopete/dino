@@ -8,7 +8,7 @@
 
 ## 1. Decision
 
-Gyrfalcon defines a normalised stream of model events but does not define a
+DanchoAI defines a normalised stream of model events but does not define a
 normalised stored model conversation. Each provider adapter owns its native
 session history and continuation handles.
 
@@ -92,7 +92,7 @@ two Claude profiles, which have passed the corpus, are `supported`.
 
 `qwen3:8b` exists so the loop, the tool round trip and the approval path can be
 driven by real inference on a laptop. It is not a coding target, it has not been
-through the conformance suite, and `gyr models` says "development" beside
+through the conformance suite, and `dancho models` says "development" beside
 it.
 
 **Not measured.** The identifier is Ollama's tag format, and Ollama is not a
@@ -102,7 +102,7 @@ rediscovers them at a keyboard. Ollama serves a default context far below the
 model's native window unless `num_ctx` is raised, which silently truncates the
 system prompt and tool schemas rather than failing. And Ollama's
 OpenAI-compatible surface is not known to honour `chat_template_kwargs`, so
-`--no-thinking` may be sent and ignored. The request Gyrfalcon sends has been
+`--no-thinking` may be sent and ignored. The request DanchoAI sends has been
 verified locally; what Ollama does with it has not.
 
 ## 4. OpenAI Responses
@@ -169,7 +169,7 @@ the MVP because it requires continuation of provider server tools, which the
 client-only tool surface does not enable.
 
 Anthropic reports ordinary, cache-creation and cache-read input tokens
-separately. Gyrfalcon's normalised input total is their sum, while cache-read
+separately. DanchoAI's normalised input total is their sum, while cache-read
 tokens are also retained in `cached_input_tokens`. Reasoning token usage is not
 reported separately by this protocol and remains zero rather than being
 estimated.
@@ -228,7 +228,7 @@ separate capability and eval decision.
 `temperature=0.6`, `top_p=0.95`, `top_k=20`, `min_p=0.0`,
 `presence_penalty=0.0` and `repetition_penalty=1.0` for precise coding in
 thinking mode. Non-thinking mode has its own `0.7/0.8/20` set with presence
-penalty `1.5`. Gyrfalcon records both and permits an explicit session override
+penalty `1.5`. DanchoAI records both and permits an explicit session override
 rather than quietly using one set for both modes.
 
 Qwen3.6 normally retains only the latest thinking block. Its documented
@@ -275,7 +275,7 @@ supported.
 
 ### 7.1 The suite, built 2026-08-27
 
-`gyr-model/tests/conformance.rs` drives all three adapters over a real socket
+`dancho-model/tests/conformance.rs` drives all three adapters over a real socket
 with provider-shaped SSE and asserts the same **normalised** events from each.
 Three wires, one semantics, which is the whole claim the `ModelSession` boundary
 makes and which nothing checked until now. Each adapter had tested whatever its
@@ -290,12 +290,12 @@ rest matters more than the count:
 | 1 | Plain streamed answer | conformance suite |
 | 2 | Tool call then answer, result returned | conformance suite |
 | 3 | Several tool calls in one turn | conformance suite |
-| 4 | Tool error returned to the same call ID | `gyr-core` agent tests |
+| 4 | Tool error returned to the same call ID | `dancho-core` agent tests |
 | 5 | Text and tool calls interleaved | conformance suite |
 | 6 | Malformed or truncated arguments | conformance suite |
-| 7 | Duplicate call ID | `gyr-core` agent tests |
+| 7 | Duplicate call ID | `dancho-core` agent tests |
 | 8 | Stream ends without a terminal event | conformance suite |
-| 9 | Cancellation mid-stream | `gyr-core` agent tests |
+| 9 | Cancellation mid-stream | `dancho-core` agent tests |
 | 10 | Continuation after handle loss | RFC-0014 round trips |
 | 11 | Usage and cache accounting | conformance suite |
 | 12 | A long Rust task with compiler feedback | the eval corpus |

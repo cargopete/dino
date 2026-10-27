@@ -342,6 +342,150 @@ dependencies = [
 ]
 
 [[package]]
+name = "dancho-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "dancho-core",
+ "dancho-eval",
+ "dancho-exec",
+ "dancho-model",
+ "dancho-protocol",
+ "dancho-rust",
+ "dancho-sandbox",
+ "dancho-tools",
+ "futures-util",
+ "landlock",
+ "nix",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "terminal_size",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
+name = "dancho-core"
+version = "0.1.0"
+dependencies = [
+ "dancho-model",
+ "dancho-protocol",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "dancho-eval"
+version = "0.1.0"
+dependencies = [
+ "dancho-core",
+ "dancho-exec",
+ "dancho-model",
+ "dancho-protocol",
+ "dancho-rust",
+ "dancho-sandbox",
+ "dancho-tools",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "dancho-exec"
+version = "0.1.0"
+dependencies = [
+ "dancho-core",
+ "dancho-protocol",
+ "dancho-sandbox",
+ "futures-util",
+ "html2text",
+ "nix",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dancho-model"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "dancho-protocol",
+ "futures-core",
+ "futures-util",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "dancho-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dancho-rust"
+version = "0.1.0"
+dependencies = [
+ "dancho-core",
+ "dancho-exec",
+ "dancho-protocol",
+ "dancho-sandbox",
+ "ignore",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "dancho-sandbox"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "thiserror",
+]
+
+[[package]]
+name = "dancho-tools"
+version = "0.1.0"
+dependencies = [
+ "dancho-core",
+ "dancho-protocol",
+ "dancho-sandbox",
+ "globset",
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -553,150 +697,6 @@ dependencies = [
  "log",
  "regex-automata",
  "regex-syntax",
-]
-
-[[package]]
-name = "gyr-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "futures-util",
- "gyr-core",
- "gyr-eval",
- "gyr-exec",
- "gyr-model",
- "gyr-protocol",
- "gyr-rust",
- "gyr-sandbox",
- "gyr-tools",
- "landlock",
- "nix",
- "rustyline",
- "serde",
- "serde_json",
- "terminal_size",
- "tokio",
- "tokio-util",
- "toml",
-]
-
-[[package]]
-name = "gyr-core"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "gyr-model",
- "gyr-protocol",
- "pretty_assertions",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "gyr-eval"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "gyr-core",
- "gyr-exec",
- "gyr-model",
- "gyr-protocol",
- "gyr-rust",
- "gyr-sandbox",
- "gyr-tools",
- "pretty_assertions",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "gyr-exec"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "gyr-core",
- "gyr-protocol",
- "gyr-sandbox",
- "html2text",
- "nix",
- "pretty_assertions",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "gyr-model"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "futures-core",
- "futures-util",
- "gyr-protocol",
- "pretty_assertions",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "gyr-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "gyr-rust"
-version = "0.1.0"
-dependencies = [
- "gyr-core",
- "gyr-exec",
- "gyr-protocol",
- "gyr-sandbox",
- "ignore",
- "pretty_assertions",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
-name = "gyr-sandbox"
-version = "0.1.0"
-dependencies = [
- "pretty_assertions",
- "thiserror",
-]
-
-[[package]]
-name = "gyr-tools"
-version = "0.1.0"
-dependencies = [
- "globset",
- "gyr-core",
- "gyr-protocol",
- "gyr-sandbox",
- "ignore",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
 ]
 
 [[package]]
