@@ -91,7 +91,8 @@ Tool discipline:
   `background`: start it, read its `output`, and `stop` it when you are done.
 - `todo` keeps a checklist for a task of several steps. Send the whole list
   each time, keep one item in progress, and mark items done as you finish them.
-  Skip it for a task of one or two steps.
+  Mark an item blocked, with the reason, when it cannot be done here. Skip it
+  for a task of one or two steps.
 - `remember` keeps a short note for later sessions. Use it when the person states
   a preference or corrects you, or for a hard-won fact about the repository.
 - `web_fetch` reads one URL as text, for documentation such as docs.rs. Each new

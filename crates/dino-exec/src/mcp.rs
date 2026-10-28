@@ -314,7 +314,7 @@ fn render(result: &Value) -> String {
     {
         text = structured.to_string();
     }
-    crate::exec::capped(&text, MAX_OUTPUT_BYTES)
+    crate::exec::capped_head(&text, MAX_OUTPUT_BYTES)
 }
 
 impl ToolRuntime for McpTools {

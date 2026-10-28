@@ -142,6 +142,52 @@ async fn a_type_error_arrives_parsed_with_its_code_and_location() {
 }
 
 #[tokio::test]
+async fn a_build_that_fails_before_compiling_counts_as_an_error() {
+    let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
+    let manifest = fixture.path.join("Cargo.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("[dependencies]\nmissing = { path = \"no-such-crate\" }\n");
+    fs::write(&manifest, text).unwrap();
+
+    let output = fixture
+        .tool()
+        .execute(&call(json!({"command": "build"})))
+        .await
+        .unwrap();
+    let output = parse(&output);
+
+    assert_ne!(output["exit_code"], 0);
+    assert_eq!(output["counts"]["errors"], 1);
+    assert!(
+        output["output"].as_str().unwrap().contains("no-such-crate"),
+        "cargo's own error must be returned: {}",
+        output["output"]
+    );
+}
+
+#[tokio::test]
+async fn a_long_failing_test_run_keeps_its_summary() {
+    let fixture = Fixture::new(
+        "#[test]\nfn noisy() {\n    for n in 0..4_000 { println!(\"line {n} of noise\"); }\n    panic!(\"the failure\");\n}\n",
+    );
+
+    let output = fixture
+        .tool()
+        .execute(&call(json!({"command": "test"})))
+        .await
+        .unwrap();
+    let output = parse(&output);
+    let text = output["output"].as_str().unwrap();
+
+    assert_eq!(output["truncated"], true);
+    assert!(text.contains("bytes omitted"), "{text}");
+    assert!(
+        text.contains("test result: FAILED"),
+        "the summary was cut: {text}"
+    );
+}
+
+#[tokio::test]
 async fn metadata_is_summarised_rather_than_returned_whole() {
     let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
 

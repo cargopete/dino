@@ -147,9 +147,12 @@ CI and evals.
   sandbox unless `sandbox = false`, which the session banner says. Remote
   servers and catalogues stay out (RFC-0017 §5).
 - **Hooks.** `[[hooks]]` in the user file run after the file tools edit a file,
-  inside the sandbox, with `{path}` for the file and an optional `extension`:
-  `command = ["rustfmt", "--edition", "2024", "{path}"]` with `extension = "rs"`
-  formats every Rust edit. The tool result says what ran, and says so when a
+  inside the sandbox, with `{path}` for the file and an optional `extension`.
+  With `extension = "rs"`, this formats every Rust edit:
+  `command = ["sh", "-c", "rustfmt --edition 2024 --emit stdout < \"$1\" > \"$1.fmt\" && mv \"$1.fmt\" \"$1\"; s=$?; rm -f \"$1.fmt\"; exit $s", "sh", "{path}"]`.
+  It goes through standard input because `rustfmt {path}` follows `mod`
+  declarations: it fails on a parent written before its children, and
+  reformats children the model has not touched. The tool result says what ran, and says so when a
   hook changed the file, so the model reads it again before the next edit. A
   `before_end_turn` hook must pass before the model ends its turn, or it is sent
   back once with the output (`cargo clippy` makes a good one); a

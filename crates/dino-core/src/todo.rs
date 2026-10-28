@@ -29,6 +29,8 @@ pub enum Status {
     Pending,
     InProgress,
     Done,
+    /// Cannot be done here; the item carries the reason.
+    Blocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -36,6 +38,8 @@ pub enum Status {
 pub struct Item {
     pub text: String,
     pub status: Status,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,10 +66,21 @@ pub fn items(arguments: &Value) -> Result<Vec<Item>, ToolError> {
     if request.items.iter().any(|item| item.text.trim().is_empty()) {
         return Err(ToolError::new("every item needs text"));
     }
+    if request.items.iter().any(|item| {
+        item.status == Status::Blocked
+            && item
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+    }) {
+        return Err(ToolError::new(
+            "a blocked item needs a reason saying what stops it",
+        ));
+    }
     Ok(request.items)
 }
 
-/// One line per item: `[x]` done, `[~]` in progress, `[ ]` pending.
+/// One line per item: `[x]` done, `[~]` in progress, `[ ]` pending, `[!]` blocked.
 #[must_use]
 pub fn render(items: &[Item]) -> String {
     let mut text = String::new();
@@ -74,8 +89,13 @@ pub fn render(items: &[Item]) -> String {
             Status::Done => "[x]",
             Status::InProgress => "[~]",
             Status::Pending => "[ ]",
+            Status::Blocked => "[!]",
         };
-        let _ = writeln!(&mut text, "{mark} {}", item.text.trim());
+        let _ = write!(&mut text, "{mark} {}", item.text.trim());
+        if let (Status::Blocked, Some(reason)) = (item.status, &item.reason) {
+            let _ = write!(&mut text, " (blocked: {})", reason.trim());
+        }
+        text.push('\n');
     }
     text
 }
@@ -85,8 +105,9 @@ impl ToolRuntime for TodoTool {
         vec![ToolDefinition {
             name: TODO.into(),
             description: "Keep a short checklist for a task with several steps. Send the whole \
-                          list every time, with each item pending, in_progress or done. Mark one \
-                          in_progress while you work on it and done as soon as it is finished. \
+                          list every time, with each item pending, in_progress, done or blocked. Mark \
+                          one in_progress while you work on it and done as soon as it is finished. \
+                          Mark an item blocked, with a reason, only when it cannot be done here. \
                           The person sees the list as it changes."
                 .into(),
             input_schema: json!({
@@ -101,7 +122,11 @@ impl ToolRuntime for TodoTool {
                                 "text": {"type": "string", "minLength": 1},
                                 "status": {
                                     "type": "string",
-                                    "enum": ["pending", "in_progress", "done"]
+                                    "enum": ["pending", "in_progress", "done", "blocked"]
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "For a blocked item: what stops it."
                                 }
                             },
                             "required": ["text", "status"],
@@ -125,12 +150,14 @@ impl ToolRuntime for TodoTool {
 
     fn execute(&self, call: &ToolCall) -> ToolFuture<'_> {
         let result = items(&call.arguments).map(|items| {
-            let done = items
-                .iter()
-                .filter(|item| item.status == Status::Done)
-                .count();
+            let count = |status| items.iter().filter(|item| item.status == status).count();
+            let blocked = match count(Status::Blocked) {
+                0 => String::new(),
+                n => format!(", {n} blocked"),
+            };
             ToolOutput::success(format!(
-                "Checklist updated: {done} of {} done.\n{}",
+                "Checklist updated: {} of {} done{blocked}.\n{}",
+                count(Status::Done),
                 items.len(),
                 render(&items)
             ))
@@ -168,11 +195,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_blocked_item_shows_its_reason() {
+        let output = TodoTool
+            .execute(&call(json!({"items": [
+                {"text": "Build it", "status": "done"},
+                {"text": "Push it", "status": "blocked", "reason": "no network"}
+            ]})))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.content,
+            "Checklist updated: 1 of 2 done, 1 blocked.\n[x] Build it\n[!] Push it (blocked: no network)\n"
+        );
+    }
+
     #[test]
     fn empty_text_and_unknown_statuses_are_refused() {
         for arguments in [
             json!({"items": [{"text": " ", "status": "done"}]}),
             json!({"items": [{"text": "x", "status": "blocked"}]}),
+            json!({"items": [{"text": "x", "status": "blocked", "reason": " "}]}),
+            json!({"items": [{"text": "x", "status": "stuck"}]}),
             json!({"items": "x"}),
         ] {
             assert!(
