@@ -10,6 +10,7 @@ mod diagnostics;
 mod edit_check;
 mod finish;
 mod gate;
+pub mod outline;
 
 pub use crate::cargo::CargoLimits;
 pub use crate::cargo::CargoTool;

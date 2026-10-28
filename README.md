@@ -112,11 +112,21 @@ CI and evals.
   summarisation: no extra request, deterministic, and it does not quietly
   rewrite what the model believes happened. Summarising is `/compact`, asked
   for by a person and starting a fresh conversation, never done behind one.
+- **An outline of the workspace.** In a Cargo workspace the system prompt lists
+  each Rust file with its public items, found by a line scan and capped at 4 KiB,
+  so the model can go straight to a file instead of listing and searching first.
 - **Instructions.** `~/.config/dino/instructions.md` for your own rules, then
-  the repository's `AGENTS.md` and `.dino/instructions.md`, each capped at 16 KiB
+  any `AGENTS.md` between the git repository's root and a workspace inside it,
+  outermost first, then the workspace's `AGENTS.md` and `.dino/instructions.md`,
+  each capped at 16 KiB
   and named when a session starts. They go below the built-in rules and cannot
   change approvals or the sandbox. Evals read none of them, so a personal file
   cannot move a measurement.
+- **Review.** `dino review` reviews the uncommitted changes, and `dino review
+  --base main` the commits since a base, for correctness bugs or a `--focus` of
+  your own. Dino takes the diff itself and runs the model read-only, so a review
+  cannot change anything; findings come back as `path:line` with the input that
+  shows each one.
 - **Handover for long tasks.** `dino run --handover` has the model keep a plan in
   a `progress` tool and hands the task to a fresh session when one reaches
   `--session-turns` (16) or stops with items pending, at most four sessions and
