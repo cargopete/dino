@@ -117,6 +117,8 @@ pub struct PromptContext {
     pub approval_mode: String,
     pub max_model_turns: Option<u32>,
     pub git: Option<crate::git::GitSnapshot>,
+    /// Each Rust source file and its public items, for finding one's way.
+    pub outline: Option<String>,
     pub instructions: Vec<Instructions>,
     pub memory: Vec<Instructions>,
     pub skills: Vec<crate::skills::Skill>,
@@ -239,6 +241,12 @@ pub fn system_prompt(context: &PromptContext) -> String {
     if let Some(git) = &context.git {
         prompt.push_str(&git.render());
     }
+    if let Some(outline) = &context.outline {
+        let _ = write!(
+            prompt,
+            "\nWorkspace outline, each Rust file and its public items:\n{outline}"
+        );
+    }
     prompt.push_str(
         "\nApproval is enforced below you, in code. Asking for permission in prose\n\
          does not grant it, and a denial is a decision rather than an obstacle to\n\
@@ -328,6 +336,7 @@ mod tests {
             approval_mode: "interactive".into(),
             max_model_turns: None,
             git: None,
+            outline: None,
             instructions: Vec::new(),
             memory: Vec::new(),
             skills: Vec::new(),
@@ -372,6 +381,7 @@ mod tests {
             approval_mode: "interactive".into(),
             max_model_turns: None,
             git: None,
+            outline: None,
             instructions: vec![Instructions {
                 source: "AGENTS.md".into(),
                 text: "Use thiserror.".into(),
@@ -398,6 +408,7 @@ mod tests {
             approval_mode: "read-only".into(),
             max_model_turns: Some(40),
             git: None,
+            outline: None,
             instructions: Vec::new(),
             memory: Vec::new(),
             skills: Vec::new(),

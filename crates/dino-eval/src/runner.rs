@@ -542,6 +542,7 @@ fn eval_session(
         approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
         max_model_turns: Some(case.max_turns),
         git: None,
+        outline: dino_rust::outline::outline(workspace),
         // None, so a user's own instructions cannot move a measurement.
         instructions: Vec::new(),
         memory: Vec::new(),

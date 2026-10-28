@@ -421,6 +421,7 @@ fn prompt_context(
         approval_mode: mode.label().to_owned(),
         max_model_turns,
         git: dino_core::git::GitSnapshot::take(workspace),
+        outline: dino_rust::outline::outline(workspace),
         memory: memory_files(workspace)
             .map(|files| dino_core::prompt::load_memory(&files))
             .unwrap_or_default(),

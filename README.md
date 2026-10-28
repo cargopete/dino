@@ -112,6 +112,9 @@ CI and evals.
   summarisation: no extra request, deterministic, and it does not quietly
   rewrite what the model believes happened. Summarising is `/compact`, asked
   for by a person and starting a fresh conversation, never done behind one.
+- **An outline of the workspace.** In a Cargo workspace the system prompt lists
+  each Rust file with its public items, found by a line scan and capped at 4 KiB,
+  so the model can go straight to a file instead of listing and searching first.
 - **Instructions.** `~/.config/dino/instructions.md` for your own rules, then
   any `AGENTS.md` between the git repository's root and a workspace inside it,
   outermost first, then the workspace's `AGENTS.md` and `.dino/instructions.md`,
