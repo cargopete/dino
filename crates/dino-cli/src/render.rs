@@ -469,21 +469,29 @@ impl Renderer {
     }
 }
 
+impl Renderer {
+    fn submitted(&mut self, text: &str) -> Result<(), SinkError> {
+        self.break_stream()?;
+        self.started = Some(std::time::Instant::now());
+        self.calls.clear();
+        self.asked.clear();
+        if let Ok(mut status) = self.status.lock() {
+            status.input = 0;
+            status.output = 0;
+        }
+        submitted(text)
+    }
+}
+
 impl EventSink for Renderer {
     fn emit(&mut self, event: &AgentEvent) -> Result<(), SinkError> {
         self.tick(event)?;
         match event {
             // The person's own words, in the person's colour.
-            AgentEvent::Submitted { text } => {
+            AgentEvent::Submitted { text } => self.submitted(text),
+            AgentEvent::Steered { text, .. } => {
                 self.break_stream()?;
-                self.started = Some(std::time::Instant::now());
-                self.calls.clear();
-                self.asked.clear();
-                if let Ok(mut status) = self.status.lock() {
-                    status.input = 0;
-                    status.output = 0;
-                }
-                submitted(text)
+                steered(text)
             }
             AgentEvent::Model { event, .. } => self.model_event(event),
             AgentEvent::ToolDecided {
@@ -823,6 +831,12 @@ fn argument_number(arguments: &Value, key: &str) -> Option<u64> {
 
 /// The first line of a submission and how many follow. Attachments, summaries
 /// and pastes can run to pages; the log keeps them whole.
+/// A message typed during the run, as it goes to the model.
+fn steered(text: &str) -> Result<(), SinkError> {
+    write_out(&style::paint(RUST, &format!("› {text}\n")))?;
+    write_out(&style::paint(FAINT, "  sent with the latest results\n"))
+}
+
 fn submitted(text: &str) -> Result<(), SinkError> {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or_default();

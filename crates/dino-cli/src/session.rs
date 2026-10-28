@@ -304,6 +304,10 @@ pub struct Session<S> {
     pub context_full: Arc<std::sync::atomic::AtomicBool>,
     /// The status row's figures, told which model is answering.
     pub status: Arc<Mutex<crate::spinner::Status>>,
+    /// Messages typed during a run, shared with the agent, which delivers them.
+    pub inbox: dino_core::Inbox,
+    /// Typed during the last run and not entered, to start the next prompt with.
+    pub typed_ahead: String,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -351,7 +355,8 @@ where
             // Blocking on purpose. Nothing else is running while a person is
             // typing, and moving the editor across a spawn_blocking boundary
             // every keystroke would buy nothing.
-            let typed = crate::style::take_typeahead();
+            let mut typed = std::mem::take(&mut self.typed_ahead);
+            typed.push_str(&crate::style::take_typeahead());
             match editor.readline_with_initial(&prompt, (&typed, "")) {
                 Ok(line) => {
                     let _ = editor.add_history_entry(line.as_str());
@@ -533,6 +538,17 @@ where
         if let Some(run) = &run {
             self.recall.absorb(&run.events);
         }
+        // Entered during the run but never delivered, because no tool result
+        // came after it: the next submission, in the order typed.
+        let undelivered = self
+            .inbox
+            .lock()
+            .map(|mut inbox| std::mem::take(&mut *inbox))
+            .unwrap_or_default();
+        if !undelivered.is_empty() {
+            Box::pin(self.submit(undelivered.join("\n\n"))).await;
+            return;
+        }
         let full = self
             .context_full
             .swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -567,7 +583,19 @@ where
             }
         });
 
+        let listener = crate::listen::Listener::start(
+            cancel.clone(),
+            Arc::clone(&self.inbox),
+            Arc::clone(&self.status),
+        );
         let result = self.agent.run_cancellable(text, &cancel).await;
+        self.typed_ahead = listener
+            .map(crate::listen::Listener::stop)
+            .unwrap_or_default();
+        if let Ok(mut status) = self.status.lock() {
+            status.typed.clear();
+            status.queued = 0;
+        }
 
         // Aborted so a stale handler cannot cancel the next submission.
         interrupt.abort();

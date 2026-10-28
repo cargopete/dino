@@ -6,6 +6,7 @@ mod config;
 mod diff;
 mod evals;
 mod handover;
+mod listen;
 mod markdown;
 mod probe;
 mod recall;
@@ -645,8 +646,11 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         let model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
         Ok((model, name))
     });
+    let inbox = dino_core::Inbox::default();
     let mut session = Session {
-        agent: prepared.agent,
+        agent: prepared.agent.with_inbox(std::sync::Arc::clone(&inbox)),
+        inbox,
+        typed_ahead: String::new(),
         usage: prepared.usage,
         requests: prepared.requests,
         factory,
