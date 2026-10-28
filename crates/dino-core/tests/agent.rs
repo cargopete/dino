@@ -1160,6 +1160,28 @@ async fn each_submission_may_be_sent_back_once() {
     assert_eq!(sent_back(&second), vec![1]);
 }
 
+#[tokio::test]
+async fn one_answer_can_cover_every_call_of_a_turn() {
+    let (approver, asked) = ScriptedApprover::new(vec![ApprovalReply::ForTurn]);
+    let both = Turn::Events(vec![
+        ModelEvent::ToolCallCompleted {
+            call: tool_call("call-1", "apply_patch", "notes.md"),
+        },
+        ModelEvent::ToolCallCompleted {
+            call: tool_call("call-2", "apply_patch", "todo.md"),
+        },
+        ModelEvent::Finished {
+            reason: StopReason::ToolUse,
+        },
+    ]);
+    let mut agent = agent(vec![both, text_turn("done")]).with_policy(Interactive::new(approver));
+
+    agent.run("edit both").await.unwrap();
+
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert_eq!(agent.tools().executed_names().len(), 2);
+}
+
 #[derive(Default, Clone)]
 struct MemoryStore {
     rules: Arc<Mutex<Vec<String>>>,
