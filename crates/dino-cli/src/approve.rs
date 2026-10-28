@@ -12,6 +12,10 @@ use std::io::stdin;
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use dino_core::approval::ApprovalReply;
 use dino_core::approval::Approver;
@@ -30,6 +34,7 @@ use crate::style::RUST;
 #[derive(Debug, Clone)]
 pub struct TerminalApprover {
     sandbox: String,
+    caveat_shown: Arc<AtomicBool>,
 }
 
 impl TerminalApprover {
@@ -37,6 +42,7 @@ impl TerminalApprover {
     pub fn new(sandbox: impl Into<String>) -> Self {
         Self {
             sandbox: sandbox.into(),
+            caveat_shown: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -48,8 +54,10 @@ impl Approver for TerminalApprover {
         let tool = call.name.clone();
         let class = action.class;
         let sandbox = self.sandbox.clone();
+        let caveat_shown = Arc::clone(&self.caveat_shown);
         Box::pin(async move {
-            let prompt = move || ask_on_terminal(&summary, &tool, &subject, class, &sandbox);
+            let prompt =
+                move || ask_on_terminal(&summary, &tool, &subject, class, &caveat_shown, &sandbox);
             match tokio::task::spawn_blocking(prompt).await {
                 Ok(reply) => reply,
                 Err(error) => {
@@ -60,6 +68,9 @@ impl Approver for TerminalApprover {
     }
 }
 
+/// The choices, in the order the selector shows them, with their keys.
+const CHOICES: [(char, &str); 4] = [('y', "once"), ('a', ""), ('r', "remember"), ('n', "refuse")];
+
 /// Asks on the terminal and refuses on anything that is not a clear yes.
 ///
 /// A closed or non-interactive standard input reaches the same place: refusal.
@@ -69,6 +80,7 @@ fn ask_on_terminal(
     tool: &str,
     subject: &str,
     class: ToolClass,
+    caveat_shown: &AtomicBool,
     sandbox: &str,
 ) -> ApprovalReply {
     let mut err = stderr().lock();
@@ -76,13 +88,14 @@ fn ask_on_terminal(
     let header = style::paint_with(RUST, &[BOLD], "  approval");
     let detail = style::paint(FAINT, &format!("      rule scope: {tool} on {subject}"));
     let (always, caveat) = match class {
+        // The containment line is the same every time, so it is said once.
         ToolClass::Process => (
-            "always for this exact command",
-            // Worth saying every time. A rule approves an argument vector, and
-            // the code that vector compiles and runs can change afterwards.
-            Some(format!(
-                "      runs code on your machine · containment: {sandbox} · what it runs may change"
-            )),
+            "always for this command",
+            (!caveat_shown.swap(true, Ordering::Relaxed)).then(|| {
+                format!(
+                    "      runs code on your machine · containment: {sandbox} · what it runs may change"
+                )
+            }),
         ),
         ToolClass::Network => (
             "always for this host",
@@ -92,19 +105,146 @@ fn ask_on_terminal(
         ),
         _ => ("always for this file", None),
     };
-    let question = style::paint(
-        FAINT,
-        &format!("      [y] once   [a] {always}   [r] remember for this workspace   [n] refuse: "),
-    );
     let written = writeln!(err, "\n{header}  {summary}")
         .and_then(|()| writeln!(err, "{detail}"))
         .and_then(|()| match &caveat {
             Some(caveat) => writeln!(err, "{}", style::paint(FAINT, caveat)),
             None => Ok(()),
         })
-        .and_then(|()| write!(err, "{question}"))
         .and_then(|()| err.flush());
     if written.is_err() {
+        return ApprovalReply::Reject(Some("could not present the approval prompt".into()));
+    }
+    drop(err);
+
+    let labels = CHOICES.map(|(key, label)| (key, if label.is_empty() { always } else { label }));
+    if stdin().is_terminal()
+        && stderr().is_terminal()
+        && let Some(reply) = select(&labels)
+    {
+        return reply;
+    }
+    read_typed_answer(&labels)
+}
+
+/// The selector: arrows or tab move, enter confirms, a choice's key answers at
+/// once, and esc or ctrl-c refuses. Keys typed before the prompt appeared are
+/// discarded, and any other key is ignored rather than taken as a refusal.
+/// `None` when the terminal cannot be put into raw mode.
+fn select(labels: &[(char, &str); 4]) -> Option<ApprovalReply> {
+    use crossterm::event::Event;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEventKind;
+    use crossterm::event::KeyModifiers;
+    use crossterm::event::poll;
+    use crossterm::event::read;
+    use crossterm::terminal;
+
+    terminal::enable_raw_mode().ok()?;
+    let raw = RawGuard;
+    while poll(Duration::ZERO).unwrap_or(false) {
+        let _ = read();
+    }
+
+    let mut current = 0usize;
+    let chosen = loop {
+        draw_choices(labels, current);
+        let Ok(Event::Key(key)) = read() else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break 3,
+            KeyCode::Esc => break 3,
+            KeyCode::Enter => break current,
+            KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+                current = (current + labels.len() - 1) % labels.len();
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+                current = (current + 1) % labels.len();
+            }
+            KeyCode::Char(typed) => {
+                if let Some(index) = labels
+                    .iter()
+                    .position(|(key, _)| *key == typed.to_ascii_lowercase())
+                {
+                    break index;
+                }
+            }
+            _ => {}
+        }
+    };
+    draw_choices(labels, chosen);
+    let mut err = stderr();
+    let _ = write!(err, "\r\n");
+    let _ = err.flush();
+    drop(raw);
+
+    Some(match chosen {
+        0 => ApprovalReply::Once,
+        1 => ApprovalReply::ForSession,
+        2 => ApprovalReply::Remember,
+        _ => ApprovalReply::Reject(Some(refusal_reason())),
+    })
+}
+
+/// Restores the terminal however the selector exits.
+struct RawGuard;
+
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+fn draw_choices(labels: &[(char, &str); 4], current: usize) {
+    let mut line = String::from("      ");
+    for (index, (key, label)) in labels.iter().enumerate() {
+        let text = format!("[{key}] {label}");
+        if index == current {
+            line.push_str(&style::paint_with(RUST, &[BOLD], &format!("› {text}")));
+        } else {
+            line.push_str(&style::paint(FAINT, &format!("  {text}")));
+        }
+        line.push_str("  ");
+    }
+    let mut err = stderr();
+    let _ = write!(err, "\r\x1b[2K{line}");
+    let _ = err.flush();
+}
+
+/// What the person wants done instead, passed to the model with the refusal.
+fn refusal_reason() -> String {
+    let mut err = stderr();
+    let _ = write!(
+        err,
+        "{}",
+        style::paint(FAINT, "      what should it do instead? (enter to skip): ")
+    );
+    let _ = err.flush();
+    let mut reason = String::new();
+    let _ = stdin().lock().read_line(&mut reason);
+    match reason.trim() {
+        "" => "the operator refused this action".to_owned(),
+        reason => format!("the operator refused this action: {reason}"),
+    }
+}
+
+/// For a pipe or a terminal that cannot go raw: one typed line, where only a
+/// clear answer approves.
+fn read_typed_answer(labels: &[(char, &str); 4]) -> ApprovalReply {
+    let mut err = stderr().lock();
+    let options: Vec<String> = labels
+        .iter()
+        .map(|(key, label)| format!("[{key}] {label}"))
+        .collect();
+    let question = style::paint(FAINT, &format!("      {}: ", options.join("   ")));
+    if write!(err, "{question}")
+        .and_then(|()| err.flush())
+        .is_err()
+    {
         return ApprovalReply::Reject(Some("could not present the approval prompt".into()));
     }
 
