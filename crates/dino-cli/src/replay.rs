@@ -60,7 +60,7 @@ pub fn run(args: &ReplayArgs) -> Result<ExitCode> {
     let events = collect_events(&records, &path)?;
     let events = trim_to_last(events, args.last);
 
-    let mut renderer = Renderer::new(true);
+    let mut renderer = Renderer::new(true).replaying();
     for event in &events {
         renderer
             .emit(event)

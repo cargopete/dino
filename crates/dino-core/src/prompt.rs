@@ -71,7 +71,8 @@ Tool discipline:
 - `apply_patch` replaces one exact occurrence. If the text you intend to replace
   is not unique, include enough surrounding context to make it unique rather
   than guessing which occurrence the tool will choose. It will not guess either.
-  A replacement that leaves the file unchanged is an error.
+  A replacement that leaves the file unchanged is an error. Several changes to
+  one file go in one call, as `edits`, rather than one call each.
 - `write_file` creates a file, with any missing directories. Use it for new
   files instead of writing them through `exec`. An existing file must have
   been read before it is replaced whole.
@@ -84,7 +85,9 @@ Tool discipline:
 - `cargo` returns parsed diagnostics. Read the `counts`, which describe the whole
   run, before reading the `diagnostics` list, which may have been capped;
   `dropped_diagnostics` says how many are missing. A green build with no
-  material change is not success.
+  material change is not success. The last Rust edit of each response carries
+  `cargo_check`, the counts and the errors in the files you edited, so there is
+  no need to run `cargo check` straight after an edit.
 - Add Rust dependencies with `cargo` command `add`, not by writing versions into
   `Cargo.toml` from memory: remembered versions are often a major release old.
   Its `added` field names the versions it chose; write code for those versions,
@@ -125,6 +128,8 @@ pub struct PromptContext {
     pub approval_mode: String,
     pub max_model_turns: Option<u32>,
     pub git: Option<crate::git::GitSnapshot>,
+    /// Each Rust source file and its public items, for finding one's way.
+    pub outline: Option<String>,
     pub instructions: Vec<Instructions>,
     pub memory: Vec<Instructions>,
     pub skills: Vec<crate::skills::Skill>,
@@ -144,13 +149,40 @@ pub struct Instructions {
 #[must_use]
 pub fn load_instructions(user_file: Option<&Path>, workspace: &Path) -> Vec<Instructions> {
     let user = user_file.map(|path| (path.display().to_string(), path.to_path_buf()));
+    // A workspace inside a repository also gets the AGENTS.md files between the
+    // repository root and itself, outermost first, so the nearest speaks last.
+    let enclosing = enclosing_dirs(workspace).into_iter().map(|dir| {
+        let path = dir.join("AGENTS.md");
+        (path.display().to_string(), path)
+    });
     let project = PROJECT_INSTRUCTIONS
         .iter()
         .map(|name| ((*name).to_owned(), workspace.join(name)));
     user.into_iter()
+        .chain(enclosing)
         .chain(project)
         .filter_map(|(source, path)| read_capped(source, &path))
         .collect()
+}
+
+/// The directories above `workspace` up to the root of the git repository
+/// holding it, outermost first. Empty when the workspace is the repository root
+/// or is not inside one.
+fn enclosing_dirs(workspace: &Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if workspace.join(".git").exists() {
+        return dirs;
+    }
+    let mut current = workspace.parent();
+    while let Some(dir) = current {
+        dirs.push(dir.to_path_buf());
+        if dir.join(".git").exists() {
+            dirs.reverse();
+            return dirs;
+        }
+        current = dir.parent();
+    }
+    Vec::new()
 }
 
 /// The user's and this workspace's memory files, as they will appear.
@@ -220,6 +252,12 @@ pub fn system_prompt(context: &PromptContext) -> String {
     if let Some(git) = &context.git {
         prompt.push_str(&git.render());
     }
+    if let Some(outline) = &context.outline {
+        let _ = write!(
+            prompt,
+            "\nWorkspace outline, each Rust file and its public items:\n{outline}"
+        );
+    }
     prompt.push_str(
         "\nApproval is enforced below you, in code. Asking for permission in prose\n\
          does not grant it, and a denial is a decision rather than an obstacle to\n\
@@ -281,6 +319,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agents_files_between_the_repository_root_and_the_workspace_are_read_outermost_first() {
+        let root = std::env::temp_dir().join(format!("dino-nested-{}", std::process::id()));
+        let workspace = root.join("crates").join("app");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "root rules").unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "app rules").unwrap();
+
+        let texts: Vec<String> = load_instructions(None, &workspace)
+            .into_iter()
+            .map(|instructions| instructions.text)
+            .collect();
+        assert_eq!(texts, ["root rules", "app rules"]);
+        assert!(
+            load_instructions(None, &root).len() == 1,
+            "the root is read once"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn caps_an_over_long_workspace_root() {
         let context = PromptContext {
             workspace_root: "/ø".repeat(400),
@@ -288,6 +347,7 @@ mod tests {
             approval_mode: "interactive".into(),
             max_model_turns: None,
             git: None,
+            outline: None,
             instructions: Vec::new(),
             memory: Vec::new(),
             skills: Vec::new(),
@@ -332,6 +392,7 @@ mod tests {
             approval_mode: "interactive".into(),
             max_model_turns: None,
             git: None,
+            outline: None,
             instructions: vec![Instructions {
                 source: "AGENTS.md".into(),
                 text: "Use thiserror.".into(),
@@ -358,6 +419,7 @@ mod tests {
             approval_mode: "read-only".into(),
             max_model_turns: Some(40),
             git: None,
+            outline: None,
             instructions: Vec::new(),
             memory: Vec::new(),
             skills: Vec::new(),

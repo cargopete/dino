@@ -241,6 +241,10 @@ pub struct ToolAction {
     pub class: ToolClass,
     /// A resolved, workspace-relative target where the tool has one.
     pub subject: Option<String>,
+    /// Set when a process asks to run outside the sandbox: the model's reason.
+    /// Such a call is asked about every time and no rule ever covers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unconfined: Option<String>,
 }
 
 impl ToolAction {
@@ -249,6 +253,7 @@ impl ToolAction {
         Self {
             class: ToolClass::ReadOnly,
             subject: None,
+            unconfined: None,
         }
     }
 
@@ -257,6 +262,7 @@ impl ToolAction {
         Self {
             class: ToolClass::Mutating,
             subject: Some(subject.into()),
+            unconfined: None,
         }
     }
 
@@ -265,6 +271,17 @@ impl ToolAction {
         Self {
             class: ToolClass::Process,
             subject: Some(subject.into()),
+            unconfined: None,
+        }
+    }
+
+    /// A process that asks to run outside the sandbox, for `reason`.
+    #[must_use]
+    pub fn unconfined_process(subject: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            class: ToolClass::Process,
+            subject: Some(subject.into()),
+            unconfined: Some(reason.into()),
         }
     }
 
@@ -273,6 +290,7 @@ impl ToolAction {
         Self {
             class: ToolClass::Network,
             subject: Some(host.into()),
+            unconfined: None,
         }
     }
 
@@ -282,6 +300,12 @@ impl ToolAction {
     /// from any rendered description of the action.
     #[must_use]
     pub fn rule_key(&self, tool: &str) -> String {
+        if self.unconfined.is_some() {
+            return format!(
+                "{tool}\u{1f}unconfined\u{1f}{}",
+                self.subject.as_deref().unwrap_or("")
+            );
+        }
         match &self.subject {
             Some(subject) => format!("{tool}\u{1f}{subject}"),
             None => tool.to_owned(),
@@ -372,6 +396,12 @@ pub enum AgentEvent {
         /// Catalogue size, when the served window is the smaller one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         documented_tokens: Option<u32>,
+    },
+    /// What the person typed while the model worked, delivered with the next
+    /// tool results rather than waiting for the run to end.
+    Steered {
+        model_turn: u32,
+        text: String,
     },
     /// A long task moved to a fresh session, carried by its progress record.
     /// RFC-0018 section 5.

@@ -1,0 +1,17 @@
+name = "slugify-unprompted"
+prompt = """
+Add `pub fn slugify(title: &str) -> String` to `src/lib.rs`, for turning a post \
+title into the URL slug that follows the date prefix. It lowercases ASCII letters \
+and keeps ASCII digits. Every other character, spaces, punctuation and non-ASCII \
+letters alike, separates words, except an apostrophe, which is dropped so that \
+"Don't panic" becomes "dont-panic". Words are joined by a single hyphen, with none \
+at either end. A slug is at most 60 bytes; cut a longer one there, and drop any \
+hyphen the cut leaves at the end. A title with nothing usable gives an empty slug.
+"""
+max_turns = 20
+
+# The brief never mentions tests. Writing and running them is the point.
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+new_tests = 1

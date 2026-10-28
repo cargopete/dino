@@ -191,7 +191,10 @@ impl WorkspaceTools {
             },
             ToolDefinition {
                 name: "apply_patch".into(),
-                description: "Replace one exact UTF-8 string in a previously read workspace file."
+                description: "Replace exact UTF-8 text in a previously read workspace file: one \
+                              old_text with new_text, or several replacements at once in edits. \
+                              Each old_text must occur exactly once in the file as it was before \
+                              the call, and edits may not overlap."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -205,9 +208,24 @@ impl WorkspaceTools {
                                             or wrote it."
                         },
                         "old_text": {"type": "string", "minLength": 1},
-                        "new_text": {"type": "string"}
+                        "new_text": {"type": "string"},
+                        "edits": {
+                            "type": "array",
+                            "minItems": 1,
+                            "description": "Several replacements in this file, in place of \
+                                            old_text and new_text.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_text": {"type": "string", "minLength": 1},
+                                    "new_text": {"type": "string"}
+                                },
+                                "required": ["old_text", "new_text"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["path", "old_text", "new_text"],
+                    "required": ["path"],
                     "additionalProperties": false
                 }),
             },
@@ -253,6 +271,7 @@ impl WorkspaceTools {
             }
             "apply_patch" => {
                 let arguments: PatchArguments = parse_arguments(&call.arguments, "apply_patch")?;
+                arguments.edits()?;
                 let resolved = self.writable(&arguments.path, true)?;
                 Ok(ToolAction::mutating(self.root.relative(&resolved)?))
             }
@@ -549,10 +568,11 @@ impl WorkspaceTools {
     }
 
     fn apply_patch(&self, arguments: &PatchArguments) -> Result<ToolOutput, ToolError> {
-        if arguments.old_text.is_empty() {
+        let edits = arguments.edits()?;
+        if edits.iter().any(|edit| edit.old_text.is_empty()) {
             return Err(ToolError::new("old_text must not be empty"));
         }
-        if arguments.old_text == arguments.new_text {
+        if edits.iter().all(|edit| edit.old_text == edit.new_text) {
             return Err(ToolError::new("patch would not change the file"));
         }
         let path = self.writable(&arguments.path, true)?;
@@ -566,13 +586,7 @@ impl WorkspaceTools {
         )?;
         let text = String::from_utf8(bytes)
             .map_err(|_| ToolError::new(format!("file is not valid UTF-8: {}", arguments.path)))?;
-        let occurrences = text.match_indices(&arguments.old_text).count();
-        if occurrences != 1 {
-            return Err(ToolError::new(format!(
-                "old_text must match exactly once, found {occurrences} matches"
-            )));
-        }
-        let updated = text.replacen(&arguments.old_text, &arguments.new_text, 1);
+        let updated = replace_all(&text, &edits)?;
         write_atomic(&path, updated.as_bytes())?;
         let after_sha256 = fingerprint(updated.as_bytes());
         let note = self.notes(&path, &after_sha256, &arguments.path)?;
@@ -956,13 +970,125 @@ struct ListOutput {
     truncated: bool,
 }
 
+/// Applies every edit to `text`, each matched against the text as it was.
+fn replace_all(text: &str, edits: &[Edit]) -> Result<String, ToolError> {
+    let mut spans = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        let which = if edits.len() == 1 {
+            String::new()
+        } else {
+            format!("edit {}: ", index + 1)
+        };
+        let found: Vec<usize> = text
+            .match_indices(&edit.old_text)
+            .map(|(at, _)| at)
+            .collect();
+        match found.as_slice() {
+            [at] => spans.push((*at, *at + edit.old_text.len(), edit)),
+            [] => {
+                return Err(ToolError::new(format!(
+                    "{which}old_text must match exactly once, found 0 matches{}",
+                    nearest_lines(text, &edit.old_text)
+                )));
+            }
+            _ => {
+                return Err(ToolError::new(format!(
+                    "{which}old_text must match exactly once, found {} matches; include more \
+                     surrounding lines to make it unique",
+                    found.len()
+                )));
+            }
+        }
+    }
+    spans.sort_by_key(|(start, _, _)| *start);
+    if spans.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err(ToolError::new(
+            "two edits overlap; merge them into one or make them disjoint",
+        ));
+    }
+    let mut updated = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (start, end, edit) in spans {
+        updated.push_str(&text[copied..start]);
+        updated.push_str(&edit.new_text);
+        copied = end;
+    }
+    updated.push_str(&text[copied..]);
+    Ok(updated)
+}
+
+/// How many file lines a miss shows, at most.
+const NEAREST_LINES: usize = 12;
+
+/// The file's lines where a missed `old_text` most likely meant, so the next
+/// attempt can copy them. Matching ignores leading and trailing whitespace on
+/// each line; nothing is applied on the strength of it.
+fn nearest_lines(text: &str, old_text: &str) -> String {
+    let file: Vec<&str> = text.lines().collect();
+    let wanted: Vec<&str> = old_text.lines().map(str::trim).collect();
+    let Some(first) = wanted.iter().find(|line| !line.is_empty()) else {
+        return String::new();
+    };
+    let whole = (0..file.len().saturating_sub(wanted.len() - 1)).find(|&start| {
+        wanted
+            .iter()
+            .enumerate()
+            .all(|(offset, line)| file[start + offset].trim() == *line)
+    });
+    let (start, why) = match whole {
+        Some(start) => (start, "it matches if whitespace at line ends is ignored"),
+        None => match file.iter().position(|line| line.trim() == *first) {
+            Some(start) => (start, "its first line is here"),
+            None => return String::new(),
+        },
+    };
+    let end = (start + wanted.len().max(1))
+        .min(file.len())
+        .min(start + NEAREST_LINES);
+    let shown: Vec<String> = (start..end)
+        .map(|index| format!("{:>6}\t{}", index + 1, file[index]))
+        .collect();
+    format!(
+        ". Did you mean lines {}-{}? {why}:\n{}",
+        start + 1,
+        end,
+        shown.join("\n")
+    )
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchArguments {
     path: String,
     expected_sha256: Option<String>,
+    old_text: Option<String>,
+    new_text: Option<String>,
+    #[serde(default)]
+    edits: Vec<Edit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Edit {
     old_text: String,
     new_text: String,
+}
+
+impl PatchArguments {
+    /// The replacements, from either `old_text` and `new_text` or `edits`.
+    fn edits(&self) -> Result<Vec<Edit>, ToolError> {
+        match (&self.old_text, &self.new_text, self.edits.is_empty()) {
+            (Some(old_text), Some(new_text), true) => Ok(vec![Edit {
+                old_text: old_text.clone(),
+                new_text: new_text.clone(),
+            }]),
+            (None, None, false) => Ok(self.edits.clone()),
+            (None, None, true) => Err(ToolError::new("give old_text and new_text, or edits")),
+            _ => Err(ToolError::new(
+                "give either old_text and new_text, or edits, not both or half of one",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1417,6 +1543,105 @@ mod tests {
             fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
             "fn b() {}\n"
         );
+    }
+
+    #[test]
+    fn several_edits_apply_in_one_call() {
+        let workspace = TestWorkspace::new();
+        workspace.write(
+            "src/lib.rs",
+            "fn a() -> u32 {\n    1\n}\nfn b() -> u32 {\n    2\n}\n",
+        );
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+
+        tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({
+                    "path": "src/lib.rs",
+                    "edits": [
+                        {"old_text": "    2\n", "new_text": "    20\n"},
+                        {"old_text": "    1\n", "new_text": "    10\n"}
+                    ]
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "fn a() -> u32 {\n    10\n}\nfn b() -> u32 {\n    20\n}\n"
+        );
+    }
+
+    #[test]
+    fn one_missing_edit_refuses_them_all_and_names_it() {
+        let workspace = TestWorkspace::new();
+        let original = "fn a() -> u32 {\n    1\n}\n";
+        workspace.write("src/lib.rs", original);
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+
+        let error = tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({
+                    "path": "src/lib.rs",
+                    "edits": [
+                        {"old_text": "    1\n", "new_text": "    10\n"},
+                        {"old_text": "fn a() -> u32 {\n  1", "new_text": "x"}
+                    ]
+                }),
+            ))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.starts_with("edit 2: "), "{error}");
+        assert!(error.contains("Did you mean lines 1-2?"), "{error}");
+        assert!(error.contains("     2\t    1"), "{error}");
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn overlapping_edits_and_mixed_forms_are_refused() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "abcdef\n");
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+
+        let overlap = tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({
+                    "path": "src/lib.rs",
+                    "edits": [
+                        {"old_text": "abcd", "new_text": "x"},
+                        {"old_text": "cdef", "new_text": "y"}
+                    ]
+                }),
+            ))
+            .unwrap_err();
+        assert!(overlap.to_string().contains("overlap"), "{overlap}");
+
+        let mixed = tools.classify(&call(
+            "apply_patch",
+            json!({
+                "path": "src/lib.rs",
+                "old_text": "a",
+                "new_text": "b",
+                "edits": [{"old_text": "c", "new_text": "d"}]
+            }),
+        ));
+        assert!(mixed.is_err());
     }
 
     #[test]

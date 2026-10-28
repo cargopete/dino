@@ -34,6 +34,7 @@ pub struct ShellTool {
     root: WorkspaceRoot,
     limits: ExecLimits,
     sandbox: Arc<dyn Sandbox>,
+    escalation: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +42,9 @@ pub struct ShellTool {
 struct Request {
     command: String,
     directory: Option<String>,
+    #[serde(default)]
+    unconfined: bool,
+    justification: Option<String>,
 }
 
 impl Request {
@@ -70,7 +74,24 @@ impl ShellTool {
             root: WorkspaceRoot::new(root)?,
             limits,
             sandbox,
+            escalation: false,
         })
+    }
+
+    /// Lets the model ask for one line to run outside the sandbox, which a
+    /// person then approves or refuses. For sessions a person is watching.
+    #[must_use]
+    pub fn with_escalation(mut self) -> Self {
+        self.escalation = true;
+        self
+    }
+
+    fn unconfined(&self, request: &Request) -> Result<Option<String>, ToolError> {
+        crate::escalation::requested(
+            self.escalation,
+            request.unconfined,
+            request.justification.as_deref(),
+        )
     }
 
     fn directory(&self, request: &Request) -> Result<PathBuf, ToolError> {
@@ -83,16 +104,21 @@ impl ShellTool {
     async fn run(&self, request: Request) -> Result<ToolOutput, ToolError> {
         let directory = self.directory(&request)?;
         let arguments = ["-c".to_owned(), request.command.clone()];
+        let sandbox: &dyn Sandbox = if self.unconfined(&request)?.is_some() {
+            &dino_sandbox::Unconfined
+        } else {
+            self.sandbox.as_ref()
+        };
         let execution = process::run(
             SH,
             &arguments,
             &directory,
-            self.sandbox.as_ref(),
+            sandbox,
             self.limits.max_captured_bytes,
             self.limits.timeout,
         )
         .await?;
-        let note = process::network_note(self.sandbox.as_ref(), &execution);
+        let note = process::network_note(sandbox, &execution);
         let max = self.limits.max_output_bytes;
         let stderr = if execution.timed_out {
             format!(
@@ -119,15 +145,20 @@ impl ShellTool {
 
 impl ToolRuntime for ShellTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
+        let mut definition = ToolDefinition {
             name: NAME.into(),
             description: format!(
                 "Run one command line through `sh -c`, for when you need a pipe, a \
                  redirect, a glob or `&&`. Prefer `exec` for a single program and the \
                  read and search tools over cat and grep. Each distinct line needs its own \
                  approval. Anything the line starts, `&` included, is stopped when it \
-                 finishes, so start a server, use it and stop it in one line. Containment: {}.",
-                self.sandbox.label()
+                 finishes, so start a server, use it and stop it in one line. Containment: {}.{}",
+                self.sandbox.label(),
+                if self.escalation {
+                    crate::escalation::DESCRIPTION
+                } else {
+                    ""
+                }
             ),
             input_schema: json!({
                 "type": "object",
@@ -145,7 +176,16 @@ impl ToolRuntime for ShellTool {
                 "required": ["command"],
                 "additionalProperties": false
             }),
-        }]
+        };
+        if self.escalation
+            && let (Some(properties), Value::Object(extra)) = (
+                definition.input_schema["properties"].as_object_mut(),
+                crate::escalation::properties(),
+            )
+        {
+            properties.extend(extra);
+        }
+        vec![definition]
     }
 
     fn classify(&self, call: &ToolCall) -> Result<ToolAction, ToolError> {
@@ -154,7 +194,10 @@ impl ToolRuntime for ShellTool {
         }
         let request = Request::parse(&call.arguments)?;
         self.directory(&request)?;
-        Ok(ToolAction::process(request.command))
+        Ok(match self.unconfined(&request)? {
+            Some(reason) => ToolAction::unconfined_process(request.command, reason),
+            None => ToolAction::process(request.command),
+        })
     }
 
     fn execute(&self, call: &ToolCall) -> ToolFuture<'_> {

@@ -985,7 +985,7 @@ async fn the_last_turns_carry_a_countdown() {
         last_result(&inputs[2])
     );
     assert!(
-        last_result(&inputs[3]).contains("1 model turn left"),
+        last_result(&inputs[3]).contains("your next response is the last"),
         "{}",
         last_result(&inputs[3])
     );
@@ -1175,6 +1175,88 @@ async fn an_untested_rust_edit_is_sent_back_once() {
 
     assert_eq!(sent_back(&result), vec![2]);
     assert_eq!(result.stop_reason, StopReason::EndTurn);
+}
+
+#[tokio::test]
+async fn one_answer_can_cover_every_call_of_a_turn() {
+    let (approver, asked) = ScriptedApprover::new(vec![ApprovalReply::ForTurn]);
+    let both = Turn::Events(vec![
+        ModelEvent::ToolCallCompleted {
+            call: tool_call("call-1", "apply_patch", "notes.md"),
+        },
+        ModelEvent::ToolCallCompleted {
+            call: tool_call("call-2", "apply_patch", "todo.md"),
+        },
+        ModelEvent::Finished {
+            reason: StopReason::ToolUse,
+        },
+    ]);
+    let mut agent = agent(vec![both, text_turn("done")]).with_policy(Interactive::new(approver));
+
+    agent.run("edit both").await.unwrap();
+
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert_eq!(agent.tools().executed_names().len(), 2);
+}
+
+#[tokio::test]
+async fn the_turn_count_rides_along_from_half_way() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            text_turn("done"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(4).unwrap(),
+            turn_notice_at: 1,
+            ..AgentConfig::default()
+        },
+    );
+
+    agent.run("read them").await.unwrap();
+
+    let inputs = &agent.session().inputs;
+    assert!(!last_result(&inputs[1]).contains("turns used"));
+    assert!(last_result(&inputs[2]).contains("2 of 4 model turns used"));
+}
+
+#[tokio::test]
+async fn results_left_unsent_at_the_limit_open_the_next_run() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            text_turn("carrying on"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(1).unwrap(),
+            ..AgentConfig::default()
+        },
+    );
+
+    let error = agent.run("read it").await.unwrap_err();
+    assert!(
+        matches!(error, dino_core::AgentError::ModelTurnLimit(1)),
+        "{error}"
+    );
+
+    agent.run("continue").await.unwrap();
+    let inputs = &agent.session().inputs;
+    let TurnInput::ToolResults { results } = &inputs[1] else {
+        panic!(
+            "the next run must open with the unsent results: {:?}",
+            inputs[1]
+        );
+    };
+    assert_eq!(results[0].call_id, "call-1");
+    assert!(
+        results[0]
+            .output
+            .content
+            .ends_with("The person has since written:]\ncontinue")
+    );
 }
 
 #[derive(Default, Clone)]

@@ -1,11 +1,15 @@
 //! The `dino` executable.
 
 mod approve;
+mod calls;
 mod config;
+mod diff;
 mod evals;
 mod handover;
+mod listen;
 mod markdown;
 mod probe;
+mod recall;
 mod render;
 mod replay;
 mod session;
@@ -86,6 +90,8 @@ enum Command {
     Prompt(PromptArgs),
     /// Run one request and exit. For scripts, CI and evals.
     Run(RunArgs),
+    /// Review uncommitted changes, or a branch against a base, without editing.
+    Review(ReviewArgs),
     /// Run the eval corpus against a model.
     Eval(crate::evals::EvalArgs),
     /// Probe an endpoint: tool parser, thinking, prompt delivery, throughput, context.
@@ -169,6 +175,19 @@ struct RunArgs {
     common: CommonArgs,
 }
 
+#[derive(Debug, clap::Args)]
+struct ReviewArgs {
+    /// Review the commits since this base, as `git diff <base>...HEAD`, rather
+    /// than the uncommitted changes.
+    #[arg(long)]
+    base: Option<String>,
+    /// What to look for, in place of correctness bugs.
+    #[arg(long)]
+    focus: Option<String>,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
 fn main() -> ExitCode {
     match dispatch() {
         Ok(code) => code,
@@ -191,6 +210,7 @@ fn dispatch() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Run(args)) => on_runtime(run(args)),
+        Some(Command::Review(args)) => on_runtime(review(args)),
         Some(Command::Eval(args)) => on_runtime(evals::run(args)),
         Some(Command::Probe(args)) => {
             let common = CommonArgs {
@@ -404,6 +424,7 @@ fn prompt_context(
         approval_mode: mode.label().to_owned(),
         max_model_turns,
         git: dino_core::git::GitSnapshot::take(workspace),
+        outline: dino_rust::outline::outline(workspace),
         memory: memory_files(workspace)
             .map(|files| dino_core::prompt::load_memory(&files))
             .unwrap_or_default(),
@@ -430,6 +451,8 @@ fn interactive_options(
         skills: skills(workspace),
         github: dino_exec::GithubTool::available(),
         web: true,
+        skip_edit_check: false,
+        escalation: true,
     }
 }
 
@@ -491,6 +514,7 @@ pub(crate) struct Prepared {
     requests: Arc<std::sync::atomic::AtomicU64>,
     planning: Arc<std::sync::atomic::AtomicBool>,
     context_full: Arc<std::sync::atomic::AtomicBool>,
+    status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
 }
 
@@ -568,6 +592,10 @@ fn prepare(
     let usage = renderer.usage_handle();
     let requests = renderer.requests_handle();
     let context_full = renderer.context_handle();
+    let status = renderer.status_handle();
+    if let Ok(mut status) = status.lock() {
+        status.answering(&settings.profile);
+    }
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
         model,
@@ -601,6 +629,7 @@ fn prepare(
         requests,
         planning,
         context_full,
+        status,
         sandbox,
     })
 }
@@ -617,8 +646,11 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         let model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
         Ok((model, name))
     });
+    let inbox = dino_core::Inbox::default();
     let mut session = Session {
-        agent: prepared.agent,
+        agent: prepared.agent.with_inbox(std::sync::Arc::clone(&inbox)),
+        inbox,
+        typed_ahead: String::new(),
         usage: prepared.usage,
         requests: prepared.requests,
         factory,
@@ -629,8 +661,10 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         planning: prepared.planning,
         awaiting_plan: false,
         carried: None,
+        recall: crate::recall::Recall::default(),
         auto_compact: prepared.settings.compaction == config::Compaction::Automatic,
         context_full: prepared.context_full,
+        status: prepared.status,
         model: prepared.settings.profile.display_name.clone(),
         workspace: prepared.settings.workspace.display().to_string(),
         sandbox: prepared.sandbox_label,
@@ -641,6 +675,70 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
     };
     session.run().await?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// The largest diff put into a review request; past it the model reads files.
+const MAX_REVIEW_DIFF_BYTES: usize = 200 * 1_024;
+
+/// Runs a read-only review. The diff is taken here and handed over, so the
+/// model needs no process and the session can refuse every change.
+async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
+    let workspace = config::resolve_workspace(args.common.workspace.as_deref())?;
+    let git = |arguments: &[&str]| -> Result<String> {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(&workspace)
+            .output()
+            .context("cannot run git")?;
+        if !output.status.success() {
+            bail!(
+                "git {} failed: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let (what, diff, untracked) = match &args.base {
+        Some(base) => (
+            format!("the commits since `{base}`"),
+            git(&["diff", &format!("{base}...HEAD")])?,
+            String::new(),
+        ),
+        None => (
+            "the uncommitted changes".to_owned(),
+            git(&["diff", "HEAD"])?,
+            git(&["ls-files", "--others", "--exclude-standard"])?,
+        ),
+    };
+    if diff.trim().is_empty() && untracked.trim().is_empty() {
+        eprintln!("dino: nothing to review in {what}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let shown = dino_core::text::capped_head(&diff, MAX_REVIEW_DIFF_BYTES);
+    let focus = args.focus.take().unwrap_or_else(|| {
+        "correctness bugs: wrong results, panics, lost errors, races, missed edge cases".to_owned()
+    });
+    let mut request = format!(
+        "Review {what} in this repository for {focus}. Read the surrounding code where the \
+         diff alone cannot settle a question. Nothing can be changed in this session. Report \
+         each finding as `path:line`, one sentence saying what is wrong and one saying what \
+         input or state shows it, most severe first. Leave out style and anything you could not \
+         confirm from the code. If you find nothing, say so.\n\n```diff\n{shown}\n```\n"
+    );
+    if !untracked.trim().is_empty() {
+        request.push_str("\nNew files, not in the diff; read them:\n");
+        request.push_str(&untracked);
+    }
+    args.common.read_only = true;
+    run(RunArgs {
+        prompt: Some(request),
+        handover: false,
+        // Read only with --handover, which a review never uses.
+        session_turns: 0,
+        common: args.common,
+    })
+    .await
 }
 
 async fn run(args: RunArgs) -> Result<ExitCode> {
@@ -845,7 +943,7 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         max_turns: args.max_turns.map_or_else(
             || {
                 layers.pick(|file| file.max_turns).unwrap_or((
-                    NonZeroU32::new(32).expect("32 is non-zero"),
+                    NonZeroU32::new(100).expect("100 is non-zero"),
                     Source::Default,
                 ))
             },
@@ -1062,7 +1160,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
 fn policy(mode: ApprovalMode, sandbox: &str, workspace: &Path) -> Box<dyn ApprovalPolicy> {
     match mode {
         ApprovalMode::Interactive => {
-            let interactive = Interactive::new(TerminalApprover::new(sandbox));
+            let interactive = Interactive::new(TerminalApprover::new(sandbox, workspace));
             match settings::user_dir() {
                 Some(dir) => Box::new(
                     interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)),

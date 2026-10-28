@@ -225,6 +225,8 @@ fn build_provider(
             };
             config.api_key = env("QWEN_API_KEY").filter(|key| !key.is_empty());
             config.thinking_budget = Some(thinking_budget(settings.thinking_budget));
+            // Experimental until measured on the Token Plan: #135.
+            config.explicit_cache = env("DINO_EXPLICIT_CACHE").is_some_and(|value| value == "1");
             config.system_prompt = system_prompt;
             config.tools = tools;
             config.max_output_tokens = profile.max_output_tokens;

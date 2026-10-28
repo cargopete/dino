@@ -117,6 +117,10 @@ pub struct Variant {
 
 /// What shapes the tools a session gets.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent switches, each read in one place"
+)]
 pub struct ToolOptions {
     /// Workspace-relative paths no tool may write.
     pub protected: Vec<std::path::PathBuf>,
@@ -133,6 +137,11 @@ pub struct ToolOptions {
     pub memory: Option<dino_core::memory::MemoryFiles>,
     /// After-edit hooks around the file tools. None in evals.
     pub hooks: Vec<dino_exec::Hook>,
+    /// Leave out the `cargo check` that follows a turn's Rust edits.
+    pub skip_edit_check: bool,
+    /// Let `exec` and `shell` ask to run one command outside the sandbox, for
+    /// a person to approve. Never in evals, which have no person.
+    pub escalation: bool,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -172,6 +181,10 @@ impl ToolRuntime for Without {
 
     fn history_lost(&self) {
         self.inner.history_lost();
+    }
+
+    fn begin_turn(&self, calls: &[ToolCall]) {
+        self.inner.begin_turn(calls);
     }
 }
 
@@ -513,6 +526,8 @@ fn eval_session(
                 hooks: Vec::new(),
                 memory: None,
                 skills: Vec::new(),
+                skip_edit_check: false,
+                escalation: false,
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -527,6 +542,7 @@ fn eval_session(
         approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
         max_model_turns: Some(case.max_turns),
         git: None,
+        outline: dino_rust::outline::outline(workspace),
         // None, so a user's own instructions cannot move a measurement.
         instructions: Vec::new(),
         memory: Vec::new(),
@@ -884,13 +900,24 @@ pub fn session_tools_with(
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         file_tools(workspace, options, &sandbox)?,
         Box::new(dino_core::blocker::BlockerTool),
-        Box::new(
-            ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
-        ),
-        Box::new(
-            ShellTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
-                .map_err(setup)?,
-        ),
+        {
+            let exec = ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
+                .map_err(setup)?;
+            Box::new(if options.escalation {
+                exec.with_escalation()
+            } else {
+                exec
+            })
+        },
+        {
+            let shell = ShellTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
+                .map_err(setup)?;
+            Box::new(if options.escalation {
+                shell.with_escalation()
+            } else {
+                shell
+            })
+        },
         Box::new(
             dino_exec::PackagesTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
                 .map_err(setup)?,
@@ -942,16 +969,30 @@ fn file_tools(
     let tools = WorkspaceTools::new(workspace, ToolLimits::default())
         .map_err(|error| EvalError::Setup(error.to_string()))?
         .protecting(options.protected.clone());
-    if options.hooks.is_empty() {
-        return Ok(Box::new(tools));
+    let mut tools: Box<dyn ToolRuntime> = Box::new(tools);
+    if !options.hooks.is_empty() {
+        tools = Box::new(dino_exec::AfterEdit::new(
+            tools,
+            options.hooks.clone(),
+            workspace,
+            Arc::clone(sandbox),
+        ));
     }
-    Ok(Box::new(dino_exec::AfterEdit::new(
-        Box::new(tools),
-        options.hooks.clone(),
-        workspace,
-        Arc::clone(sandbox),
-    )))
+    if !options.skip_edit_check {
+        // Outside the hooks, so the check sees the file as formatted.
+        let limits = CargoLimits {
+            timeout: std::time::Duration::from_secs(EDIT_CHECK_SECONDS),
+            ..CargoLimits::default()
+        };
+        let cargo = CargoTool::new(workspace, limits, Arc::clone(sandbox))
+            .map_err(|error| EvalError::Setup(error.to_string()))?;
+        tools = Box::new(dino_rust::EditCheck::new(tools, cargo));
+    }
+    Ok(tools)
 }
+
+/// How long the check after an edit may take before it is skipped.
+const EDIT_CHECK_SECONDS: u64 = 90;
 
 /// An agent for one unattended case: everything allowed, inside the sandbox.
 fn eval_agent<S: ModelSession, T: ToolRuntime>(
@@ -1075,6 +1116,16 @@ fn check(
             None => failures.push(format!("{} could not be read", expectation.file)),
         }
     }
+    if case.expect.new_tests > 0 {
+        let before = count_tests(&case.directory.join("workspace"));
+        let added = count_tests(workspace).saturating_sub(before);
+        if added < case.expect.new_tests {
+            failures.push(format!(
+                "expected at least {} new tests, and {added} were added",
+                case.expect.new_tests
+            ));
+        }
+    }
     for expectation in &case.expect.not_contains {
         if read(workspace, &expectation.file).is_some_and(|body| body.contains(&expectation.text)) {
             failures.push(format!(
@@ -1094,6 +1145,34 @@ fn read(workspace: &Path, relative: &str) -> Option<String> {
 /// # Errors
 ///
 /// Returns [`EvalError`] when Cargo cannot be run at all.
+/// Test functions under `root`, by their attributes, outside `target/`.
+fn count_tests(root: &Path) -> usize {
+    ignore::WalkBuilder::new(root)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "rs")
+        })
+        .filter(|entry| {
+            entry.path().strip_prefix(root).is_ok_and(|relative| {
+                !relative
+                    .components()
+                    .any(|part| part.as_os_str() == "target")
+            })
+        })
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("#[test]") || line.starts_with("#[tokio::test"))
+                .count()
+        })
+        .sum()
+}
+
 async fn check_hidden_tests(
     workspace: &Path,
     sandbox: Arc<dyn Sandbox>,

@@ -81,13 +81,32 @@ CI and evals.
   mutating, process or network. Read-only calls proceed. Anything else asks, and a session
   rule is keyed on the tool and the resolved target, never on a description of
   what a command probably does. A refusal returns to the model as an ordinary
-  tool result under its original call ID. Answering `r` keeps the rule for the
+  tool result under its original call ID, with what the person typed instead,
+  if anything. The prompt takes one key or the arrows; keys typed before it
+  appeared are discarded and unknown keys ignored. Beyond once and always, it
+  offers every pending call of the model's turn (`t`), one program whatever its
+  arguments (`p`, for `exec` and `cargo` but never a `shell` line), and every
+  process this session (`s`, still sandboxed). An edit's prompt shows its diff
+  before it is applied, numbered from the file with two lines of context and the
+  changed words picked out. Answering `r` keeps the rule for the
   workspace in `~/.config/dino/approvals/`, outside the repository, so a checkout
   cannot approve its own commands; the file is plain JSON, to read or prune.
 - **A line-based session.** Not an alternate-screen interface, deliberately: the
   transcript belongs in the terminal's scrollback, where a person goes to find
   what the agent did an hour ago and where selection and copying still work.
-  Paste arrives as one message; a trailing backslash continues a typed line.
+  Each call is one line, `✓ $ cargo test · 7 passed`: an icon for its kind, a
+  mark for running, done, failed or refused (by you, or blocked by policy), and
+  a run of reads, lists and searches folded into one `explored` line. The line
+  is redrawn in place only while it is still the last one written. Beneath it,
+  while a turn runs, one status row gives the model, the context used, the
+  submission's tokens, the elapsed time and the interrupt key, and is cleared
+  before anything else is written. Under `--plain` every line is written once,
+  in order, as before. Paste arrives as one message; alt-enter or a
+  trailing backslash starts a new line without sending. While a turn runs, Esc
+  interrupts it, and a line typed and entered goes to the model with its next
+  tool results, shown in the status row as queued until then; anything entered
+  that no tool result came after is sent when the turn ends, and anything typed
+  but not entered starts the next prompt.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events
@@ -107,11 +126,21 @@ CI and evals.
   summarisation: no extra request, deterministic, and it does not quietly
   rewrite what the model believes happened. Summarising is `/compact`, asked
   for by a person and starting a fresh conversation, never done behind one.
+- **An outline of the workspace.** In a Cargo workspace the system prompt lists
+  each Rust file with its public items, found by a line scan and capped at 4 KiB,
+  so the model can go straight to a file instead of listing and searching first.
 - **Instructions.** `~/.config/dino/instructions.md` for your own rules, then
-  the repository's `AGENTS.md` and `.dino/instructions.md`, each capped at 16 KiB
+  any `AGENTS.md` between the git repository's root and a workspace inside it,
+  outermost first, then the workspace's `AGENTS.md` and `.dino/instructions.md`,
+  each capped at 16 KiB
   and named when a session starts. They go below the built-in rules and cannot
   change approvals or the sandbox. Evals read none of them, so a personal file
   cannot move a measurement.
+- **Review.** `dino review` reviews the uncommitted changes, and `dino review
+  --base main` the commits since a base, for correctness bugs or a `--focus` of
+  your own. Dino takes the diff itself and runs the model read-only, so a review
+  cannot change anything; findings come back as `path:line` with the input that
+  shows each one.
 - **Handover for long tasks.** `dino run --handover` has the model keep a plan in
   a `progress` tool and hands the task to a fresh session when one reaches
   `--session-turns` (16) or stops with items pending, at most four sessions and
@@ -119,9 +148,15 @@ CI and evals.
   harness builds: the task, the record, why the last session ended, `git status`
   and the current `cargo check`. RFC-0018; not yet measured against the plain
   loop.
-- **A turn budget.** `--max-turns` bounds a submission. The model is told the
-  limit in its system prompt and counted down over its last three turns, so it
-  can finish and say what is done rather than be cut off.
+- **A turn budget.** `--max-turns` bounds a submission, 100 by default. The
+  model is told the limit in its system prompt, sees the count from half-way, is
+  counted down over its last three turns, and is told to make no calls in its
+  last, so it can say what is done rather than be cut off. A run that reaches the
+  limit anyway keeps its last tool results, and the next message carries them, so
+  replying "continue" picks the work up.
+- **Loop detection.** The third identical call in a row, or a run of calls
+  alternating between the same two, gets a note saying the result will not
+  change; a fifth identical call is refused rather than run.
 - **Unattended runs check their own build.** In `dino run` and `dino eval`, a
   model that ends its turn while `cargo check` reports errors is sent back once
   with the first of them, and the countdown names them too. An interactive
@@ -146,6 +181,12 @@ CI and evals.
   a process, except those listed in `read_only_tools`. Servers run inside the
   sandbox unless `sandbox = false`, which the session banner says. Remote
   servers and catalogues stay out (RFC-0017 §5).
+- **Explicit prompt caching, on trial.** `DINO_EXPLICIT_CACHE=1` marks the system
+  prompt and the newest message for DashScope's explicit context cache, which
+  replaces its implicit one. Published prices make a hit 10% of input instead of
+  20%, and a write 125%, which pays once the history is more than about two and a
+  half times a turn's new tokens. Whether the Token Plan bills it that way is not
+  yet known, so it is off by default.
 - **Hooks.** `[[hooks]]` in the user file run after the file tools edit a file,
   inside the sandbox, with `{path}` for the file and an optional `extension`.
   With `extension = "rs"`, this formats every Rust edit:
@@ -192,7 +233,10 @@ One consequence is load-bearing. RFC-0001 lists automatic commits, pushes,
 deployments and purchases as non-goals. Under confinement `git push` fails with
 `connect to host github.com port 22: Operation not permitted`, because the
 sandbox refused the socket rather than because its name is on a list. There is no
-list.
+list. In a session a person is watching, `exec` and `shell` may ask to run one
+command unconfined, with a justification: the prompt says so in warning colour,
+offers only "once" or "refuse", and no rule, saved or session, ever covers such
+a call. Evals and probes never offer it.
 
 The one opening is for dependencies. The `cargo` tool's `fetch` and `add` run
 in the same confinement with outbound TCP to port 443 and writes to Cargo's
@@ -440,7 +484,9 @@ Ollama serves a context far smaller than the model's native window unless
 
 The interface uses a warm dark palette because that is what it was drawn for.
 Dino ships the ink and leaves the background to the terminal, since a
-line-based program does not own its ground. On a light terminal, `--plain`.
+line-based program does not own its ground. It asks the terminal for that ground
+once at startup (OSC 11, then `COLORFGBG`) and on a light one draws the same hues
+in darker inks.
 
 **What lands on disk.** `.dino/` in the workspace holds the session log, the
 resumable state and the input history. The log records what you typed; the state

@@ -21,11 +21,19 @@ pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = ApprovalReply> + Send + '
 
 pub trait ApprovalPolicy: Send + Sync {
     fn decide(&self, call: &ToolCall, action: &ToolAction) -> DecisionFuture<'_>;
+
+    /// Told every classified call of a model turn before the first is decided,
+    /// so a person can be asked about them together.
+    fn begin_turn(&self, _calls: &[(ToolCall, ToolAction)]) {}
 }
 
 impl ApprovalPolicy for Box<dyn ApprovalPolicy> {
     fn decide(&self, call: &ToolCall, action: &ToolAction) -> DecisionFuture<'_> {
         (**self).decide(call, action)
+    }
+
+    fn begin_turn(&self, calls: &[(ToolCall, ToolAction)]) {
+        (**self).begin_turn(calls);
     }
 }
 
@@ -38,13 +46,58 @@ pub enum ApprovalReply {
     ForSession,
     /// As [`ApprovalReply::ForSession`], and keep the rule for later sessions.
     Remember,
+    /// Allow this call and the others of this model turn that would ask.
+    ForTurn,
+    /// Allow, for this session, every call of this tool running this program,
+    /// whatever its arguments. Offered only where [`AskContext::program`] is set.
+    ForProgram,
+    /// Allow, for this session, every process call, still inside the sandbox.
+    AllProcesses,
     /// Refuse, optionally saying why.
     Reject(Option<String>),
+}
+
+/// What else a person may want to know when asked about one call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AskContext {
+    /// The other calls of this model turn that will ask, by rule subject.
+    pub also_pending: Vec<String>,
+    /// The program a [`ApprovalReply::ForProgram`] rule would cover, when the
+    /// tool runs one program per call.
+    pub program: Option<String>,
+    /// The model's reason, when the call asks to run outside the sandbox. Only
+    /// a one-off yes or a refusal is offered then.
+    pub unconfined: Option<String>,
 }
 
 /// A frontend that can ask a person about a proposed action.
 pub trait Approver: Send + Sync {
     fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_>;
+
+    fn ask_in(
+        &self,
+        call: &ToolCall,
+        action: &ToolAction,
+        _context: &AskContext,
+    ) -> ReplyFuture<'_> {
+        self.ask(call, action)
+    }
+}
+
+/// Tools whose subject starts with the one program they run, so a rule for
+/// that program means what it says. `shell` is not one: a line can run anything.
+const PROGRAM_TOOLS: [&str; 2] = ["exec", "cargo"];
+
+fn program_of(call: &ToolCall, action: &ToolAction) -> Option<String> {
+    if action.class != ToolClass::Process || !PROGRAM_TOOLS.contains(&call.name.as_str()) {
+        return None;
+    }
+    let program = action.subject.as_deref()?.split_whitespace().next()?;
+    Some(program.to_owned())
+}
+
+fn program_key(tool: &str, program: &str) -> String {
+    format!("{tool}\u{1f}{program} *")
 }
 
 /// Allows everything, including mutation, without asking.
@@ -86,6 +139,10 @@ impl<P: ApprovalPolicy> ApprovalPolicy for PlanGate<P> {
         }
         self.inner.decide(call, action)
     }
+
+    fn begin_turn(&self, calls: &[(ToolCall, ToolAction)]) {
+        self.inner.begin_turn(calls);
+    }
 }
 
 /// Allows read-only calls and refuses everything else.
@@ -122,6 +179,11 @@ pub trait RuleStore: Send + Sync {
 pub struct Interactive<A> {
     approver: A,
     rules: Mutex<HashSet<String>>,
+    /// Calls of the current model turn that will ask, by call id and subject.
+    pending: Mutex<Vec<(String, String)>>,
+    /// Call ids allowed by a [`ApprovalReply::ForTurn`] answer.
+    turn_allowed: Mutex<HashSet<String>>,
+    all_processes: std::sync::atomic::AtomicBool,
     saved: HashSet<String>,
     store: Option<Box<dyn RuleStore>>,
 }
@@ -131,6 +193,9 @@ impl<A> Interactive<A> {
         Self {
             approver,
             rules: Mutex::new(HashSet::new()),
+            pending: Mutex::new(Vec::new()),
+            turn_allowed: Mutex::new(HashSet::new()),
+            all_processes: std::sync::atomic::AtomicBool::new(false),
             saved: HashSet::new(),
             store: None,
         }
@@ -171,6 +236,61 @@ impl<A> Interactive<A> {
             rules.insert(key);
         }
     }
+
+    /// Asks about a call outside the sandbox. Whatever the person answers, at
+    /// most this one call is allowed: no rule is granted, saved or consulted.
+    fn ask_unconfined(
+        &self,
+        call: &ToolCall,
+        action: &ToolAction,
+        reason: String,
+    ) -> DecisionFuture<'_>
+    where
+        A: Approver,
+    {
+        let context = AskContext {
+            unconfined: Some(reason),
+            ..AskContext::default()
+        };
+        let call = call.clone();
+        let action = action.clone();
+        Box::pin(async move {
+            match self.approver.ask_in(&call, &action, &context).await {
+                ApprovalReply::Reject(reason) => ApprovalDecision::denied(
+                    reason.unwrap_or_else(|| "the operator refused this action".to_owned()),
+                ),
+                _ => ApprovalDecision::allowed(DecisionSource::User),
+            }
+        })
+    }
+
+    /// Whether a rule already covers the call, and by what.
+    fn covered(&self, call: &ToolCall, action: &ToolAction) -> Option<DecisionSource> {
+        if action.unconfined.is_some() {
+            return None;
+        }
+        let key = action.rule_key(&call.name);
+        if self.saved.contains(&key) {
+            return Some(DecisionSource::SavedRule);
+        }
+        let by_program = program_of(call, action).map(|program| program_key(&call.name, &program));
+        let by_process = action.class == ToolClass::Process
+            && self
+                .all_processes
+                .load(std::sync::atomic::Ordering::Relaxed);
+        let by_turn = self
+            .turn_allowed
+            .lock()
+            .is_ok_and(|allowed| allowed.contains(&call.id));
+        if self.holds_rule(&key)
+            || by_program.is_some_and(|key| self.holds_rule(&key))
+            || by_process
+            || by_turn
+        {
+            return Some(DecisionSource::SessionRule);
+        }
+        None
+    }
 }
 
 impl<A> ApprovalPolicy for Interactive<A>
@@ -181,20 +301,62 @@ where
         if action.class == ToolClass::ReadOnly {
             return Box::pin(async { ApprovalDecision::allowed(DecisionSource::Policy) });
         }
+        if let Some(reason) = &action.unconfined {
+            return self.ask_unconfined(call, action, reason.clone());
+        }
+
+        if let Some(source) = self.covered(call, action) {
+            return Box::pin(async move { ApprovalDecision::allowed(source) });
+        }
 
         let key = action.rule_key(&call.name);
-        if self.saved.contains(&key) {
-            return Box::pin(async { ApprovalDecision::allowed(DecisionSource::SavedRule) });
-        }
-        if self.holds_rule(&key) {
-            return Box::pin(async { ApprovalDecision::allowed(DecisionSource::SessionRule) });
-        }
-
+        let program = program_of(call, action);
+        let also_pending: Vec<String> = self
+            .pending
+            .lock()
+            .map(|pending| {
+                pending
+                    .iter()
+                    .skip_while(|(id, _)| *id != call.id)
+                    .skip(1)
+                    .map(|(_, subject)| subject.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let context = AskContext {
+            also_pending,
+            program: program.clone(),
+            unconfined: None,
+        };
         let call = call.clone();
         let action = action.clone();
         Box::pin(async move {
-            match self.approver.ask(&call, &action).await {
+            match self.approver.ask_in(&call, &action, &context).await {
                 ApprovalReply::Once => ApprovalDecision::allowed(DecisionSource::User),
+                ApprovalReply::ForTurn => {
+                    if let (Ok(pending), Ok(mut allowed)) =
+                        (self.pending.lock(), self.turn_allowed.lock())
+                    {
+                        allowed.extend(pending.iter().map(|(id, _)| id.clone()));
+                    }
+                    ApprovalDecision::allowed(DecisionSource::User)
+                }
+                ApprovalReply::ForProgram => {
+                    match program {
+                        Some(program) => self.grant_rule(program_key(&call.name, &program)),
+                        None => self.grant_rule(key),
+                    }
+                    ApprovalDecision::allowed(DecisionSource::User)
+                }
+                ApprovalReply::AllProcesses => {
+                    if action.class == ToolClass::Process {
+                        self.all_processes
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        self.grant_rule(key);
+                    }
+                    ApprovalDecision::allowed(DecisionSource::User)
+                }
                 ApprovalReply::ForSession => {
                     self.grant_rule(key);
                     ApprovalDecision::allowed(DecisionSource::User)
@@ -211,5 +373,183 @@ where
                 ),
             }
         })
+    }
+
+    fn begin_turn(&self, calls: &[(ToolCall, ToolAction)]) {
+        let asking: Vec<(String, String)> = calls
+            .iter()
+            .filter(|(call, action)| {
+                action.class != ToolClass::ReadOnly
+                    && action.unconfined.is_none()
+                    && self.covered(call, action).is_none()
+            })
+            .map(|(call, action)| {
+                let subject = action.subject.clone().unwrap_or_else(|| call.name.clone());
+                (call.id.clone(), format!("{} {subject}", call.name))
+            })
+            .collect();
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = asking;
+        }
+        if let Ok(mut allowed) = self.turn_allowed.lock() {
+            allowed.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    /// Answers from a script and records what it was asked, with its context.
+    struct Script {
+        replies: Mutex<VecDeque<ApprovalReply>>,
+        asked: Mutex<Vec<(String, AskContext)>>,
+    }
+
+    impl Script {
+        fn new(replies: Vec<ApprovalReply>) -> Self {
+            Self {
+                replies: Mutex::new(replies.into()),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Approver for Script {
+        fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
+            self.ask_in(call, action, &AskContext::default())
+        }
+
+        fn ask_in(
+            &self,
+            call: &ToolCall,
+            action: &ToolAction,
+            context: &AskContext,
+        ) -> ReplyFuture<'_> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((action.rule_key(&call.name), context.clone()));
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(ApprovalReply::Reject(None));
+            Box::pin(async move { reply })
+        }
+    }
+
+    fn exec(id: &str, subject: &str) -> (ToolCall, ToolAction) {
+        (
+            ToolCall {
+                id: id.into(),
+                name: "exec".into(),
+                arguments: serde_json::Value::Null,
+            },
+            ToolAction::process(subject),
+        )
+    }
+
+    async fn allowed(policy: &Interactive<Script>, call: &(ToolCall, ToolAction)) -> bool {
+        policy.decide(&call.0, &call.1).await.is_allowed()
+    }
+
+    #[tokio::test]
+    async fn one_answer_covers_the_turn_and_no_further() {
+        let policy = Interactive::new(Script::new(vec![ApprovalReply::ForTurn]));
+        let turn = [exec("1", "git add ."), exec("2", "git commit -m x")];
+        policy.begin_turn(&turn);
+        assert!(allowed(&policy, &turn[0]).await);
+        assert!(allowed(&policy, &turn[1]).await);
+
+        let asked = policy.approver.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            asked[0].1.also_pending,
+            vec!["exec git commit -m x".to_owned()]
+        );
+        assert_eq!(asked[0].1.program.as_deref(), Some("git"));
+
+        let next = [exec("3", "git push")];
+        policy.begin_turn(&next);
+        assert!(
+            !allowed(&policy, &next[0]).await,
+            "the next turn asks again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_program_rule_covers_that_program_only() {
+        let policy = Interactive::new(Script::new(vec![ApprovalReply::ForProgram]));
+        assert!(allowed(&policy, &exec("1", "git status")).await);
+        assert!(allowed(&policy, &exec("2", "git log -1")).await);
+        assert!(!allowed(&policy, &exec("3", "gitk")).await);
+        assert_eq!(policy.approver.asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_shell_line_gets_no_program_rule() {
+        let policy = Interactive::new(Script::new(vec![ApprovalReply::ForProgram]));
+        let shell = ToolCall {
+            id: "1".into(),
+            name: "shell".into(),
+            arguments: serde_json::Value::Null,
+        };
+        let first = ToolAction::process("git status; rm -rf src");
+        assert!(policy.decide(&shell, &first).await.is_allowed());
+        let other = ToolAction::process("git log");
+        let shell2 = ToolCall {
+            id: "2".into(),
+            ..shell.clone()
+        };
+        assert!(!policy.decide(&shell2, &other).await.is_allowed());
+        assert_eq!(policy.approver.asked.lock().unwrap()[0].1.program, None);
+    }
+
+    #[tokio::test]
+    async fn an_unconfined_call_is_asked_every_time_and_never_remembered() {
+        let policy = Interactive::new(Script::new(vec![
+            ApprovalReply::AllProcesses,
+            ApprovalReply::Remember,
+            ApprovalReply::Reject(None),
+        ]));
+        let call = ToolCall {
+            id: "1".into(),
+            name: "exec".into(),
+            arguments: serde_json::Value::Null,
+        };
+        let push = ToolAction::unconfined_process("git push", "publish the branch");
+        assert!(policy.decide(&call, &push).await.is_allowed());
+        assert!(policy.decide(&call, &push).await.is_allowed());
+        assert!(!policy.decide(&call, &push).await.is_allowed());
+
+        let asked = policy.approver.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 3);
+        assert_eq!(asked[0].1.unconfined.as_deref(), Some("publish the branch"));
+        assert!(policy.granted_rules().is_empty());
+        // Nor did the first answer reach sandboxed processes.
+        assert!(!allowed(&policy, &exec("2", "git status")).await);
+    }
+
+    #[tokio::test]
+    async fn all_processes_covers_processes_but_not_edits() {
+        let policy = Interactive::new(Script::new(vec![ApprovalReply::AllProcesses]));
+        assert!(allowed(&policy, &exec("1", "git status")).await);
+        assert!(allowed(&policy, &exec("2", "cargo test")).await);
+        let edit = ToolCall {
+            id: "3".into(),
+            name: "write_file".into(),
+            arguments: serde_json::Value::Null,
+        };
+        assert!(
+            !policy
+                .decide(&edit, &ToolAction::mutating("src/lib.rs"))
+                .await
+                .is_allowed()
+        );
     }
 }

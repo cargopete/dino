@@ -262,9 +262,14 @@ const INIT_REQUEST: &str = "Survey this repository and write AGENTS.md at its ro
 const COMPACT_REQUEST: &str = "This conversation is about to be compacted: you will continue \
     in a fresh one that sees only what you write now. Do not call any tool. Write a summary \
     under 400 words with these headings: Task (what was asked, in the person's words where it \
-    matters), Done (what changed, with file paths), Decisions (and why), Remaining (next steps), \
-    Open questions. Include exact names, paths, commands and error messages that the next turn \
-    will need.";
+    matters), Done (what changed, with file paths), Build and tests (what passes, what fails, \
+    the exact commands and failing test names), Code state (anything half-finished, and where), \
+    Decisions (and why), Remaining (next steps), Open questions. Include exact names, paths, \
+    commands and error messages that the next turn will need.";
+
+/// Sent after a compaction that interrupted a task, so the work goes on.
+pub const CONTINUE_AFTER_COMPACTION: &str = "The conversation was compacted in the middle of the \
+    task. Carry on from the summary below.";
 
 /// Sent ahead of a planned task. The gate enforces it; this explains it.
 const PLAN_MODE: &str = "Plan mode. Investigate with read-only tools: read, search, list, \
@@ -291,10 +296,18 @@ pub struct Session<S> {
     pub awaiting_plan: bool,
     /// A compacted summary waiting to go ahead of the next message.
     pub carried: Option<String>,
+    /// What this conversation did, from its events, for the next compaction.
+    pub recall: crate::recall::Recall,
     /// Compact after any submission that filled the context past the mark.
     pub auto_compact: bool,
     /// Set by the renderer when the core warns the context is filling.
     pub context_full: Arc<std::sync::atomic::AtomicBool>,
+    /// The status row's figures, told which model is answering.
+    pub status: Arc<Mutex<crate::spinner::Status>>,
+    /// Messages typed during a run, shared with the agent, which delivers them.
+    pub inbox: dino_core::Inbox,
+    /// Typed during the last run and not entered, to start the next prompt with.
+    pub typed_ahead: String,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -322,6 +335,13 @@ where
         editor.set_helper(Some(Continuation {
             root: self.workspace_root.clone(),
         }));
+        // A new line without sending: alt-enter, which is also what shift-enter
+        // sends once a terminal is set to send ESC CR for it. Not ctrl-j: Enter
+        // typed before the editor takes the terminal arrives as the same byte.
+        editor.bind_sequence(
+            rustyline::KeyEvent(rustyline::KeyCode::Enter, rustyline::Modifiers::ALT),
+            rustyline::Cmd::Newline,
+        );
         let _ = editor.load_history(&self.history_path);
 
         println!("{}", self.opening());
@@ -335,7 +355,9 @@ where
             // Blocking on purpose. Nothing else is running while a person is
             // typing, and moving the editor across a spawn_blocking boundary
             // every keystroke would buy nothing.
-            match editor.readline(&prompt) {
+            let mut typed = std::mem::take(&mut self.typed_ahead);
+            typed.push_str(&crate::style::take_typeahead());
+            match editor.readline_with_initial(&prompt, (&typed, "")) {
                 Ok(line) => {
                     let _ = editor.add_history_entry(line.as_str());
                     let input = parse(&join_continuations(&line));
@@ -385,7 +407,9 @@ where
                 Self::ask_about_plan();
             }
             Input::Cost => println!("{}", self.cost()),
-            Input::Compact => self.compact().await,
+            Input::Compact => {
+                self.compact().await;
+            }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Unknown(name) => println!(
                 "{}",
@@ -507,13 +531,24 @@ where
         let text = self.with_attachments(text).await;
         // The person's words first, so the transcript shows what they typed.
         let text = match self.carried.take() {
-            Some(summary) => format!(
-                "{text}\n\n---\n\nSummary of this session so far, written before it was \
-                 compacted:\n\n{summary}"
-            ),
+            Some(summary) => format!("{text}{}{summary}", crate::recall::SUMMARY_DIVIDER),
             None => text,
         };
-        self.run_submission(text).await;
+        let run = self.run_submission(text).await;
+        if let Some(run) = &run {
+            self.recall.absorb(&run.events);
+        }
+        // Entered during the run but never delivered, because no tool result
+        // came after it: the next submission, in the order typed.
+        let undelivered = self
+            .inbox
+            .lock()
+            .map(|mut inbox| std::mem::take(&mut *inbox))
+            .unwrap_or_default();
+        if !undelivered.is_empty() {
+            Box::pin(self.submit(undelivered.join("\n\n"))).await;
+            return;
+        }
         let full = self
             .context_full
             .swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -522,14 +557,24 @@ where
                 "{}",
                 style::paint(FAINT, "  the context is filling, so compacting now")
             );
-            self.compact().await;
+            let compacted = self.compact().await;
             self.context_full
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+            // A run the window cut short is resumed rather than left waiting.
+            let interrupted = run.is_none_or(|run| run.stop_reason == StopReason::MaxTokens);
+            if compacted && interrupted {
+                Box::pin(self.submit(CONTINUE_AFTER_COMPACTION.to_owned())).await;
+            }
         }
     }
 
     /// Runs one prepared message and saves the conversation after it.
     async fn run_submission(&mut self, text: String) -> Option<dino_core::RunResult> {
+        // Each time, since `/model` and `/resume` change it and a run can learn
+        // the window the server really serves.
+        if let Ok(mut status) = self.status.lock() {
+            status.answering(self.agent.session().profile());
+        }
         let cancel = CancellationToken::new();
         let signal = cancel.clone();
         let interrupt = tokio::spawn(async move {
@@ -538,7 +583,19 @@ where
             }
         });
 
+        let listener = crate::listen::Listener::start(
+            cancel.clone(),
+            Arc::clone(&self.inbox),
+            Arc::clone(&self.status),
+        );
         let result = self.agent.run_cancellable(text, &cancel).await;
+        self.typed_ahead = listener
+            .map(crate::listen::Listener::stop)
+            .unwrap_or_default();
+        if let Ok(mut status) = self.status.lock() {
+            status.typed.clear();
+            status.queued = 0;
+        }
 
         // Aborted so a stale handler cannot cancel the next submission.
         interrupt.abort();
@@ -576,7 +633,7 @@ where
     /// Asks for a summary with changes gated off, starts a new conversation,
     /// and carries the summary into the next message. The old conversation
     /// stays saved in full.
-    async fn compact(&mut self) {
+    async fn compact(&mut self) -> bool {
         let was_planning = self.planning.load(std::sync::atomic::Ordering::Relaxed);
         self.planning
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -594,8 +651,12 @@ where
                     "  no summary came back, so nothing was compacted"
                 )
             );
-            return;
+            return false;
         }
+        let summary = match self.recall.render() {
+            Some(recalled) => format!("{summary}\n\n{recalled}"),
+            None => summary,
+        };
         let key = self.model_key.clone();
         self.start_conversation(&key);
         let words = summary.split_whitespace().count();
@@ -607,6 +668,7 @@ where
                 &format!("  compacted into {words} words, which go ahead of your next message")
             )
         );
+        true
     }
 
     fn set_planning(&mut self, planning: bool) {
@@ -662,6 +724,7 @@ where
             Ok((session, name)) => {
                 self.agent.replace_session(session);
                 self.conversations += 1;
+                self.recall = crate::recall::Recall::default();
                 let id = format!("{}-{}", self.run_id, self.conversations);
                 // An empty conversation is never written, so there may be nothing to name.
                 let previous = self.state_path.is_file().then(|| self.current_id());

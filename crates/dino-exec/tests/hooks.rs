@@ -178,3 +178,26 @@ async fn start_hooks_report_their_output() {
     );
     let _ = fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn hooks_wait_for_the_turns_last_edit_to_a_file() {
+    let root = fixture("deferred");
+    let tool = hooked(&root, vec![argv(&["sh", "-c", "echo ran >> runs.log"])]);
+    let first = call("apply_patch");
+    let second = ToolCall {
+        id: "call-2".into(),
+        ..call("apply_patch")
+    };
+    tool.begin_turn(&[first.clone(), second.clone()]);
+
+    let output = tool.execute(&first).await.unwrap();
+    let output: Value = serde_json::from_str(&output.content).unwrap();
+    assert!(output["hooks"]["deferred"].is_string(), "{output}");
+    assert!(!root.join("runs.log").exists(), "the hook ran early");
+
+    let output = tool.execute(&second).await.unwrap();
+    let output: Value = serde_json::from_str(&output.content).unwrap();
+    assert_eq!(output["hooks"]["after_edit"][0]["exit_code"], 0, "{output}");
+    assert_eq!(fs::read_to_string(root.join("runs.log")).unwrap(), "ran\n");
+    let _ = fs::remove_dir_all(&root);
+}

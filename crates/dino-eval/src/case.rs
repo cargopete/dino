@@ -78,6 +78,10 @@ pub struct Expectations {
     /// the case did not expect fails, so the exit cannot be used to dodge work.
     #[serde(default)]
     pub blocked: bool,
+    /// At least this many more `#[test]` functions after the run than the
+    /// case's workspace started with. For a brief that never mentions tests.
+    #[serde(default)]
+    pub new_tests: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

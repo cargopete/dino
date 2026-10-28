@@ -21,6 +21,7 @@ path = "src/bin/dino-confine.rs"
 base64.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 futures-util.workspace = true
 dino-core.workspace = true
 dino-eval.workspace = true
@@ -30,13 +31,17 @@ dino-protocol.workspace = true
 dino-rust.workspace = true
 dino-sandbox.workspace = true
 dino-tools.workspace = true
-rustyline.workspace = true
+rustyline = { workspace = true, features = ["custom-bindings"] }
 serde.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 terminal_size.workspace = true
 toml.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["poll"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
