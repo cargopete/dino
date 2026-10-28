@@ -21,6 +21,7 @@ path = "src/bin/dino-confine.rs"
 base64.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 futures-util.workspace = true
 dino-core.workspace = true
 dino-eval.workspace = true

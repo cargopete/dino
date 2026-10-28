@@ -81,7 +81,12 @@ CI and evals.
   mutating, process or network. Read-only calls proceed. Anything else asks, and a session
   rule is keyed on the tool and the resolved target, never on a description of
   what a command probably does. A refusal returns to the model as an ordinary
-  tool result under its original call ID. Answering `r` keeps the rule for the
+  tool result under its original call ID, with what the person typed instead,
+  if anything. The prompt takes one key or the arrows; keys typed before it
+  appeared are discarded and unknown keys ignored. Beyond once and always, it
+  offers every pending call of the model's turn (`t`), one program whatever its
+  arguments (`p`, for `exec` and `cargo` but never a `shell` line), and every
+  process this session (`s`, still sandboxed). Answering `r` keeps the rule for the
   workspace in `~/.config/dino/approvals/`, outside the repository, so a checkout
   cannot approve its own commands; the file is plain JSON, to read or prune.
 - **A line-based session.** Not an alternate-screen interface, deliberately: the
