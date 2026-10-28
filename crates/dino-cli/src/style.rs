@@ -93,6 +93,13 @@ pub const WARN: Colour = Colour {
     light_indexed: 136,
 };
 
+/// Behind a changed word in a diff, on a truecolor terminal only: removed then
+/// added, on a dark ground and then a light one.
+const TINTS: [[(u8, u8, u8); 2]; 2] = [
+    [(0x4a, 0x2b, 0x20), (0x25, 0x3f, 0x2c)],
+    [(0xf4, 0xd9, 0xcb), (0xd4, 0xec, 0xd9)],
+];
+
 pub const RESET: &str = "\u{1b}[0m";
 pub const BOLD: &str = "\u{1b}[1m";
 pub const ITALIC: &str = "\u{1b}[3m";
@@ -307,6 +314,24 @@ fn paint_at(depth: Depth, colour: Colour, attributes: &[&str], value: &str) -> S
         attributes.concat(),
         colour.sequence_at(depth)
     )
+}
+
+/// A changed word in a diff: on a tinted ground where the terminal has exact
+/// colour, else bold, rather than a guessed shade from the 256.
+#[must_use]
+pub fn paint_changed(colour: Colour, added: bool, value: &str) -> String {
+    match depth() {
+        Depth::None => value.to_owned(),
+        Depth::Indexed => paint_with(colour, &[BOLD], value),
+        Depth::True => {
+            let (red, green, blue) =
+                TINTS[usize::from(ground() == Ground::Light)][usize::from(added)];
+            format!(
+                "\u{1b}[48;2;{red};{green};{blue}m{}{value}{RESET}",
+                colour.sequence_at(Depth::True)
+            )
+        }
+    }
 }
 
 /// A mono instrument label: the stamped plate above a dial, in the house style.

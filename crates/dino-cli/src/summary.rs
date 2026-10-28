@@ -48,12 +48,13 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
             fine(format!("{verb}, {}", lines(written)))
         }
         "apply_patch" => {
-            let changes = patch_preview(call, usize::MAX);
-            let added = changes
-                .iter()
-                .filter(|change| matches!(change, Change::Added(_)))
-                .count();
-            fine(format!("+{added} −{}", changes.len() - added))
+            let rows = crate::diff::of_call(call, None).unwrap_or_default();
+            let (added, removed) = rows.iter().fold((0, 0), |(added, removed), row| match row {
+                crate::diff::Row::Added { .. } => (added + 1, removed),
+                crate::diff::Row::Removed { .. } => (added, removed + 1),
+                _ => (added, removed),
+            });
+            fine(format!("+{added} −{removed}"))
         }
         "search" => {
             number("total_matches").and_then(|matches| fine(count(matches, "match", "matches")))

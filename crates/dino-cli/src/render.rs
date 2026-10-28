@@ -940,8 +940,12 @@ impl Renderer {
         entry.gist = gist;
         let call = entry.call.clone();
         self.draw_last(in_place)?;
-        if call.name == "apply_patch" && !failed {
-            write_out(&patch_preview(&call))?;
+        // A person who approved it at the prompt has just read it there.
+        if call.name == "apply_patch" && !failed && !self.asked.contains(&call.id) {
+            const PREVIEW_LINES: usize = 10;
+            let rows = crate::diff::of_call(&call, None).unwrap_or_default();
+            let width = crate::markdown::terminal_width().saturating_sub(1);
+            write_out(&crate::diff::paint(&rows, PREVIEW_LINES, "      ", width))?;
         }
         Ok(())
     }
@@ -966,7 +970,10 @@ impl Renderer {
             "{}\n",
             style::paint(colour, &format!("  · {}", cap(&gist, MAX_SUMMARY_BYTES)))
         ))?;
-        if call.name == "apply_patch" && tone == crate::summary::Tone::Fine {
+        if call.name == "apply_patch"
+            && tone == crate::summary::Tone::Fine
+            && !self.asked.contains(&call.id)
+        {
             write_out(&patch_preview(&call))?;
         }
         Ok(())

@@ -3,6 +3,7 @@
 mod approve;
 mod calls;
 mod config;
+mod diff;
 mod evals;
 mod handover;
 mod markdown;
@@ -1148,7 +1149,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
 fn policy(mode: ApprovalMode, sandbox: &str, workspace: &Path) -> Box<dyn ApprovalPolicy> {
     match mode {
         ApprovalMode::Interactive => {
-            let interactive = Interactive::new(TerminalApprover::new(sandbox));
+            let interactive = Interactive::new(TerminalApprover::new(sandbox, workspace));
             match settings::user_dir() {
                 Some(dir) => Box::new(
                     interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)),
