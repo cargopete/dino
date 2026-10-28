@@ -390,15 +390,19 @@ fn validate_request_settings(config: &AnthropicConfig) -> Result<(), ModelError>
         && matches!(config.effort, ReasoningEffort::XHigh | ReasoningEffort::Max)
     {
         return Err(ModelError::Configuration(
-            "Claude Opus 5 cannot disable thinking at xhigh or max effort".into(),
+            "Claude cannot disable thinking at xhigh or max effort".into(),
         ));
     }
     if config.thinking == ThinkingMode::Disabled
-        && config.profile.provider_model == "claude-opus-5-5"
+        && matches!(
+            config.profile.provider_model.as_str(),
+            "claude-opus-5-5" | "claude-sonnet-5-5"
+        )
     {
-        return Err(ModelError::Configuration(
-            "Claude Opus 5.5 cannot disable thinking at any effort".into(),
-        ));
+        return Err(ModelError::Configuration(format!(
+            "{} cannot disable thinking at any effort",
+            config.profile.display_name
+        )));
     }
     Ok(())
 }
@@ -1284,6 +1288,23 @@ mod tests {
         let profile = crate::builtin_profile("claude-opus").unwrap();
         let mut config = AnthropicConfig::new("test-key", profile);
         config.effort = ReasoningEffort::Max;
+        config.thinking = ThinkingMode::Disabled;
+        let session = AnthropicSession::new(config).unwrap();
+        let pending = AnthropicSession::pending_message(TurnInput::User {
+            content: "hello".into(),
+        });
+
+        assert!(matches!(
+            session.request_body(&pending),
+            Err(ModelError::Configuration(_))
+        ));
+    }
+
+    #[test]
+    fn sonnet_5_5_refuses_disabled_thinking_at_any_effort() {
+        let profile = crate::builtin_profile("claude-sonnet-5.5").unwrap();
+        let mut config = AnthropicConfig::new("test-key", profile);
+        config.effort = ReasoningEffort::Low;
         config.thinking = ThinkingMode::Disabled;
         let session = AnthropicSession::new(config).unwrap();
         let pending = AnthropicSession::pending_message(TurnInput::User {

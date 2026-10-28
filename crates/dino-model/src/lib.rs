@@ -297,6 +297,8 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         claude_opus(),
         claude_opus_5_5(),
         claude_sonnet(),
+        claude_sonnet_5_5(),
+        claude_haiku_5_5(),
         qwen_coder_480b(),
         qwen_coder_next(),
         qwen_coder_30b(),
@@ -356,6 +358,31 @@ fn claude_opus_5_5() -> ModelProfile {
         display_name: "Claude Opus 5.5".into(),
         status: ProfileStatus::Development,
         ..claude_opus()
+    }
+}
+
+/// **Provider-documented, inspected 2026-10-28:** `claude-sonnet-5-5` keeps
+/// Sonnet 5's window, output and price, and cannot disable thinking at any effort.
+fn claude_sonnet_5_5() -> ModelProfile {
+    ModelProfile {
+        key: "claude-sonnet-5.5".into(),
+        provider_model: "claude-sonnet-5-5".into(),
+        display_name: "Claude Sonnet 5.5".into(),
+        status: ProfileStatus::Development,
+        ..claude_sonnet()
+    }
+}
+
+/// **Provider-documented, inspected 2026-10-28:** `claude-haiku-5-5` has a
+/// 1,000,000-token window, up to 128,000 output tokens, every effort level from
+/// low through max (default medium), and disables thinking only at high or below.
+fn claude_haiku_5_5() -> ModelProfile {
+    ModelProfile {
+        key: "claude-haiku-5.5".into(),
+        provider_model: "claude-haiku-5-5".into(),
+        display_name: "Claude Haiku 5.5".into(),
+        status: ProfileStatus::Development,
+        ..claude_sonnet()
     }
 }
 
@@ -667,7 +694,7 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-        assert_eq!(all.len(), 16);
+        assert_eq!(all.len(), 18);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 
