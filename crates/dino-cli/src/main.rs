@@ -430,6 +430,7 @@ fn interactive_options(
         skills: skills(workspace),
         github: dino_exec::GithubTool::available(),
         web: true,
+        skip_edit_check: false,
     }
 }
 
