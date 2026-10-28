@@ -122,10 +122,24 @@ impl ModelSession for FallbackSession {
 
 /// Rewrites one adapter's exported history in another's native shape.
 ///
-/// Reasoning is dropped: Anthropic only accepts thinking blocks it signed.
-fn hand_over(state: &SessionState, to: &ModelProfile) -> Result<SessionState, ModelError> {
-    let payload = match (state.provider, to.provider) {
-        (ProviderKind::Qwen, ProviderKind::Anthropic) => chat_to_messages(&state.payload)?,
+/// Reasoning is dropped both ways: Anthropic only accepts thinking blocks it
+/// signed, and Qwen has no use for Anthropic's.
+///
+/// # Errors
+///
+/// Returns [`ModelError::Configuration`] for a pair of providers it cannot
+/// translate between, and [`ModelError::Protocol`] for a malformed history.
+pub fn hand_over(state: &SessionState, to: &ModelProfile) -> Result<SessionState, ModelError> {
+    let (payload, version) = match (state.provider, to.provider) {
+        (from, to) if from == to => (state.payload.clone(), state.version),
+        (ProviderKind::Qwen, ProviderKind::Anthropic) => (
+            chat_to_messages(&state.payload)?,
+            crate::anthropic::STATE_VERSION,
+        ),
+        (ProviderKind::Anthropic, ProviderKind::Qwen) => (
+            messages_to_chat(&state.payload)?,
+            crate::qwen::STATE_VERSION,
+        ),
         (from, to) => {
             return Err(ModelError::Configuration(format!(
                 "cannot hand a {from:?} conversation to {to:?}"
@@ -135,9 +149,73 @@ fn hand_over(state: &SessionState, to: &ModelProfile) -> Result<SessionState, Mo
     Ok(SessionState {
         provider: to.provider,
         model_key: to.key.clone(),
-        version: crate::anthropic::STATE_VERSION,
+        version,
         payload,
     })
+}
+
+fn messages_to_chat(history: &Value) -> Result<Value, ModelError> {
+    let messages = history.as_array().ok_or_else(|| {
+        ModelError::Protocol("a message history to hand over was not an array".into())
+    })?;
+    let mut out = Vec::new();
+    for message in messages {
+        let blocks = message["content"].as_array().into_iter().flatten();
+        let mut text = String::new();
+        let mut images = Vec::new();
+        let mut calls = Vec::new();
+        for block in blocks {
+            match block["type"].as_str() {
+                Some("text") => text.push_str(block["text"].as_str().unwrap_or_default()),
+                Some("image") => {
+                    let source = &block["source"];
+                    if let (Some(media), Some(data)) =
+                        (source["media_type"].as_str(), source["data"].as_str())
+                    {
+                        images.push(json!(format!("data:{media};base64,{data}")));
+                    }
+                }
+                Some("tool_use") => calls.push(json!({
+                    "id": block["id"],
+                    "type": "function",
+                    "function": {"name": block["name"], "arguments": block["input"].to_string()},
+                })),
+                // Each result is its own message in the chat shape.
+                Some("tool_result") => out.push(json!({
+                    "role": "tool",
+                    "tool_call_id": block["tool_use_id"],
+                    "content": result_text(&block["content"]),
+                })),
+                _ => {}
+            }
+        }
+        let role = message["role"].as_str().unwrap_or("user");
+        if text.is_empty() && images.is_empty() && calls.is_empty() {
+            continue;
+        }
+        let mut converted = json!({"role": role, "content": text});
+        if !images.is_empty() {
+            converted["images"] = Value::Array(images);
+        }
+        if !calls.is_empty() {
+            converted["tool_calls"] = Value::Array(calls);
+        }
+        out.push(converted);
+    }
+    Ok(Value::Array(out))
+}
+
+/// A tool result's content may be a string or a list of text blocks.
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 fn chat_to_messages(history: &Value) -> Result<Value, ModelError> {
@@ -234,6 +312,22 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn a_history_survives_the_round_trip_back_to_chat() {
+        let chat = json!([
+            {"role": "user", "content": "fix it", "images": ["data:image/png;base64,AAAA"]},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "one"},
+            {"role": "assistant", "content": "done"},
+        ]);
+
+        let back = messages_to_chat(&chat_to_messages(&chat).unwrap()).unwrap();
+
+        assert_eq!(back, chat);
+    }
 
     #[test]
     fn a_chat_history_becomes_alternating_messages() {

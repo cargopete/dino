@@ -39,7 +39,7 @@ use crate::sse::SseDecoder;
 const ERROR_BODY_LIMIT: usize = 4_096;
 
 /// Bump when the persisted history shape changes. RFC-0014 section 3.
-const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 
 #[derive(Clone)]
 pub struct QwenConfig {
