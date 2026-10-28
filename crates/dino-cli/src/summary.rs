@@ -93,7 +93,7 @@ pub enum Change {
 }
 
 /// The lines a patch changes, without the lines its old and new text share at
-/// either end, at most `limit` of them.
+/// either end, at most `limit` of them unless only one more would be hidden.
 #[must_use]
 pub fn patch_preview(call: &ToolCall, limit: usize) -> Vec<Change> {
     let edits: Vec<&Value> = match call.arguments.get("edits").and_then(Value::as_array) {
@@ -101,13 +101,14 @@ pub fn patch_preview(call: &ToolCall, limit: usize) -> Vec<Change> {
         None => vec![&call.arguments],
     };
     let changes: Vec<Change> = edits.into_iter().flat_map(edit_changes).collect();
-    if changes.len() <= limit {
+    let shown = crate::calls::shown(changes.len(), limit);
+    if shown == changes.len() {
         return changes;
     }
-    let hidden = changes.len() - limit;
+    let hidden = changes.len() - shown;
     changes
         .into_iter()
-        .take(limit)
+        .take(shown)
         .chain(std::iter::once(Change::More(hidden)))
         .collect()
 }
@@ -365,12 +366,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            patch_preview(&patch, 2),
-            [
-                Change::Removed("    1".into()),
-                Change::Added("    2".into()),
-                Change::More(1)
-            ]
+            patch_preview(&patch, 1),
+            [Change::Removed("    1".into()), Change::More(2)]
+        );
+        assert_eq!(
+            patch_preview(&patch, 2).len(),
+            3,
+            "one hidden line is shown"
         );
     }
 

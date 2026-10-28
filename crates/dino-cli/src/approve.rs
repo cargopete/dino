@@ -152,6 +152,7 @@ fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
 /// A closed or non-interactive standard input reaches the same place: refusal.
 /// An approval that a person did not give is not an approval.
 fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str) -> ApprovalReply {
+    crate::render::others_wrote();
     let mut err = stderr().lock();
     // The one moment a person is directly addressed.
     let header = style::paint_with(RUST, &[BOLD], "  approval");
@@ -468,6 +469,7 @@ impl RuleStore for FileRuleStore {
             Ok(()) => format!("      saved to {}", self.path.display()),
             Err(error) => format!("      could not save the rule: {error}"),
         };
+        crate::render::others_wrote();
         let _ = writeln!(stderr(), "{}", style::paint(FAINT, &note));
     }
 }

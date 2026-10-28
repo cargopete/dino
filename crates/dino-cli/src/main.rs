@@ -1,6 +1,7 @@
 //! The `dino` executable.
 
 mod approve;
+mod calls;
 mod config;
 mod evals;
 mod handover;

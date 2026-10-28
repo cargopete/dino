@@ -98,7 +98,7 @@ impl Markdown {
     }
 }
 
-fn terminal_width() -> usize {
+pub fn terminal_width() -> usize {
     terminal_size::terminal_size().map_or(100, |(width, _)| usize::from(width.0))
 }
 

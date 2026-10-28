@@ -45,9 +45,9 @@ impl Spinner {
         self.start(String::new(), "thinking");
     }
 
-    /// Ticks after a line already written, as `› cargo test  · 12s`.
-    pub fn after(&mut self, prefix: String) {
-        self.start(prefix, "");
+    /// Ticks on the line beneath a running call.
+    pub fn running(&mut self) {
+        self.start(String::new(), "running");
     }
 
     fn start(&mut self, prefix: String, label: &'static str) {
