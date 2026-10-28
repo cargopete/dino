@@ -31,7 +31,7 @@ dino-protocol.workspace = true
 dino-rust.workspace = true
 dino-sandbox.workspace = true
 dino-tools.workspace = true
-rustyline.workspace = true
+rustyline = { workspace = true, features = ["custom-bindings"] }
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
