@@ -470,7 +470,9 @@ Ollama serves a context far smaller than the model's native window unless
 
 The interface uses a warm dark palette because that is what it was drawn for.
 Dino ships the ink and leaves the background to the terminal, since a
-line-based program does not own its ground. On a light terminal, `--plain`.
+line-based program does not own its ground. It asks the terminal for that ground
+once at startup (OSC 11, then `COLORFGBG`) and on a light one draws the same hues
+in darker inks.
 
 **What lands on disk.** `.dino/` in the workspace holds the session log, the
 resumable state and the input history. The log records what you typed; the state

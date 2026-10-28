@@ -39,6 +39,9 @@ toml.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["poll"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
 nix = { workspace = true, features = ["sched", "socket", "user"] }
