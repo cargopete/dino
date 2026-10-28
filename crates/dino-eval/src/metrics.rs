@@ -15,6 +15,7 @@ use dino_protocol::ApprovalDecision;
 use dino_protocol::ModelEvent;
 use dino_protocol::StopReason;
 use dino_protocol::TokenUsage;
+use dino_protocol::ToolCall;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -23,6 +24,10 @@ use crate::EvalError;
 
 /// Counts from one run. These decide nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate observation from the log"
+)]
 pub struct Metrics {
     pub model_turns: u32,
     /// How many times each tool was called, by name.
@@ -57,6 +62,9 @@ pub struct Metrics {
     /// Fresh sessions a handover chain started after the first.
     #[serde(default)]
     pub handovers: usize,
+    /// Whether a Rust file was edited and no `cargo test` passed after it.
+    #[serde(default)]
+    pub untested_at_end: bool,
     pub tokens: TokenUsage,
     pub stop_reason: Option<StopReason>,
 }
@@ -75,7 +83,7 @@ pub fn from_log(path: &Path) -> Result<Metrics, EvalError> {
     let mut metrics = Metrics::default();
     // ToolFinished carries a call ID rather than a name, so the names come from
     // the ToolStarted records that precede it.
-    let mut names: HashMap<String, String> = HashMap::new();
+    let mut names: HashMap<String, ToolCall> = HashMap::new();
 
     for (number, line) in text.lines().enumerate() {
         let record: Value = serde_json::from_str(line).map_err(|error| {
@@ -111,7 +119,7 @@ pub fn from_log(path: &Path) -> Result<Metrics, EvalError> {
     Ok(metrics)
 }
 
-fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &AgentEvent) {
+fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, ToolCall>, event: &AgentEvent) {
     match event {
         AgentEvent::Model {
             event: ModelEvent::Usage { usage },
@@ -128,13 +136,19 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &Ag
         } => metrics.refusals += 1,
         AgentEvent::ToolStarted { call, .. } => {
             *metrics.tool_calls.entry(call.name.clone()).or_insert(0) += 1;
-            names.insert(call.id.clone(), call.name.clone());
+            names.insert(call.id.clone(), call.clone());
         }
         AgentEvent::ToolFinished { result, .. } => {
             if result.output.is_error {
                 metrics.tool_errors += 1;
+            } else if let Some(call) = names.get(&result.call_id) {
+                if edits_rust(call) {
+                    metrics.untested_at_end = true;
+                } else if passing_test_run(call, &result.output.content) {
+                    metrics.untested_at_end = false;
+                }
             }
-            if names.get(&result.call_id).map(String::as_str) == Some("gate")
+            if names.get(&result.call_id).map(|call| call.name.as_str()) == Some("gate")
                 && let Ok(body) = serde_json::from_str::<Value>(&result.output.content)
                 && let Some(verdict) = body.get("verdict").and_then(Value::as_str)
             {
@@ -163,4 +177,45 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, String>, event: &Ag
         | AgentEvent::Model { .. }
         | AgentEvent::ToolDecided { .. } => {}
     }
+}
+
+fn edits_rust(call: &ToolCall) -> bool {
+    matches!(call.name.as_str(), "write_file" | "apply_patch")
+        && call
+            .arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| {
+                Path::new(path)
+                    .extension()
+                    .is_some_and(|extension| extension == "rs")
+            })
+}
+
+fn passing_test_run(call: &ToolCall, output: &str) -> bool {
+    let line = match call.name.as_str() {
+        "cargo" => call.arguments.get("command").and_then(Value::as_str) == Some("test"),
+        "exec" => call
+            .arguments
+            .get("command")
+            .and_then(Value::as_array)
+            .is_some_and(|words| {
+                words
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|pair| pair == ["cargo", "test"])
+            }),
+        "shell" => call
+            .arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|line| line.contains("cargo test")),
+        _ => false,
+    };
+    line && serde_json::from_str::<Value>(output)
+        .ok()
+        .and_then(|value| value.get("exit_code").and_then(Value::as_i64))
+        == Some(0)
 }

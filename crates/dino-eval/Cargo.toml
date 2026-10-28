@@ -14,6 +14,7 @@ dino-protocol.workspace = true
 dino-rust.workspace = true
 dino-sandbox.workspace = true
 dino-tools.workspace = true
+ignore.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
