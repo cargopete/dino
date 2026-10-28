@@ -5,11 +5,19 @@
 //!
 //! Colour follows the house rule: if a shell printed it, it is slate; if a
 //! person wrote it, it is terracotta.
+//!
+//! On a terminal a call's line is committed as it starts and redrawn in place
+//! when it finishes, or when the next look joins it, for as long as nothing has
+//! been written beneath it. Without colour every line is written once, in order.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::Write;
 use std::io::stdout;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use dino_core::session::EventSink;
 use dino_core::session::RunOutcome;
@@ -25,6 +33,8 @@ use dino_protocol::ToolResult;
 use dino_protocol::WindowSource;
 use serde_json::Value;
 
+use crate::calls;
+use crate::calls::Mark;
 use crate::style;
 use crate::style::FAINT;
 use crate::style::ITALIC;
@@ -36,6 +46,132 @@ use crate::style::WARN;
 
 const MAX_SUMMARY_BYTES: usize = 120;
 const BELL_AFTER_SECONDS: u64 = 15;
+/// Up one line and clear it. Not a carriage return, which a terminal set to
+/// translate it turns into a newline.
+const BACK_UP: &str = "\u{1b}[1A\u{1b}[2K\u{1b}[1G";
+
+/// Counts writes to the terminal, so a line knows whether it is still the last.
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// For anything else that writes to the terminal during a turn, such as the
+/// approval prompt, so the renderer does not redraw a line that has moved up.
+pub fn others_wrote() {
+    WRITES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The call line drawn last and what it showed.
+struct Last {
+    /// [`WRITES`] just after it was drawn.
+    writes: u64,
+    entries: Vec<Entry>,
+    /// Whether further looks may join it.
+    folds: bool,
+}
+
+impl Last {
+    /// Whether nothing has been written beneath it.
+    fn is_last(&self) -> bool {
+        self.writes == WRITES.load(Ordering::Relaxed)
+    }
+
+    /// The line, cut to the terminal so it never wraps: redrawing in place
+    /// goes up exactly one row.
+    fn line(&self) -> String {
+        // The mark and icon take six columns, and one is spare.
+        let room = crate::markdown::terminal_width().saturating_sub(7);
+        if let [entry] = &self.entries[..] {
+            return call_line(entry.mark, &entry.call, entry.gist.as_ref(), room);
+        }
+        let marks = || self.entries.iter().map(|entry| entry.mark);
+        let mark = if marks().any(|mark| mark == Mark::Running) {
+            Mark::Running
+        } else if marks().any(|mark| mark == Mark::Failed) {
+            Mark::Failed
+        } else {
+            Mark::Done
+        };
+        let looks: Vec<calls::Look> = self
+            .entries
+            .iter()
+            .map(|entry| calls::Look::of(&entry.call, entry.mark == Mark::Failed))
+            .collect();
+        format!(
+            "  {} {}",
+            paint_mark(mark),
+            style::paint(SLATE, &format!("→ {}", calls::explored(&looks, room)))
+        )
+    }
+}
+
+struct Entry {
+    call: ToolCall,
+    mark: Mark,
+    gist: Option<(crate::summary::Tone, String)>,
+}
+
+/// One call on one line: `  ✓ → read src/main.rs · 62 lines`.
+fn call_line(
+    mark: Mark,
+    call: &ToolCall,
+    gist: Option<&(crate::summary::Tone, String)>,
+    room: usize,
+) -> String {
+    let (gist, colour) = match gist {
+        Some((crate::summary::Tone::Failed, gist)) => (gist.as_str(), WARN),
+        Some((crate::summary::Tone::Fine, gist)) => (gist.as_str(), FAINT),
+        None => ("", FAINT),
+    };
+    let (description, gist) = calls::fit(&describe_call(call), gist, room);
+    let mut line = format!(
+        "  {} {}",
+        paint_mark(mark),
+        style::paint(SLATE, &format!("{} {description}", calls::icon(&call.name)))
+    );
+    if !gist.is_empty() {
+        line.push_str(&style::paint(colour, &format!(" · {gist}")));
+    }
+    line
+}
+
+fn paint_mark(mark: Mark) -> String {
+    let colour = match mark {
+        Mark::Running => SLATE,
+        Mark::Done => MUTED,
+        Mark::Failed => WARN,
+        Mark::Refused => RUST,
+    };
+    style::paint(colour, &mark.glyph().to_string())
+}
+
+/// A refused call, telling a person's refusal from a policy's.
+fn refused_line(tool: &str, description: &str, reason: &str) -> String {
+    let room = crate::markdown::terminal_width().saturating_sub(7);
+    let (mark, colour, tag, said) = match reason.strip_prefix("the operator refused this action") {
+        Some(said) => (
+            Mark::Refused,
+            RUST,
+            "refused by you".to_owned(),
+            said.strip_prefix(": ").map(str::trim),
+        ),
+        None => (
+            Mark::Failed,
+            WARN,
+            format!("blocked: {}", first_line(reason)),
+            None,
+        ),
+    };
+    let (description, tag) = calls::fit(description, &tag, room);
+    let mut line = format!(
+        "  {} {}{}\n",
+        paint_mark(mark),
+        style::paint(SLATE, &format!("{} {description}", calls::icon(tool))),
+        style::paint(colour, &format!(" · {tag}"))
+    );
+    if let Some(said) = said.filter(|said| !said.is_empty()) {
+        line.push_str(&style::paint(FAINT, &format!("      you said: {said}\n")));
+    }
+    line
+}
 
 pub struct Renderer {
     show_reasoning: bool,
@@ -46,9 +182,20 @@ pub struct Renderer {
     markdown: crate::markdown::Markdown,
     /// The call whose line is open, waiting for its result to finish it.
     open_call: Option<ToolCall>,
+    /// On a terminal, the line that may still be redrawn.
+    last: Option<Last>,
+    /// This submission's calls as the model made them, so a refusal can be
+    /// drawn like the call it refused.
+    calls: HashMap<String, ToolCall>,
+    /// Calls a person approved at the prompt, which showed their change.
+    asked: HashSet<String>,
+    /// Drawing a log, where no prompt was drawn to show a change.
+    replaying: bool,
     /// When the current submission started, for the closing line.
     started: Option<std::time::Instant>,
     spinner: crate::spinner::Spinner,
+    /// What the status row shows, shared with the session, which names the model.
+    status: Arc<Mutex<crate::spinner::Status>>,
     /// Accumulated across every submission, because a session's cost is the
     /// question a person actually has. Shared so `/status` can read the same
     /// number the turn summary prints, rather than keeping a second tally that
@@ -70,18 +217,31 @@ enum Stream {
 impl Renderer {
     #[must_use]
     pub fn new(show_reasoning: bool) -> Self {
+        let status = Arc::new(Mutex::new(crate::spinner::Status::default()));
         Self {
             show_reasoning,
             stream: Stream::Idle,
             pending: String::new(),
             markdown: crate::markdown::Markdown::default(),
             open_call: None,
+            last: None,
+            calls: HashMap::new(),
+            asked: HashSet::new(),
+            replaying: false,
             started: None,
-            spinner: crate::spinner::Spinner::default(),
+            spinner: crate::spinner::Spinner::new(Arc::clone(&status)),
+            status,
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             context_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// For drawing a recorded session rather than a live one.
+    #[must_use]
+    pub fn replaying(mut self) -> Self {
+        self.replaying = true;
+        self
     }
 
     /// Set by a context warning, for a session that compacts on its own.
@@ -100,6 +260,12 @@ impl Renderer {
     #[must_use]
     pub fn usage_handle(&self) -> Arc<Mutex<TokenUsage>> {
         Arc::clone(&self.usage)
+    }
+
+    /// A handle on the status row's figures, for naming the model and window.
+    #[must_use]
+    pub fn status_handle(&self) -> Arc<Mutex<crate::spinner::Status>> {
+        Arc::clone(&self.status)
     }
 
     /// Draws whatever is held back: a partial line of text, an open call.
@@ -189,6 +355,11 @@ impl Renderer {
                     total.output_tokens += usage.output_tokens;
                     total.reasoning_tokens += usage.reasoning_tokens;
                 }
+                if let Ok(mut status) = self.status.lock() {
+                    status.context = usage.input_tokens;
+                    status.input += usage.input_tokens;
+                    status.output += usage.output_tokens;
+                }
                 Ok(())
             }
             ModelEvent::Finished { reason } => {
@@ -199,22 +370,34 @@ impl Renderer {
                 }
                 Ok(())
             }
+            ModelEvent::ToolCallCompleted { call } => {
+                self.calls.insert(call.id.clone(), call.clone());
+                Ok(())
+            }
             ModelEvent::ReasoningDelta { .. }
             | ModelEvent::Started { .. }
             | ModelEvent::ToolCallStarted { .. }
-            | ModelEvent::ToolCallArgumentsDelta { .. }
-            | ModelEvent::ToolCallCompleted { .. } => Ok(()),
+            | ModelEvent::ToolCallArgumentsDelta { .. } => Ok(()),
         }
     }
 
     fn decision(
         &mut self,
+        call_id: &str,
         tool: &str,
         subject: Option<&str>,
         decision: &ApprovalDecision,
     ) -> Result<(), SinkError> {
         let subject = subject.unwrap_or(tool);
         match decision {
+            ApprovalDecision::Denied { reason } if style::enabled() => {
+                self.break_stream()?;
+                let description = self
+                    .calls
+                    .get(call_id)
+                    .map_or_else(|| subject.to_owned(), describe_call);
+                write_out(&refused_line(tool, &description, reason))
+            }
             // A person decided this, so a person's colour carries it.
             ApprovalDecision::Denied { reason } => {
                 self.break_stream()?;
@@ -237,6 +420,12 @@ impl Renderer {
                     FAINT,
                     &format!("  allowed  {subject}  by {rule}\n"),
                 ))
+            }
+            ApprovalDecision::Allowed {
+                source: DecisionSource::User,
+            } if !self.replaying => {
+                self.asked.insert(call_id.to_owned());
+                Ok(())
             }
             ApprovalDecision::Allowed { .. } => Ok(()),
         }
@@ -288,29 +477,27 @@ impl EventSink for Renderer {
             AgentEvent::Submitted { text } => {
                 self.break_stream()?;
                 self.started = Some(std::time::Instant::now());
+                self.calls.clear();
+                self.asked.clear();
+                if let Ok(mut status) = self.status.lock() {
+                    status.input = 0;
+                    status.output = 0;
+                }
                 submitted(text)
             }
             AgentEvent::Model { event, .. } => self.model_event(event),
             AgentEvent::ToolDecided {
+                call_id,
                 tool,
                 action,
                 decision,
                 ..
-            } => self.decision(tool, action.subject.as_deref(), decision),
+            } => self.decision(call_id, tool, action.subject.as_deref(), decision),
             AgentEvent::ToolStarted { call, .. } if call.name == dino_core::todo::TODO => {
                 self.break_stream()?;
                 todo_started(call)
             }
-            AgentEvent::ToolStarted { call, .. } => {
-                self.break_stream()?;
-                // The machine is about to do something, so the machine's colour.
-                // The line stays open for the result to finish it.
-                let line = style::paint(SLATE, &format!("  › {}", describe_call(call)));
-                write_out(&line)?;
-                self.open_call = Some(call.clone());
-                self.spinner.after(line);
-                Ok(())
-            }
+            AgentEvent::ToolStarted { call, .. } => self.tool_started(call),
             AgentEvent::ContextWarning {
                 input_tokens,
                 window_tokens,
@@ -390,6 +577,7 @@ impl EventSink for Renderer {
     fn finish(&mut self, outcome: &RunOutcome) -> Result<(), SinkError> {
         self.spinner.stop();
         self.break_stream()?;
+        self.interrupt_last()?;
         let usage = self
             .usage
             .lock()
@@ -533,6 +721,7 @@ pub fn status_block(rows: &[(&str, String)]) -> String {
 }
 
 fn write_out(text: &str) -> Result<(), SinkError> {
+    WRITES.fetch_add(1, Ordering::Relaxed);
     let mut out = stdout().lock();
     out.write_all(text.as_bytes())
         .and_then(|()| out.flush())
@@ -706,12 +895,118 @@ fn todo_started(call: &dino_protocol::ToolCall) -> Result<(), SinkError> {
         block.push('\n');
         block
     });
-    write_out(&style::paint(SLATE, &format!("  › todo\n{indented}")))
+    let marker = if style::enabled() { "#" } else { "›" };
+    write_out(&style::paint(
+        SLATE,
+        &format!("  {marker} todo\n{indented}"),
+    ))
 }
 
 impl Renderer {
+    fn tool_started(&mut self, call: &ToolCall) -> Result<(), SinkError> {
+        self.break_stream()?;
+        if !style::enabled() {
+            // The machine is about to do something, so the machine's colour.
+            // The line stays open for the result to finish it.
+            let line = style::paint(SLATE, &format!("  › {}", describe_call(call)));
+            write_out(&line)?;
+            self.open_call = Some(call.clone());
+            return Ok(());
+        }
+        let entry = Entry {
+            call: call.clone(),
+            mark: Mark::Running,
+            gist: None,
+        };
+        let joined = match self.last.as_mut() {
+            Some(last) if last.folds && last.is_last() && calls::explores(&call.name) => {
+                last.entries.push(entry);
+                true
+            }
+            _ => {
+                self.last = Some(Last {
+                    writes: 0,
+                    entries: vec![entry],
+                    folds: calls::explores(&call.name),
+                });
+                false
+            }
+        };
+        self.draw_last(joined)?;
+        self.spinner.running();
+        Ok(())
+    }
+
+    /// A call still running when the run ends was cut off, and its line says
+    /// so rather than keep its running mark in the scrollback.
+    fn interrupt_last(&mut self) -> Result<(), SinkError> {
+        let Some(last) = self.last.as_mut() else {
+            return Ok(());
+        };
+        let mut cut_off = false;
+        for entry in &mut last.entries {
+            if entry.mark == Mark::Running {
+                entry.mark = Mark::Failed;
+                entry.gist = Some((crate::summary::Tone::Failed, "interrupted".to_owned()));
+                cut_off = true;
+            }
+        }
+        let in_place = last.is_last();
+        if cut_off {
+            self.draw_last(in_place)?;
+        }
+        self.last = None;
+        Ok(())
+    }
+
+    /// Draws the last call line over itself, or as a new line.
+    fn draw_last(&mut self, in_place: bool) -> Result<(), SinkError> {
+        let Some(last) = &self.last else {
+            return Ok(());
+        };
+        let up = if in_place { BACK_UP } else { "" };
+        write_out(&format!("{up}{}\n", last.line()))?;
+        if let Some(last) = &mut self.last {
+            last.writes = WRITES.load(Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Marks the call done or failed on its line, with the gist of its result.
+    fn finish_line(&mut self, result: &ToolResult) -> Result<(), SinkError> {
+        let Some(last) = self.last.as_mut() else {
+            return Ok(());
+        };
+        let in_place = last.is_last();
+        let Some(entry) = last
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call.id == result.call_id)
+        else {
+            // A refused call has had its line already.
+            return Ok(());
+        };
+        let gist = crate::summary::summarise(&entry.call, &result.output);
+        let failed = matches!(gist, Some((crate::summary::Tone::Failed, _)));
+        entry.mark = if failed { Mark::Failed } else { Mark::Done };
+        entry.gist = gist;
+        let call = entry.call.clone();
+        self.draw_last(in_place)?;
+        // A person who approved it at the prompt has just read it there.
+        if call.name == "apply_patch" && !failed && !self.asked.contains(&call.id) {
+            const PREVIEW_LINES: usize = 10;
+            let rows = crate::diff::of_call(&call, None).unwrap_or_default();
+            let width = crate::markdown::terminal_width().saturating_sub(1);
+            write_out(&crate::diff::paint(&rows, PREVIEW_LINES, "      ", width))?;
+        }
+        Ok(())
+    }
+
     /// Finishes the call's open line with the gist of its result.
     fn tool_finished(&mut self, result: &ToolResult) -> Result<(), SinkError> {
+        if style::enabled() {
+            return self.finish_line(result);
+        }
         let Some(call) = self.open_call.take() else {
             // A refused call has had its line already, and a todo its list.
             return Ok(());
@@ -727,7 +1022,10 @@ impl Renderer {
             "{}\n",
             style::paint(colour, &format!("  · {}", cap(&gist, MAX_SUMMARY_BYTES)))
         ))?;
-        if call.name == "apply_patch" && tone == crate::summary::Tone::Fine {
+        if call.name == "apply_patch"
+            && tone == crate::summary::Tone::Fine
+            && !self.asked.contains(&call.id)
+        {
             write_out(&patch_preview(&call))?;
         }
         Ok(())
@@ -737,20 +1035,28 @@ impl Renderer {
 /// The changed lines of a patch, beneath its call: removed in terracotta,
 /// added in green, behind a faint gutter.
 fn patch_preview(call: &ToolCall) -> String {
-    use crate::summary::Change;
-    const PREVIEW_LINES: usize = 12;
-    crate::summary::patch_preview(call, PREVIEW_LINES)
+    use crate::diff::Row;
+    const PREVIEW_LINES: usize = 10;
+    let text = |parts: &[(bool, String)]| {
+        let line: String = parts.iter().map(|(_, text)| text.as_str()).collect();
+        cap(&line, MAX_SUMMARY_BYTES)
+    };
+    let changed: Vec<String> = crate::diff::of_call(call, None)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|row| match row {
+            Row::Removed { parts, .. } => Some(style::paint(RUST, &format!("- {}", text(parts)))),
+            Row::Added { parts, .. } => Some(style::paint(OK, &format!("+ {}", text(parts)))),
+            Row::Same { .. } | Row::Gap => None,
+        })
+        .collect();
+    let shown = calls::shown(changed.len(), PREVIEW_LINES);
+    let hidden = changed.len() - shown;
+    changed
         .into_iter()
-        .fold(String::new(), |mut block, change| {
-            let line = match change {
-                Change::Removed(text) => {
-                    style::paint(RUST, &format!("- {}", cap(&text, MAX_SUMMARY_BYTES)))
-                }
-                Change::Added(text) => {
-                    style::paint(OK, &format!("+ {}", cap(&text, MAX_SUMMARY_BYTES)))
-                }
-                Change::More(hidden) => style::paint(FAINT, &format!("… {hidden} more")),
-            };
+        .take(shown)
+        .chain((hidden > 0).then(|| style::paint(FAINT, &format!("… {hidden} more"))))
+        .fold(String::new(), |mut block, line| {
             block.push_str(&style::paint(FAINT, "      │ "));
             block.push_str(&line);
             block.push('\n');
@@ -798,6 +1104,43 @@ mod tests {
             .unwrap();
 
         assert!(full.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Another test may have turned colour on for the whole process.
+    fn visible(painted: &str) -> String {
+        let mut out = String::new();
+        let mut chars = painted.chars();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' {
+                chars.by_ref().find(|next| *next == 'm');
+            } else {
+                out.push(character);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_refusal_says_whether_you_or_the_policy_refused() {
+        let yours = visible(&super::refused_line(
+            "apply_patch",
+            "apply_patch a.txt",
+            "the operator refused this action: leave the pie alone",
+        ));
+        assert_eq!(
+            yours,
+            "  × ← apply_patch a.txt · refused by you\n      you said: leave the pie alone\n"
+        );
+        let blocked = visible(&super::refused_line(
+            "exec",
+            "exec cargo build",
+            "plan mode: nothing changes and nothing runs until the plan is accepted",
+        ));
+        assert!(
+            blocked.starts_with("  × $ exec cargo build · blocked: plan mode"),
+            "{blocked}"
+        );
+        assert_eq!(blocked.lines().count(), 1);
     }
 
     #[test]

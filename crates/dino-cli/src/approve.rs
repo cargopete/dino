@@ -36,18 +36,24 @@ use crate::style::RUST;
 #[derive(Debug, Clone)]
 pub struct TerminalApprover {
     sandbox: String,
+    /// Where a proposed edit's file is read from, to show what it changes.
+    root: PathBuf,
     caveat_shown: Arc<AtomicBool>,
 }
 
 impl TerminalApprover {
     #[must_use]
-    pub fn new(sandbox: impl Into<String>) -> Self {
+    pub fn new(sandbox: impl Into<String>, root: impl Into<PathBuf>) -> Self {
         Self {
             sandbox: sandbox.into(),
+            root: root.into(),
             caveat_shown: Arc::new(AtomicBool::new(false)),
         }
     }
 }
+
+/// The most diff lines the prompt shows before counting the rest.
+const DIFF_LINES: usize = 30;
 
 impl Approver for TerminalApprover {
     fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
@@ -67,14 +73,27 @@ impl Approver for TerminalApprover {
         let sandbox = self.sandbox.clone();
         let caveat_shown = Arc::clone(&self.caveat_shown);
         let context = context.clone();
+        let call = call.clone();
+        let root = self.root.clone();
         Box::pin(async move {
             let prompt = move || {
+                let change = crate::diff::of_call(&call, Some(&root))
+                    .filter(|rows| !rows.is_empty())
+                    .map(|rows| {
+                        crate::diff::paint(
+                            &rows,
+                            DIFF_LINES,
+                            "      ",
+                            crate::markdown::terminal_width().saturating_sub(1),
+                        )
+                    });
                 let asking = Asking {
                     summary: &summary,
                     tool: &tool,
                     subject: &subject,
                     class,
                     context: &context,
+                    change: change.as_deref(),
                 };
                 ask_on_terminal(&asking, &caveat_shown, &sandbox)
             };
@@ -94,6 +113,8 @@ struct Asking<'a> {
     subject: &'a str,
     class: ToolClass,
     context: &'a AskContext,
+    /// The diff of an edit, drawn and ready.
+    change: Option<&'a str>,
 }
 
 /// One answer the selector offers: its key, its label and what it means.
@@ -152,6 +173,7 @@ fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
 /// A closed or non-interactive standard input reaches the same place: refusal.
 /// An approval that a person did not give is not an approval.
 fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str) -> ApprovalReply {
+    crate::render::others_wrote();
     let mut err = stderr().lock();
     // The one moment a person is directly addressed.
     let header = style::paint_with(RUST, &[BOLD], "  approval");
@@ -211,6 +233,10 @@ fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str
         })
         .and_then(|()| match &also {
             Some(also) => writeln!(err, "{}", style::paint(FAINT, also)),
+            None => Ok(()),
+        })
+        .and_then(|()| match asking.change {
+            Some(change) => write!(err, "\n{change}\n"),
             None => Ok(()),
         })
         .and_then(|()| err.flush());
@@ -468,6 +494,7 @@ impl RuleStore for FileRuleStore {
             Ok(()) => format!("      saved to {}", self.path.display()),
             Err(error) => format!("      could not save the rule: {error}"),
         };
+        crate::render::others_wrote();
         let _ = writeln!(stderr(), "{}", style::paint(FAINT, &note));
     }
 }

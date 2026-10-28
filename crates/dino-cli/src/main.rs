@@ -1,7 +1,9 @@
 //! The `dino` executable.
 
 mod approve;
+mod calls;
 mod config;
+mod diff;
 mod evals;
 mod handover;
 mod markdown;
@@ -511,6 +513,7 @@ pub(crate) struct Prepared {
     requests: Arc<std::sync::atomic::AtomicU64>,
     planning: Arc<std::sync::atomic::AtomicBool>,
     context_full: Arc<std::sync::atomic::AtomicBool>,
+    status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
 }
 
@@ -588,6 +591,10 @@ fn prepare(
     let usage = renderer.usage_handle();
     let requests = renderer.requests_handle();
     let context_full = renderer.context_handle();
+    let status = renderer.status_handle();
+    if let Ok(mut status) = status.lock() {
+        status.answering(&settings.profile);
+    }
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
         model,
@@ -621,6 +628,7 @@ fn prepare(
         requests,
         planning,
         context_full,
+        status,
         sandbox,
     })
 }
@@ -652,6 +660,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         recall: crate::recall::Recall::default(),
         auto_compact: prepared.settings.compaction == config::Compaction::Automatic,
         context_full: prepared.context_full,
+        status: prepared.status,
         model: prepared.settings.profile.display_name.clone(),
         workspace: prepared.settings.workspace.display().to_string(),
         sandbox: prepared.sandbox_label,
@@ -1147,7 +1156,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
 fn policy(mode: ApprovalMode, sandbox: &str, workspace: &Path) -> Box<dyn ApprovalPolicy> {
     match mode {
         ApprovalMode::Interactive => {
-            let interactive = Interactive::new(TerminalApprover::new(sandbox));
+            let interactive = Interactive::new(TerminalApprover::new(sandbox, workspace));
             match settings::user_dir() {
                 Some(dir) => Box::new(
                     interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)),

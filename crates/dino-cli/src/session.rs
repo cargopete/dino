@@ -302,6 +302,8 @@ pub struct Session<S> {
     pub auto_compact: bool,
     /// Set by the renderer when the core warns the context is filling.
     pub context_full: Arc<std::sync::atomic::AtomicBool>,
+    /// The status row's figures, told which model is answering.
+    pub status: Arc<Mutex<crate::spinner::Status>>,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -329,6 +331,13 @@ where
         editor.set_helper(Some(Continuation {
             root: self.workspace_root.clone(),
         }));
+        // A new line without sending: alt-enter, which is also what shift-enter
+        // sends once a terminal is set to send ESC CR for it. Not ctrl-j: Enter
+        // typed before the editor takes the terminal arrives as the same byte.
+        editor.bind_sequence(
+            rustyline::KeyEvent(rustyline::KeyCode::Enter, rustyline::Modifiers::ALT),
+            rustyline::Cmd::Newline,
+        );
         let _ = editor.load_history(&self.history_path);
 
         println!("{}", self.opening());
@@ -342,7 +351,8 @@ where
             // Blocking on purpose. Nothing else is running while a person is
             // typing, and moving the editor across a spawn_blocking boundary
             // every keystroke would buy nothing.
-            match editor.readline(&prompt) {
+            let typed = crate::style::take_typeahead();
+            match editor.readline_with_initial(&prompt, (&typed, "")) {
                 Ok(line) => {
                     let _ = editor.add_history_entry(line.as_str());
                     let input = parse(&join_continuations(&line));
@@ -544,6 +554,11 @@ where
 
     /// Runs one prepared message and saves the conversation after it.
     async fn run_submission(&mut self, text: String) -> Option<dino_core::RunResult> {
+        // Each time, since `/model` and `/resume` change it and a run can learn
+        // the window the server really serves.
+        if let Ok(mut status) = self.status.lock() {
+            status.answering(self.agent.session().profile());
+        }
         let cancel = CancellationToken::new();
         let signal = cancel.clone();
         let interrupt = tokio::spawn(async move {
