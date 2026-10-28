@@ -601,6 +601,11 @@ where
     ) -> Result<Settled, AgentError> {
         let mut results = Vec::with_capacity(calls.len());
         let mut reported_blocker = None;
+        let classified: Vec<(ToolCall, ToolAction)> = calls
+            .iter()
+            .filter_map(|call| Some((call.clone(), self.tools.classify(call).ok()?)))
+            .collect();
+        self.policy.begin_turn(&classified);
         for call in calls {
             let reported = (call.name == blocker::REPORT_BLOCKER)
                 .then(|| blocker::describe(&call).ok())

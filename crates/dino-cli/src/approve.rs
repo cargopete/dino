@@ -4,6 +4,7 @@
 //! description the model wrote. Answering approves that exact action, or a rule
 //! narrowed to that exact tool and subject.
 
+use std::fmt::Write as _;
 use std::io::BufRead;
 use std::io::IsTerminal;
 use std::io::Write;
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 use dino_core::approval::ApprovalReply;
 use dino_core::approval::Approver;
+use dino_core::approval::AskContext;
 use dino_core::approval::ReplyFuture;
 use dino_core::approval::RuleStore;
 use dino_protocol::ToolAction;
@@ -49,15 +51,33 @@ impl TerminalApprover {
 
 impl Approver for TerminalApprover {
     fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
+        self.ask_in(call, action, &AskContext::default())
+    }
+
+    fn ask_in(
+        &self,
+        call: &ToolCall,
+        action: &ToolAction,
+        context: &AskContext,
+    ) -> ReplyFuture<'_> {
         let summary = describe_call(call);
         let subject = action.subject.clone().unwrap_or_else(|| call.name.clone());
         let tool = call.name.clone();
         let class = action.class;
         let sandbox = self.sandbox.clone();
         let caveat_shown = Arc::clone(&self.caveat_shown);
+        let context = context.clone();
         Box::pin(async move {
-            let prompt =
-                move || ask_on_terminal(&summary, &tool, &subject, class, &caveat_shown, &sandbox);
+            let prompt = move || {
+                let asking = Asking {
+                    summary: &summary,
+                    tool: &tool,
+                    subject: &subject,
+                    class,
+                    context: &context,
+                };
+                ask_on_terminal(&asking, &caveat_shown, &sandbox)
+            };
             match tokio::task::spawn_blocking(prompt).await {
                 Ok(reply) => reply,
                 Err(error) => {
@@ -68,26 +88,72 @@ impl Approver for TerminalApprover {
     }
 }
 
-/// The choices, in the order the selector shows them, with their keys.
-const CHOICES: [(char, &str); 4] = [('y', "once"), ('a', ""), ('r', "remember"), ('n', "refuse")];
+struct Asking<'a> {
+    summary: &'a str,
+    tool: &'a str,
+    subject: &'a str,
+    class: ToolClass,
+    context: &'a AskContext,
+}
+
+/// One answer the selector offers: its key, its label and what it means.
+struct Choice {
+    key: char,
+    label: String,
+    reply: ApprovalReply,
+}
+
+/// How many of a turn's other pending calls are named in the prompt.
+const NAMED_PENDING: usize = 3;
+
+fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
+    let choice = |key, label: &str, reply| Choice {
+        key,
+        label: label.to_owned(),
+        reply,
+    };
+    let mut choices = vec![choice('y', "once", ApprovalReply::Once)];
+    let others = asking.context.also_pending.len();
+    if others > 0 {
+        choices.push(choice(
+            't',
+            &format!("all {} in this turn", others + 1),
+            ApprovalReply::ForTurn,
+        ));
+    }
+    if let Some(program) = &asking.context.program {
+        choices.push(choice(
+            'p',
+            &format!("always for {program} *"),
+            ApprovalReply::ForProgram,
+        ));
+    }
+    choices.push(choice('a', always, ApprovalReply::ForSession));
+    choices.push(choice('r', "remember", ApprovalReply::Remember));
+    if asking.class == ToolClass::Process {
+        choices.push(choice(
+            's',
+            "every command this session",
+            ApprovalReply::AllProcesses,
+        ));
+    }
+    choices.push(choice('n', "refuse", ApprovalReply::Reject(None)));
+    choices
+}
 
 /// Asks on the terminal and refuses on anything that is not a clear yes.
 ///
 /// A closed or non-interactive standard input reaches the same place: refusal.
 /// An approval that a person did not give is not an approval.
-fn ask_on_terminal(
-    summary: &str,
-    tool: &str,
-    subject: &str,
-    class: ToolClass,
-    caveat_shown: &AtomicBool,
-    sandbox: &str,
-) -> ApprovalReply {
+fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str) -> ApprovalReply {
     let mut err = stderr().lock();
     // The one moment a person is directly addressed.
     let header = style::paint_with(RUST, &[BOLD], "  approval");
-    let detail = style::paint(FAINT, &format!("      rule scope: {tool} on {subject}"));
-    let (always, caveat) = match class {
+    let detail = style::paint(
+        FAINT,
+        &format!("      rule scope: {} on {}", asking.tool, asking.subject),
+    );
+    let (always, caveat) = match asking.class {
         // The containment line is the same every time, so it is said once.
         ToolClass::Process => (
             "always for this command",
@@ -100,15 +166,32 @@ fn ask_on_terminal(
         ToolClass::Network => (
             "always for this host",
             Some(format!(
-                "      sends a request to {subject} · the URL can carry workspace text with it"
+                "      sends a request to {} · the URL can carry workspace text with it",
+                asking.subject
             )),
         ),
         _ => ("always for this file", None),
     };
-    let written = writeln!(err, "\n{header}  {summary}")
+    let pending = &asking.context.also_pending;
+    let also = (!pending.is_empty()).then(|| {
+        let mut named: Vec<&str> = pending
+            .iter()
+            .take(NAMED_PENDING)
+            .map(String::as_str)
+            .collect();
+        if pending.len() > NAMED_PENDING {
+            named.push("…");
+        }
+        format!("      also asking this turn: {}", named.join(" · "))
+    });
+    let written = writeln!(err, "\n{header}  {}", asking.summary)
         .and_then(|()| writeln!(err, "{detail}"))
         .and_then(|()| match &caveat {
             Some(caveat) => writeln!(err, "{}", style::paint(FAINT, caveat)),
+            None => Ok(()),
+        })
+        .and_then(|()| match &also {
+            Some(also) => writeln!(err, "{}", style::paint(FAINT, also)),
             None => Ok(()),
         })
         .and_then(|()| err.flush());
@@ -117,21 +200,21 @@ fn ask_on_terminal(
     }
     drop(err);
 
-    let labels = CHOICES.map(|(key, label)| (key, if label.is_empty() { always } else { label }));
+    let choices = choices(asking, always);
     if stdin().is_terminal()
         && stderr().is_terminal()
-        && let Some(reply) = select(&labels)
+        && let Some(reply) = select(&choices)
     {
         return reply;
     }
-    read_typed_answer(&labels)
+    read_typed_answer(&choices)
 }
 
 /// The selector: arrows or tab move, enter confirms, a choice's key answers at
 /// once, and esc or ctrl-c refuses. Keys typed before the prompt appeared are
 /// discarded, and any other key is ignored rather than taken as a refusal.
 /// `None` when the terminal cannot be put into raw mode.
-fn select(labels: &[(char, &str); 4]) -> Option<ApprovalReply> {
+fn select(choices: &[Choice]) -> Option<ApprovalReply> {
     use crossterm::event::Event;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEventKind;
@@ -146,9 +229,12 @@ fn select(labels: &[(char, &str); 4]) -> Option<ApprovalReply> {
         let _ = read();
     }
 
+    let refuse = choices.len() - 1;
     let mut current = 0usize;
+    let mut drawn = false;
     let chosen = loop {
-        draw_choices(labels, current);
+        draw_choices(choices, current, drawn);
+        drawn = true;
         let Ok(Event::Key(key)) = read() else {
             continue;
         };
@@ -156,19 +242,19 @@ fn select(labels: &[(char, &str); 4]) -> Option<ApprovalReply> {
             continue;
         }
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break 3,
-            KeyCode::Esc => break 3,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break refuse,
+            KeyCode::Esc => break refuse,
             KeyCode::Enter => break current,
             KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
-                current = (current + labels.len() - 1) % labels.len();
+                current = (current + choices.len() - 1) % choices.len();
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
-                current = (current + 1) % labels.len();
+                current = (current + 1) % choices.len();
             }
             KeyCode::Char(typed) => {
-                if let Some(index) = labels
+                if let Some(index) = choices
                     .iter()
-                    .position(|(key, _)| *key == typed.to_ascii_lowercase())
+                    .position(|choice| choice.key == typed.to_ascii_lowercase())
                 {
                     break index;
                 }
@@ -176,17 +262,16 @@ fn select(labels: &[(char, &str); 4]) -> Option<ApprovalReply> {
             _ => {}
         }
     };
-    draw_choices(labels, chosen);
+    // The list gives way to the answer, so the scrollback keeps one line.
+    let answer = style::paint(FAINT, &format!("      › {}", choices[chosen].label));
     let mut err = stderr();
-    let _ = write!(err, "\r\n");
+    let _ = write!(err, "\x1b[{}A\r\x1b[J{answer}\r\n", choices.len());
     let _ = err.flush();
     drop(raw);
 
-    Some(match chosen {
-        0 => ApprovalReply::Once,
-        1 => ApprovalReply::ForSession,
-        2 => ApprovalReply::Remember,
-        _ => ApprovalReply::Reject(Some(refusal_reason())),
+    Some(match &choices[chosen].reply {
+        ApprovalReply::Reject(_) => ApprovalReply::Reject(Some(refusal_reason())),
+        reply => reply.clone(),
     })
 }
 
@@ -199,19 +284,24 @@ impl Drop for RawGuard {
     }
 }
 
-fn draw_choices(labels: &[(char, &str); 4], current: usize) {
-    let mut line = String::from("      ");
-    for (index, (key, label)) in labels.iter().enumerate() {
-        let text = format!("[{key}] {label}");
-        if index == current {
-            line.push_str(&style::paint_with(RUST, &[BOLD], &format!("› {text}")));
+/// One choice per line, so a narrow terminal never wraps the list. A redraw
+/// moves back up over the list it drew last time.
+fn draw_choices(choices: &[Choice], current: usize, redraw: bool) {
+    let mut text = String::new();
+    if redraw {
+        let _ = write!(text, "\x1b[{}A", choices.len());
+    }
+    for (index, choice) in choices.iter().enumerate() {
+        let line = format!("[{}] {}", choice.key, choice.label);
+        let line = if index == current {
+            style::paint_with(RUST, &[BOLD], &format!("    › {line}"))
         } else {
-            line.push_str(&style::paint(FAINT, &format!("  {text}")));
-        }
-        line.push_str("  ");
+            style::paint(FAINT, &format!("      {line}"))
+        };
+        let _ = write!(text, "\r\x1b[2K{line}\r\n");
     }
     let mut err = stderr();
-    let _ = write!(err, "\r\x1b[2K{line}");
+    let _ = write!(err, "{text}");
     let _ = err.flush();
 }
 
@@ -234,11 +324,11 @@ fn refusal_reason() -> String {
 
 /// For a pipe or a terminal that cannot go raw: one typed line, where only a
 /// clear answer approves.
-fn read_typed_answer(labels: &[(char, &str); 4]) -> ApprovalReply {
+fn read_typed_answer(choices: &[Choice]) -> ApprovalReply {
     let mut err = stderr().lock();
-    let options: Vec<String> = labels
+    let options: Vec<String> = choices
         .iter()
-        .map(|(key, label)| format!("[{key}] {label}"))
+        .map(|choice| format!("[{}] {}", choice.key, choice.label))
         .collect();
     let question = style::paint(FAINT, &format!("      {}: ", options.join("   ")));
     if write!(err, "{question}")
@@ -262,11 +352,22 @@ fn read_typed_answer(labels: &[(char, &str); 4]) -> ApprovalReply {
         let _ = writeln!(err);
     }
 
-    match answer.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => ApprovalReply::Once,
-        "a" | "always" => ApprovalReply::ForSession,
-        "r" | "remember" => ApprovalReply::Remember,
-        _ => ApprovalReply::Reject(Some("the operator refused this action".into())),
+    let answer = answer.trim().to_ascii_lowercase();
+    let typed = match answer.as_str() {
+        "yes" => "y",
+        "always" => "a",
+        "remember" => "r",
+        other => other,
+    };
+    match choices
+        .iter()
+        .find(|choice| typed.len() == 1 && typed.starts_with(choice.key))
+        .map(|choice| &choice.reply)
+    {
+        Some(ApprovalReply::Reject(_)) | None => {
+            ApprovalReply::Reject(Some("the operator refused this action".into()))
+        }
+        Some(reply) => reply.clone(),
     }
 }
 
