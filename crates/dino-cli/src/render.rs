@@ -577,6 +577,7 @@ impl EventSink for Renderer {
     fn finish(&mut self, outcome: &RunOutcome) -> Result<(), SinkError> {
         self.spinner.stop();
         self.break_stream()?;
+        self.interrupt_last()?;
         let usage = self
             .usage
             .lock()
@@ -936,6 +937,28 @@ impl Renderer {
         Ok(())
     }
 
+    /// A call still running when the run ends was cut off, and its line says
+    /// so rather than keep its running mark in the scrollback.
+    fn interrupt_last(&mut self) -> Result<(), SinkError> {
+        let Some(last) = self.last.as_mut() else {
+            return Ok(());
+        };
+        let mut cut_off = false;
+        for entry in &mut last.entries {
+            if entry.mark == Mark::Running {
+                entry.mark = Mark::Failed;
+                entry.gist = Some((crate::summary::Tone::Failed, "interrupted".to_owned()));
+                cut_off = true;
+            }
+        }
+        let in_place = last.is_last();
+        if cut_off {
+            self.draw_last(in_place)?;
+        }
+        self.last = None;
+        Ok(())
+    }
+
     /// Draws the last call line over itself, or as a new line.
     fn draw_last(&mut self, in_place: bool) -> Result<(), SinkError> {
         let Some(last) = &self.last else {
@@ -1081,6 +1104,43 @@ mod tests {
             .unwrap();
 
         assert!(full.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Another test may have turned colour on for the whole process.
+    fn visible(painted: &str) -> String {
+        let mut out = String::new();
+        let mut chars = painted.chars();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' {
+                chars.by_ref().find(|next| *next == 'm');
+            } else {
+                out.push(character);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_refusal_says_whether_you_or_the_policy_refused() {
+        let yours = visible(&super::refused_line(
+            "apply_patch",
+            "apply_patch a.txt",
+            "the operator refused this action: leave the pie alone",
+        ));
+        assert_eq!(
+            yours,
+            "  × ← apply_patch a.txt · refused by you\n      you said: leave the pie alone\n"
+        );
+        let blocked = visible(&super::refused_line(
+            "exec",
+            "exec cargo build",
+            "plan mode: nothing changes and nothing runs until the plan is accepted",
+        ));
+        assert!(
+            blocked.starts_with("  × $ exec cargo build · blocked: plan mode"),
+            "{blocked}"
+        );
+        assert_eq!(blocked.lines().count(), 1);
     }
 
     #[test]
