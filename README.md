@@ -101,7 +101,7 @@ CI and evals.
   while a turn runs, one status row gives the model, the context used, the
   submission's tokens, the elapsed time and the interrupt key, and is cleared
   before anything else is written. Under `--plain` every line is written once,
-  in order, as before. Paste arrives as one message; ctrl-j, alt-enter or a
+  in order, as before. Paste arrives as one message; alt-enter or a
   trailing backslash starts a new line without sending.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native

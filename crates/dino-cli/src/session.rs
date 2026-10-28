@@ -331,14 +331,13 @@ where
         editor.set_helper(Some(Continuation {
             root: self.workspace_root.clone(),
         }));
-        // A new line without sending: ctrl-j, or alt-enter, which is also what
-        // shift-enter sends once a terminal is set to send ESC CR for it.
-        for key in [
-            rustyline::KeyEvent(rustyline::KeyCode::Char('J'), rustyline::Modifiers::CTRL),
+        // A new line without sending: alt-enter, which is also what shift-enter
+        // sends once a terminal is set to send ESC CR for it. Not ctrl-j: Enter
+        // typed before the editor takes the terminal arrives as the same byte.
+        editor.bind_sequence(
             rustyline::KeyEvent(rustyline::KeyCode::Enter, rustyline::Modifiers::ALT),
-        ] {
-            editor.bind_sequence(key, rustyline::Cmd::Newline);
-        }
+            rustyline::Cmd::Newline,
+        );
         let _ = editor.load_history(&self.history_path);
 
         println!("{}", self.opening());
@@ -352,7 +351,8 @@ where
             // Blocking on purpose. Nothing else is running while a person is
             // typing, and moving the editor across a spawn_blocking boundary
             // every keystroke would buy nothing.
-            match editor.readline(&prompt) {
+            let typed = crate::style::take_typeahead();
+            match editor.readline_with_initial(&prompt, (&typed, "")) {
                 Ok(line) => {
                     let _ = editor.add_history_entry(line.as_str());
                     let input = parse(&join_continuations(&line));

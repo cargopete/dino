@@ -170,6 +170,14 @@ fn query_background() -> Option<String> {
     if !input.is_terminal() {
         return None;
     }
+    // Keys already waiting would be read as the reply, so do not ask.
+    let mut waiting = [PollFd::new(
+        std::os::fd::AsFd::as_fd(&input),
+        PollFlags::POLLIN,
+    )];
+    if matches!(poll(&mut waiting, 0u16), Ok(1..)) {
+        return None;
+    }
     crossterm::terminal::enable_raw_mode().ok()?;
     let mut out = std::io::stdout();
     let asked = write!(out, "\u{1b}]11;?\u{1b}\\\u{1b}[c").and_then(|()| out.flush());
@@ -194,7 +202,11 @@ fn query_background() -> Option<String> {
         }
     }
     let _ = crossterm::terminal::disable_raw_mode();
-    Some(String::from_utf8_lossy(&reply).into_owned())
+    let reply = String::from_utf8_lossy(&reply).into_owned();
+    if let Ok(mut typed) = TYPEAHEAD.lock() {
+        *typed = typed_amid(&reply);
+    }
+    Some(reply)
 }
 
 #[cfg(not(unix))]
@@ -203,6 +215,47 @@ fn query_background() -> Option<String> {
 }
 
 /// Whether the reply holds the device-attributes answer, `ESC [ ? … c`.
+/// Keys typed while the background was being asked about, kept for the
+/// first prompt rather than lost with the reply.
+static TYPEAHEAD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// What was typed during the query, for the first prompt to start with.
+pub fn take_typeahead() -> String {
+    TYPEAHEAD
+        .lock()
+        .map(|mut typed| std::mem::take(&mut *typed))
+        .unwrap_or_default()
+}
+
+/// The reply without the terminal's own answers: an OSC sequence ended by BEL
+/// or ST, and a CSI sequence. Line ends are dropped, so nothing is sent unseen.
+fn typed_amid(reply: &str) -> String {
+    let mut typed = String::new();
+    let mut chars = reply.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\u{1b}', Some(']')) => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            ('\u{1b}', Some('[')) => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            (c, _) if c.is_control() => {}
+            (c, _) => typed.push(c),
+        }
+    }
+    typed
+}
+
 fn answered_attributes(reply: &[u8]) -> bool {
     reply
         .windows(3)
@@ -345,6 +398,13 @@ pub fn kicker(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_typed_amid_the_replies_are_kept() {
+        let reply = "ab\u{1b}]11;rgb:ffff/ffff/ffff\u{1b}\\c\u{1b}[?62;22cd\r";
+        assert_eq!(typed_amid(reply), "abcd");
+        assert_eq!(typed_amid("\u{1b}]11;rgb:0/0/0\u{7}"), "");
+    }
 
     #[test]
     fn a_colour_renders_exactly_in_truecolor_and_approximately_otherwise() {
