@@ -119,6 +119,11 @@ CI and evals.
   and named when a session starts. They go below the built-in rules and cannot
   change approvals or the sandbox. Evals read none of them, so a personal file
   cannot move a measurement.
+- **Review.** `dino review` reviews the uncommitted changes, and `dino review
+  --base main` the commits since a base, for correctness bugs or a `--focus` of
+  your own. Dino takes the diff itself and runs the model read-only, so a review
+  cannot change anything; findings come back as `path:line` with the input that
+  shows each one.
 - **Handover for long tasks.** `dino run --handover` has the model keep a plan in
   a `progress` tool and hands the task to a fresh session when one reaches
   `--session-turns` (16) or stops with items pending, at most four sessions and
