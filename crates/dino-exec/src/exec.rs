@@ -42,6 +42,7 @@ pub struct ExecTool {
     root: WorkspaceRoot,
     limits: ExecLimits,
     sandbox: Arc<dyn Sandbox>,
+    escalation: bool,
 }
 
 impl ExecTool {
@@ -60,7 +61,16 @@ impl ExecTool {
             root: WorkspaceRoot::new(root)?,
             limits,
             sandbox,
+            escalation: false,
         })
+    }
+
+    /// Lets the model ask for one command to run outside the sandbox, which a
+    /// person then approves or refuses. For sessions a person is watching.
+    #[must_use]
+    pub fn with_escalation(mut self) -> Self {
+        self.escalation = true;
+        self
     }
 
     /// Resolves a request's working directory and program against the fence.
@@ -103,16 +113,22 @@ impl ExecTool {
 
     async fn run(&self, request: ExecRequest) -> Result<ToolOutput, ToolError> {
         let plan = self.plan(&request)?;
+        let unconfined = self.unconfined(&request)?.is_some();
+        let sandbox: &dyn Sandbox = if unconfined {
+            &dino_sandbox::Unconfined
+        } else {
+            self.sandbox.as_ref()
+        };
         let execution = process::run(
             &plan.program,
             &plan.arguments,
             &plan.directory,
-            self.sandbox.as_ref(),
+            sandbox,
             self.limits.max_captured_bytes,
             self.limits.timeout,
         )
         .await?;
-        let note = process::network_note(self.sandbox.as_ref(), &execution);
+        let note = process::network_note(sandbox, &execution);
 
         if execution.timed_out {
             return json_output(&ExecOutput {
@@ -145,17 +161,32 @@ impl ExecTool {
     }
 }
 
+impl ExecTool {
+    fn unconfined(&self, request: &ExecRequest) -> Result<Option<String>, ToolError> {
+        crate::escalation::requested(
+            self.escalation,
+            request.unconfined,
+            request.justification.as_deref(),
+        )
+    }
+}
+
 impl ToolRuntime for ExecTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
+        let mut definition = ToolDefinition {
             name: "exec".into(),
             description: format!(
                 "Run one program with one argument vector. There is no shell: no pipes, no \
                  redirection, no globbing and no &&. Use a program's own flags instead, and \
                  prefer the read and search tools over cat and grep. Run Cargo through the \
                  cargo tool, which can fetch dependencies when nothing else can. \
-                 Containment: {}.",
-                self.sandbox.label()
+                 Containment: {}.{}",
+                self.sandbox.label(),
+                if self.escalation {
+                    crate::escalation::DESCRIPTION
+                } else {
+                    ""
+                }
             ),
             input_schema: json!({
                 "type": "object",
@@ -174,7 +205,16 @@ impl ToolRuntime for ExecTool {
                 "required": ["command"],
                 "additionalProperties": false
             }),
-        }]
+        };
+        if self.escalation
+            && let (Some(properties), Value::Object(extra)) = (
+                definition.input_schema["properties"].as_object_mut(),
+                crate::escalation::properties(),
+            )
+        {
+            properties.extend(extra);
+        }
+        vec![definition]
     }
 
     fn classify(&self, call: &ToolCall) -> Result<ToolAction, ToolError> {
@@ -182,7 +222,11 @@ impl ToolRuntime for ExecTool {
             return Err(ToolError::new(format!("unknown tool {:?}", call.name)));
         }
         let request = ExecRequest::parse(&call.arguments)?;
-        Ok(ToolAction::process(self.plan(&request)?.subject()))
+        let subject = self.plan(&request)?.subject();
+        Ok(match self.unconfined(&request)? {
+            Some(reason) => ToolAction::unconfined_process(subject, reason),
+            None => ToolAction::process(subject),
+        })
     }
 
     fn execute(&self, call: &ToolCall) -> ToolFuture<'_> {
@@ -218,6 +262,9 @@ impl Plan {
 struct ExecRequest {
     command: Vec<String>,
     directory: Option<String>,
+    #[serde(default)]
+    unconfined: bool,
+    justification: Option<String>,
 }
 
 impl ExecRequest {

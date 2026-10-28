@@ -5,6 +5,7 @@
 //! three could come to differ.
 
 mod background;
+mod escalation;
 mod exec;
 mod github;
 mod hooks;

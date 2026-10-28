@@ -431,6 +431,7 @@ fn interactive_options(
         github: dino_exec::GithubTool::available(),
         web: true,
         skip_edit_check: false,
+        escalation: true,
     }
 }
 

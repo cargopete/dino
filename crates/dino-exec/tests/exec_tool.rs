@@ -444,3 +444,58 @@ async fn a_confined_command_cannot_write_a_protected_path() {
         "fine\n"
     );
 }
+
+#[test]
+fn unconfined_is_refused_unless_the_session_offers_it_and_needs_a_reason() {
+    let fixture = Fixture::new();
+    let asks = call(json!({"command": ["true"], "unconfined": true, "justification": "push"}));
+
+    assert!(fixture.tool().classify(&asks).is_err());
+    assert!(
+        !fixture.tool().definitions()[0].input_schema["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("unconfined")
+    );
+
+    let offered = fixture.tool().with_escalation();
+    let action = offered.classify(&asks).unwrap();
+    assert_eq!(action.class, ToolClass::Process);
+    assert_eq!(action.unconfined.as_deref(), Some("push"));
+    let without_reason = call(json!({"command": ["true"], "unconfined": true}));
+    assert!(offered.classify(&without_reason).is_err());
+    assert_eq!(
+        offered
+            .classify(&call(json!({"command": ["true"]})))
+            .unwrap()
+            .unconfined,
+        None
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn an_unconfined_run_leaves_the_sandbox() {
+    let fixture = Fixture::new();
+    let outside = std::env::temp_dir().join(format!("dino-unconfined-{}", std::process::id()));
+    let _ = fs::remove_file(&outside);
+    let touch = |unconfined: bool| {
+        call(json!({
+            "command": ["touch", outside.display().to_string()],
+            "unconfined": unconfined,
+            "justification": "the test"
+        }))
+    };
+    let tool = fixture.sandboxed().with_escalation();
+
+    tool.execute(&touch(false)).await.unwrap();
+    assert!(
+        !outside.exists(),
+        "the sandboxed run wrote outside the workspace"
+    );
+
+    let output = parse(&tool.execute(&touch(true)).await.unwrap());
+    assert_eq!(output["exit_code"], 0, "{output}");
+    assert!(outside.exists());
+    let _ = fs::remove_file(&outside);
+}
