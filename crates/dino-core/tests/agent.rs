@@ -201,6 +201,8 @@ async fn a_session_rule_covers_its_own_subject_and_no_other() {
         tool_turn(tool_call("call-2", "apply_patch", "src/lib.rs")),
         tool_turn(tool_call("call-3", "apply_patch", "src/main.rs")),
         text_turn("finished"),
+        // Sent back once for the untested edit.
+        text_turn("finished"),
     ])
     .with_policy(Interactive::new(approver));
 
@@ -1161,6 +1163,21 @@ async fn each_submission_may_be_sent_back_once() {
 }
 
 #[tokio::test]
+async fn an_untested_rust_edit_is_sent_back_once() {
+    let mut agent = agent(vec![
+        tool_turn(tool_call("call-1", "apply_patch", "src/lib.rs")),
+        text_turn("done"),
+        text_turn("the tests cannot run here"),
+    ])
+    .with_policy(AllowAll);
+
+    let result = agent.run("edit").await.unwrap();
+
+    assert_eq!(sent_back(&result), vec![2]);
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+}
+
+#[tokio::test]
 async fn one_answer_can_cover_every_call_of_a_turn() {
     let (approver, asked) = ScriptedApprover::new(vec![ApprovalReply::ForTurn]);
     let both = Turn::Events(vec![
@@ -1264,6 +1281,7 @@ async fn a_remembered_rule_is_saved_and_a_saved_rule_is_not_asked_again() {
     let mut first = agent(vec![
         tool_turn(tool_call("call-1", "apply_patch", "src/lib.rs")),
         text_turn("done"),
+        text_turn("done"),
     ])
     .with_policy(Interactive::new(approver).with_store(store.clone()));
     first.run("edit").await.unwrap();
@@ -1277,6 +1295,7 @@ async fn a_remembered_rule_is_saved_and_a_saved_rule_is_not_asked_again() {
     let (approver, asked) = ScriptedApprover::new(Vec::new());
     let mut second = agent(vec![
         tool_turn(tool_call("call-1", "apply_patch", "src/lib.rs")),
+        text_turn("done"),
         text_turn("done"),
     ])
     .with_policy(Interactive::new(approver).with_store(store));
