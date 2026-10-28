@@ -20,6 +20,16 @@ limit, so it also comes as three stages, `toml-1-values`, `toml-2-tables` and
 `toml-3-arrays`. Each stage starts from the previous stage's reference and keeps
 its tests, so a stage passes or fails on its own work.
 
+Two cases were added on 2026-10-27 because the rest of the corpus scored 93 to 95
+and could no longer show a change: `semver-ranges` (a long written spec, with hidden
+tests generated from node-semver by the script in its `oracle/`) and
+`text-buffer-undo` (undo merging and groups, checked by random sequences against a
+second implementation that keeps snapshots). On qwen3.7-max at three trials they
+scored 94 (92-97) and 83 (68-98). A third, making sliding-window statistics fast,
+scored 99 and was left out. The first runs scored 88 and 55 before two ambiguous
+sentences in the prompts were fixed, so read a low score on a new case against its
+prompt before trusting it.
+
 Two rules the harness applies to every case, whether or not the case remembers:
 
 - A case where nothing in the workspace changed fails, even if the code already

@@ -1,0 +1,106 @@
+name = "semver-ranges"
+prompt = """
+Implement semantic versions and version ranges in `src/lib.rs`, filling in every \
+`todo!()`. Keep the public types and signatures exactly as they are; how `Range` \
+stores what it parsed is up to you. The rules are those of npm's `semver` \
+package, stated in full below so you need nothing else.
+
+## Versions
+
+`Version::parse` accepts `MAJOR.MINOR.PATCH`, optionally followed by `-` and a \
+prerelease, then optionally `+` and build metadata. Surrounding whitespace is \
+ignored and one leading `v` is allowed. The three numbers are `0` or digits \
+without a leading zero. A prerelease is one or more dot-separated identifiers of \
+ASCII letters, digits and `-`; an identifier of digits alone is numeric and may \
+not have a leading zero. Build identifiers use the same characters, may be all \
+digits with leading zeros, and are kept but never affect precedence. Anything \
+else is a `ParseError`, including an empty identifier.
+
+`Display` prints the canonical form, `1.2.3-beta.1+exp.5`, without a leading `v`.
+
+Precedence: compare major, minor and patch numerically. A version with a \
+prerelease is lower than the same version without one. Prereleases compare \
+identifier by identifier: numeric ones numerically, others by ASCII order, a \
+numeric identifier below a non-numeric one, and when one list is a prefix of the \
+other the shorter is lower. Build metadata is ignored, so `1.0.0+a == 1.0.0+b`.
+
+## Ranges
+
+A range is one or more comparator sets joined by `||`. A version matches the \
+range if it matches any set; a set that is empty or only whitespace is the same \
+as `*`. Inside a set, items are separated by whitespace and all must hold. An \
+operator may be separated from its version by whitespace: `>= 1.2.3` is \
+`>=1.2.3`, and `^ 1.2` is `^1.2`.
+
+A *partial* version is `MAJOR`, `MAJOR.MINOR` or `MAJOR.MINOR.PATCH`, where any \
+part may instead be `x`, `X` or `*`, and every part after a wildcard must be one \
+too. Only a full three-part partial may carry a prerelease. A partial may be \
+written with one leading `v` or `=`. Missing parts and wildcards are treated \
+alike. Below, `-0` is the lowest possible prerelease, used so an upper bound \
+excludes the prereleases of the version it names.
+
+Primitive: an operator `<`, `<=`, `>`, `>=` or `=` (or none) and a partial.
+
+- Full version: compare against it as written. No operator means `=`.
+- Wildcard major (`*`, `x`): `>*` and `<*` match nothing; any other operator, or \
+none, matches every version that has no prerelease. Like every comparator, it \
+admits a prerelease only under the prerelease rule below, which `*` never meets.
+- `1` or `1.x` with `=` or no operator: `>=1.0.0 <2.0.0-0`. `1.2` or `1.2.x`: \
+`>=1.2.0 <1.3.0-0`.
+- `>1` is `>=2.0.0` and `>1.2` is `>=1.3.0`. `>=1` is `>=1.0.0`, `>=1.2` is \
+`>=1.2.0`. `<1` is `<1.0.0-0`, `<1.2` is `<1.2.0-0`. `<=1` is `<2.0.0-0`, `<=1.2` \
+is `<1.3.0-0`.
+
+Tilde, `~` or `~>`, allows patch-level changes:
+
+- `~1.2.3` is `>=1.2.3 <1.3.0-0`; `~1.2.3-beta.2` is `>=1.2.3-beta.2 <1.3.0-0`.
+- `~1.2` is `>=1.2.0 <1.3.0-0`; `~1` is `>=1.0.0 <2.0.0-0`; `~*` is the same as `*`.
+
+Caret, `^`, allows changes that do not modify the leftmost non-zero part:
+
+- `^1.2.3` is `>=1.2.3 <2.0.0-0`, `^0.2.3` is `>=0.2.3 <0.3.0-0`, `^0.0.3` is \
+`>=0.0.3 <0.0.4-0`. A prerelease on the lower bound is kept: `^1.2.3-beta.2` is \
+`>=1.2.3-beta.2 <2.0.0-0`.
+- With a missing patch: `^1.2` is `>=1.2.0 <2.0.0-0`, `^0.2` is \
+`>=0.2.0 <0.3.0-0`, `^0.0` is `>=0.0.0 <0.1.0-0`.
+- With a missing minor: `^1` is `>=1.0.0 <2.0.0-0`, `^0` is `>=0.0.0 <1.0.0-0`. \
+`^*` is the same as `*`.
+
+Hyphen range, `A - B`, with whitespace on both sides of the `-` and nothing else \
+in the set: from `>=A` to `<=B`. A partial `A` fills missing parts with zeros \
+(`1.2 - 2.3.4` is `>=1.2.0 <=2.3.4`). A partial `B` becomes an exclusive bound \
+past it: `1.2.3 - 2.3` is `>=1.2.3 <2.4.0-0` and `1.2.3 - 2` is \
+`>=1.2.3 <3.0.0-0`.
+
+Prereleases: a version that has a prerelease matches a comparator set only if it \
+satisfies every comparator in it *and* at least one comparator in that set names \
+a version with a prerelease and the same major, minor and patch. So \
+`>=1.2.3-beta` matches `1.2.3-rc.1` but not `1.2.4-rc.1`, while `^1.2.3`, `*` \
+and an empty range match no prerelease at all. The `-0` bounds above never let a prerelease in, since a \
+version cannot satisfy its own exclusive bound.
+
+Anything that does not fit this grammar is a `ParseError`: unknown operators \
+such as `>>` or `=>`, an operator with nothing after it, a fourth number, leading \
+zeros, letters where numbers belong, a prerelease on a partial, or a `-` that is \
+not a hyphen range.
+
+`max_satisfying` and `min_satisfying` return the highest or lowest matching \
+version by precedence; among versions of equal precedence, the first in the slice.
+
+The tests in `tests/` are a start, not a specification; more will be run against \
+your implementation afterwards. Do not change anything in `tests/` and do not add \
+dependencies. `cargo check` must be clean.
+"""
+max_turns = 50
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "tests/basic.rs"]
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "todo!"
+
+[score]
+tier = "large"

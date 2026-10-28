@@ -1,0 +1,84 @@
+name = "text-buffer-undo"
+prompt = """
+Implement `Buffer` in `src/lib.rs`, a text buffer for an editor with undo and \
+redo, filling in every `todo!()`. Keep the public signatures exactly as they \
+are; the representation is up to you.
+
+## Text and positions
+
+Every position and length counts `char`s (Unicode scalar values), never bytes: \
+`é`, `🦀` and a combining accent are one each. Lines are separated by `\\n` \
+only, so a buffer has one more line than it has `\\n`s, and an empty buffer has \
+one empty line. `line(n)` is line `n` without its `\\n`, or `None` past the last \
+line. `line_col(at)` is the 0-based line and column of position `at`, where \
+`at` may be anything from 0 to `len_chars()` inclusive. `offset(line, col)` is \
+its inverse; `col` may be at most the length of that line. Anything out of \
+range is `EditError::OutOfRange`.
+
+`insert(at, text)` inserts before position `at`, which may equal \
+`len_chars()`. `delete(range)` removes the characters in the half-open range \
+and returns them; a range with `start > end` or `end > len_chars()` is \
+`OutOfRange`. An error changes nothing.
+
+## Undo steps
+
+An *edit* is an insert of non-empty text or a delete of a non-empty range that \
+succeeds. An insert of `\"\"`, a delete of an empty range and a failed call do \
+nothing at all: not to the text, not to the history, and they do not interrupt \
+the merging described below.
+
+Every edit becomes one undo step, unless it merges into the step before it. \
+`undo` reverts the most recent step and returns `true`, or returns `false` when \
+there is none. `redo` reapplies the most recently undone step in the same way. \
+Any new edit discards everything that could have been redone. `can_undo` and \
+`can_redo` say whether `undo` and `redo` would do anything.
+
+Merging, so that typing a word or holding backspace undoes in one go. An edit \
+made outside a group merges into the previous step when the previous step was \
+also made outside a group, nothing but edits has happened since it was made \
+(no call to `undo`, `redo`, `begin_group` or `end_group` in between, even one \
+that had nothing to do), and one of these \
+holds:
+
+- Typing: both the new edit and the edit before it insert exactly one \
+character that is not `\\n`, and the new one is inserted at the position just \
+after the character inserted before it.
+- Backspace: both delete exactly one character, and the new range ends where \
+the previous deleted range started.
+- Forward delete: both delete exactly one character, at the same start.
+
+A step started by a single-character delete can take either kind next. Once a \
+second delete has merged into it, the step has a direction and keeps it: after a \
+backspace has merged, only further backspaces can merge into that step, and \
+likewise for forward deletes. Typing and deleting never merge with each other, \
+and an insert of more than one character never merges with anything.
+
+## Groups
+
+`begin_group` and `end_group` bracket edits that undo as one step, such as a \
+find-and-replace. Every edit made while a group is open belongs to that group's \
+single step, which is created by its first edit; a group with no edits creates \
+no step. Groups nest: only the `end_group` that matches the outermost \
+`begin_group` closes it, and an `end_group` with no group open does nothing. \
+Calling `undo` or `redo` while a group is open first closes every open group, \
+then undoes or redoes as usual. Nothing merges across a group's edges.
+
+The tests in `tests/` are a start, not a specification; more will be run against \
+your implementation afterwards, including long random sequences of edits, \
+undos, redos and groups compared against another implementation of these rules. \
+Do not change anything in `tests/` and do not add dependencies. `cargo check` \
+must be clean.
+"""
+max_turns = 50
+
+[expect]
+cargo_check = "clean"
+hidden_tests = true
+files_unchanged = ["Cargo.toml", "tests/basic.rs"]
+
+[[expect.not_contains]]
+file = "src/lib.rs"
+text = "todo!"
+
+[score]
+tier = "large"
