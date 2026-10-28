@@ -342,151 +342,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dancho-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "dancho-core",
- "dancho-eval",
- "dancho-exec",
- "dancho-model",
- "dancho-protocol",
- "dancho-rust",
- "dancho-sandbox",
- "dancho-tools",
- "futures-util",
- "landlock",
- "nix",
- "rustyline",
- "serde",
- "serde_json",
- "terminal_size",
- "tokio",
- "tokio-util",
- "toml",
-]
-
-[[package]]
-name = "dancho-core"
-version = "0.1.0"
-dependencies = [
- "dancho-model",
- "dancho-protocol",
- "futures-util",
- "pretty_assertions",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "dancho-eval"
-version = "0.1.0"
-dependencies = [
- "dancho-core",
- "dancho-exec",
- "dancho-model",
- "dancho-protocol",
- "dancho-rust",
- "dancho-sandbox",
- "dancho-tools",
- "futures-util",
- "pretty_assertions",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
-]
-
-[[package]]
-name = "dancho-exec"
-version = "0.1.0"
-dependencies = [
- "dancho-core",
- "dancho-protocol",
- "dancho-sandbox",
- "futures-util",
- "html2text",
- "nix",
- "pretty_assertions",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "dancho-model"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "dancho-protocol",
- "futures-core",
- "futures-util",
- "pretty_assertions",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "dancho-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dancho-rust"
-version = "0.1.0"
-dependencies = [
- "dancho-core",
- "dancho-exec",
- "dancho-protocol",
- "dancho-sandbox",
- "ignore",
- "pretty_assertions",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
-name = "dancho-sandbox"
-version = "0.1.0"
-dependencies = [
- "pretty_assertions",
- "thiserror",
-]
-
-[[package]]
-name = "dancho-tools"
-version = "0.1.0"
-dependencies = [
- "dancho-core",
- "dancho-protocol",
- "dancho-sandbox",
- "globset",
- "ignore",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -501,6 +356,151 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
+]
+
+[[package]]
+name = "dino-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "dino-core",
+ "dino-eval",
+ "dino-exec",
+ "dino-model",
+ "dino-protocol",
+ "dino-rust",
+ "dino-sandbox",
+ "dino-tools",
+ "futures-util",
+ "landlock",
+ "nix",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "terminal_size",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
+name = "dino-core"
+version = "0.1.0"
+dependencies = [
+ "dino-model",
+ "dino-protocol",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "dino-eval"
+version = "0.1.0"
+dependencies = [
+ "dino-core",
+ "dino-exec",
+ "dino-model",
+ "dino-protocol",
+ "dino-rust",
+ "dino-sandbox",
+ "dino-tools",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
+name = "dino-exec"
+version = "0.1.0"
+dependencies = [
+ "dino-core",
+ "dino-protocol",
+ "dino-sandbox",
+ "futures-util",
+ "html2text",
+ "nix",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dino-model"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "dino-protocol",
+ "futures-core",
+ "futures-util",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "dino-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dino-rust"
+version = "0.1.0"
+dependencies = [
+ "dino-core",
+ "dino-exec",
+ "dino-protocol",
+ "dino-sandbox",
+ "ignore",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "dino-sandbox"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "thiserror",
+]
+
+[[package]]
+name = "dino-tools"
+version = "0.1.0"
+dependencies = [
+ "dino-core",
+ "dino-protocol",
+ "dino-sandbox",
+ "globset",
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

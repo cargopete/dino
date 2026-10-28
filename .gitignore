@@ -1,4 +1,4 @@
 /target/
-/.dancho/
+/.dino/
 *.log
 .env

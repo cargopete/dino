@@ -9,9 +9,9 @@
 
 ## 1. Decision
 
-Every process DanchoAI starts runs inside an operating-system sandbox that
+Every process Dino starts runs inside an operating-system sandbox that
 confines writes to the workspace and denies the network. On macOS this is
-Seatbelt. Everywhere else the sandbox is unavailable, and DanchoAI refuses to
+Seatbelt. Everywhere else the sandbox is unavailable, and Dino refuses to
 run processes at all unless a person explicitly says `--sandbox none`, which is
 named in the approval prompt and recorded in the session log.
 
@@ -45,13 +45,13 @@ than an honest wide one.
 process's output becomes a tool result, and a tool result is sent to the
 provider, so with a hosted model a secret that is read *has* been transmitted.
 Seatbelt now denies reads beneath a fixed list of credential locations in the
-home directory (`CREDENTIAL_PATHS` in `dancho-sandbox`): `~/.ssh`, `~/.aws`,
-`~/.config/gh`, `~/.config/dancho` and the like. That is a denylist of known
+home directory (`CREDENTIAL_PATHS` in `dino-sandbox`): `~/.ssh`, `~/.aws`,
+`~/.config/gh`, `~/.config/dino` and the like. That is a denylist of known
 secrets, not the allow-list rejected above, and it fails safe: a build that
 needs one of those paths is wrong to read it. Landlock grants by allow-list and
 cannot carve a hole out of a readable home, so on Linux the label says
 `credential reads not denied` rather than borrowing Seatbelt's words. Since #62
-it can after all, at a cost: `dancho-confine --deny-read` grants reads to every
+it can after all, at a cost: `dino-confine --deny-read` grants reads to every
 sibling along the path to each credential location instead of to `/`, so the
 hole is made by granting around it. Entries created later in a directory on
 that chain, such as a new dotfile in `$HOME`, are unreadable until the next
@@ -61,14 +61,14 @@ session.
 enough on its own. Inside the workspace are files that other programs execute
 later and unconfined: git hooks and config, Cargo config, the toolchain file,
 `.envrc`, editor tasks. A confined process that wrote one escaped without ever
-breaking the sandbox. `EXECUTABLE_CONFIG` in `dancho-sandbox` is now protected for
+breaking the sandbox. `EXECUTABLE_CONFIG` in `dino-sandbox` is now protected for
 every process, by Seatbelt's deny or Landlock's restore, in addition to any
 user-protected paths. The file tools are not restricted, because their writes
 already pass an approval that names the path.
 
 ## 3. The seam
 
-A new `dancho-sandbox` crate owns one trait:
+A new `dino-sandbox` crate owns one trait:
 
 ```rust
 pub trait Sandbox: Send + Sync + Debug {
@@ -124,9 +124,9 @@ profile is built, with a test that says so.
 have worked and would also have handed every build script a writable staging
 area outside the workspace.
 
-Instead the child's `TMPDIR` is set to `<workspace>/.dancho/tmp`, created before the
+Instead the child's `TMPDIR` is set to `<workspace>/.dino/tmp`, created before the
 run. Doctests then pass and the writable set remains exactly the workspace.
-`.dancho` is already ignored by the repository, since the session log lives there.
+`.dino` is already ignored by the repository, since the session log lives there.
 
 ### 4.3 Offline
 
@@ -160,7 +160,7 @@ a backlog entry, so nothing here is written to leave room for it.
 These were open questions until now. They are recorded here rather than in a
 future session's head.
 
-**Mechanism: a `dancho-confine` helper binary. Not `bubblewrap`, and not an unsafe
+**Mechanism: a `dino-confine` helper binary. Not `bubblewrap`, and not an unsafe
 exemption.**
 
 Landlock applied to a *child* needs `Command::pre_exec`, which is `unsafe` and
@@ -188,7 +188,7 @@ wrong around the unix sockets a build legitimately uses.
 **One mechanism that can be verified beats two that can each be half-verified**,
 and that is the whole argument. The cost is real and worth stating: this
 excludes long-term-support server kernels, notably anything on 5.15 or 5.10. On
-those, DanchoAI refuses to run processes and `--sandbox none` is the recorded
+those, Dino refuses to run processes and `--sandbox none` is the recorded
 escape, exactly as on any other platform without an implementation.
 
 **Testing: no Linux sandbox code lands until it is exercised on Linux, and the
@@ -223,7 +223,7 @@ unit tests without them would be a green light for the wrong reason.
    definition, which is dead code and therefore an error under `-D warnings`
    anywhere the sandbox is unimplemented. That is CI earning its keep before it
    has been asked to do the thing it was added for.
-2. `dancho-confine`, with the two escape tests gated to Linux.
+2. `dino-confine`, with the two escape tests gated to Linux.
 3. `Seatbelt` and the new implementation behind the same `detect`, with the
    kernel-floor refusal message naming 6.7.
 
@@ -245,7 +245,7 @@ So the Linux boundary is verified rather than asserted, on a real kernel, by a
 job that costs nothing and needed no hardware. That was the whole argument for
 putting CI before the code.
 
-`dancho-confine` takes `--allow-write <path>...` and `-- <program> [args]`, builds a
+`dino-confine` takes `--allow-write <path>...` and `-- <program> [args]`, builds a
 Landlock ruleset at ABI 4, grants read on `/` and full access under each
 writable path, adds no network rule, restricts itself, and `exec`s. Two details
 carry the weight:
@@ -260,17 +260,17 @@ carry the weight:
   section 5.1 and it survived contact with the code.
 
 **Amended 2026-08-27.** The helper ships as a second binary target of
-`dancho-cli` rather than from its own crate. It had its own crate first, and
-`cargo install --path crates/dancho-cli` delivered `dancho` alone: an installed agent
+`dino-cli` rather than from its own crate. It had its own crate first, and
+`cargo install --path crates/dino-cli` delivered `dino` alone: an installed agent
 on Linux would have found no helper and refused every process. The argument in
 this section was for a helper *process* over in-process `unsafe`, and which
 crate builds it is packaging rather than design. CI now installs and runs a
 confined write, because that defect was invisible to every test that ran from
 `target/`.
 
-`Landlock` in `dancho-sandbox` locates the helper beside the running executable,
+`Landlock` in `dino-sandbox` locates the helper beside the running executable,
 then one directory up because a test binary lives in `deps/`, then on `PATH`,
-with `DANCHO_CONFINE` overriding for packaging. A helper that cannot be found is
+with `DINO_CONFINE` overriding for packaging. A helper that cannot be found is
 `Unavailable`; it never degrades into running the command unwrapped.
 
 **The Linux guarantee is weaker than the macOS one, and is labelled as such.**
@@ -295,8 +295,8 @@ the test.
 ## 6. Command surface
 
 ```console
-dancho run --sandbox workspace   # the default: writes confined, no network
-dancho run --sandbox none        # nothing confined; explicit, prompted, recorded
+dino run --sandbox workspace   # the default: writes confined, no network
+dino run --sandbox none        # nothing confined; explicit, prompted, recorded
 ```
 
 `--read-only` still refuses every `Process` call before the sandbox is
@@ -328,7 +328,7 @@ consulted. The sandbox is a second boundary, not a replacement for the first.
   doctests working under the ruleset. A helper that cannot be found reports
   unavailable rather than running the command unwrapped.
 
-**Observed on 2026-08-27**, driving the built `dancho` binary against a local fake
+**Observed on 2026-08-27**, driving the built `dino` binary against a local fake
 endpoint over a fixture with a type error: the approval prompt names the full
 command and the containment, the session log's opening record carries
 `workspace (seatbelt: writes confined, network denied)`, and the model receives
@@ -339,12 +339,12 @@ it refuses is the only one there is. That is the intended end state rather than
 a gap.
 
 **Observed on 2026-08-27** while designing the profile, using `sandbox-exec`
-directly rather than through DanchoAI:
+directly rather than through Dino:
 
 - A fixture with a build script compiled and ran, writing to `OUT_DIR`.
 - `thiserror`, `syn`, `quote` and `proc-macro2` built from the local registry
   cache with `--offline`, so proc macros execute correctly inside the profile.
-- DanchoAI's own workspace passed `cargo check --workspace --all-targets`.
+- Dino's own workspace passed `cargo check --workspace --all-targets`.
 - `cargo test` passed, including doctests, once `TMPDIR` was workspace-local.
 - Writing to the workspace's parent, and to `~/.ssh`, was refused.
 - `curl https://example.com` returned no response.

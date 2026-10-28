@@ -1,0 +1,31 @@
+[package]
+name = "dino-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dino-core.workspace = true
+dino-exec.workspace = true
+dino-model.workspace = true
+dino-protocol.workspace = true
+dino-rust.workspace = true
+dino-sandbox.workspace = true
+dino-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+sha2.workspace = true
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

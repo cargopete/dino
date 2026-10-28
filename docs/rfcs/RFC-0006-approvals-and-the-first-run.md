@@ -5,16 +5,16 @@
 | Status | implemented M1 |
 | Date | 2026-08-27 |
 | Depends on | RFC-0001, RFC-0003, RFC-0005 |
-| Scope | tool classification, approval policy, session event log, cancellation, credentials, the `dancho run` slice |
+| Scope | tool classification, approval policy, session event log, cancellation, credentials, the `dino run` slice |
 
 ## 1. Purpose
 
-DanchoAI currently has a tested act-observe loop, three tested provider
+Dino currently has a tested act-observe loop, three tested provider
 transports and three tested workspace tools, none of which are connected to one
 another. RFC-0005 deliberately refused to wire the filesystem tools to a live
 model until an approval layer existed. This RFC specifies that layer and the
 smallest honest vertical slice that turns the parts into a program a person can
-run: a one-shot `dancho run` against a real provider, with approvals enforced in
+run: a one-shot `dino run` against a real provider, with approvals enforced in
 code, every decision recorded, and the turn cancellable.
 
 The interactive terminal interface is explicitly **not** in this slice. It is
@@ -22,7 +22,7 @@ deferred to RFC-0007 so that it can be designed rather than accreted.
 
 ## 2. Decision
 
-Approval is enforced by `dancho-core`, between the agent loop and the tool
+Approval is enforced by `dino-core`, between the agent loop and the tool
 runtime. It is not a decorator around `ToolRuntime`, because RFC-0001 section 8
 requires the event log to record the proposed action, the decision, the
 execution and the result. A decorator would hide the first two from the log,
@@ -55,11 +55,11 @@ pub struct ToolAction {
 
 Two classes, not five. `exec` will need at least a distinction between
 workspace-local and external effects, and a costly class may follow, but
-DanchoAI has no process tool yet and inventing policy it cannot enforce would
+Dino has no process tool yet and inventing policy it cannot enforce would
 be decoration. Classes are added when the tool that needs them exists.
 
 The runtime, not the core, performs classification because the runtime owns the
-tool schemas. `dancho-tools` classifies `read` and `search` as `ReadOnly` and
+tool schemas. `dino-tools` classifies `read` and `search` as `ReadOnly` and
 `apply_patch` as `Mutating` with the workspace-relative path as its subject.
 
 **Classification resolves paths through the same helper as execution.** An
@@ -152,7 +152,7 @@ enum SessionRecord {
 ```
 
 `SessionMeta` records the session ID, the model key, the provider, the
-canonical workspace root, the approval mode and the DanchoAI version. It does
+canonical workspace root, the approval mode and the Dino version. It does
 not record credentials.
 
 Timestamps are Unix milliseconds. No date-formatting dependency is added for
@@ -208,9 +208,9 @@ wrote, so it may not weaken a boundary or redirect a credential.
 
 | Setting | Flag | Environment |
 |---|---|---|
-| Model key | `--model` | `DANCHO_MODEL` |
+| Model key | `--model` | `DINO_MODEL` |
 | Workspace root | `--workspace` | current directory |
-| Session log | `--log` | `.dancho/sessions/<id>.jsonl` |
+| Session log | `--log` | `.dino/sessions/<id>.jsonl` |
 | OpenAI key | | `OPENAI_API_KEY` |
 | Anthropic key | | `ANTHROPIC_API_KEY` |
 | Qwen endpoint | `--api-base` | `QWEN_API_BASE` |
@@ -225,7 +225,7 @@ application is read, copied or replayed.
 
 ## 8. System prompt
 
-`dancho-core` gains a prompt module. Until now every adapter defaulted
+`dino-core` gains a prompt module. Until now every adapter defaulted
 `system_prompt` to the empty string, and an agent given no instructions behaves
 about as well as that suggests.
 
@@ -235,15 +235,15 @@ in force. It states the read-before-edit requirement, which is not advice but a
 consequence of `apply_patch` demanding the fingerprint that `read` returns.
 
 Every injected fact carries a byte cap, per RFC-0001 section 9. The prompt is a
-constant that can be printed with `dancho prompt`, so its cost and content are
+constant that can be printed with `dino prompt`, so its cost and content are
 inspectable rather than folkloric.
 
 ## 9. Command surface
 
 ```console
-dancho models [--json]
-dancho prompt [--model KEY]
-dancho run [--model KEY] [--workspace DIR] [--log PATH]
+dino models [--json]
+dino prompt [--model KEY]
+dino run [--model KEY] [--workspace DIR] [--log PATH]
         [--max-turns N] [--read-only | --dangerously-allow-all]
         [--show-reasoning] [PROMPT]
 ```
@@ -252,7 +252,7 @@ dancho run [--model KEY] [--workspace DIR] [--log PATH]
 input, streams the turn, prompts for approval on standard error, and exits with
 a non-zero status on error or denial-terminated failure.
 
-Rendering lives in a `dancho-cli` module that consumes `AgentEvent` and owns no
+Rendering lives in a `dino-cli` module that consumes `AgentEvent` and owns no
 agent state. The transcript model is kept separate from the writer so that
 RFC-0007's terminal interface is a second renderer against the same events, not
 a rewrite of the loop. The M0 renderer is deliberately plain.
@@ -271,24 +271,24 @@ none of them is claimed to be present.
 **Measured on 2026-08-27.** The workspace passes 47 tests and Clippy with
 `-D warnings`. The tests this RFC promised, and what each one holds down:
 
-- Loop and approval, in `dancho-core/tests/agent.rs`: read-only calls never reach a
+- Loop and approval, in `dino-core/tests/agent.rs`: read-only calls never reach a
   person; a refusal returns to the provider under its original call ID and never
   executes; a session rule covers a second edit to the same file and does not
   cover a different file; an unclassifiable call is neither decided nor run.
-- Classification, in `dancho-tools`: a plain path and an in-workspace symbolic link
+- Classification, in `dino-tools`: a plain path and an in-workspace symbolic link
   to the same file both classify as that one resolved subject, so a second
   spelling cannot dodge a decision made about the first. Parent traversal and a
   symlink escape are refused during classification, before any policy sees them.
 - Cancellation: a stream that cancels and then never resolves ends the run with
   `StopReason::Cancelled` and no fabricated terminal event. A token cancelled
   before the first turn sends nothing to the provider at all.
-- Session log, in `dancho-core/tests/session_log.rs`: records ordered
+- Session log, in `dino-core/tests/session_log.rs`: records ordered
   `started`/`event`/`finished` with an unbroken sequence, parent directories
   created, and a creation failure raised at creation rather than later.
-- Credentials, in `dancho-cli`: each provider names the environment variable it is
+- Credentials, in `dino-cli`: each provider names the environment variable it is
   missing, before a session is built.
 
-**Observed on 2026-08-27**, driving the built `dancho` binary against a local fake
+**Observed on 2026-08-27**, driving the built `dino` binary against a local fake
 vLLM endpoint on the loopback interface, because no vendor credential is present
 on this machine:
 

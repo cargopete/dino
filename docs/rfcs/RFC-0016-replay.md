@@ -35,15 +35,15 @@ not have to correlate a separate stream by timestamp.
 
 **This changes what the log holds, and that is worth saying plainly.** The file
 already contained your source, because tool results are file contents. It now
-also contains what you typed. Same directory, same `.dancho/`, same git-ignore, and
+also contains what you typed. Same directory, same `.dino/`, same git-ignore, and
 one more reason the disclosure in RFC-0014 section 4 is not a footnote.
 
 ## 3. Replay
 
 ```console
-dancho replay              # the most recent session in this workspace
-dancho replay <id>         # a named one
-dancho replay --last 3     # only the last three submissions
+dino replay              # the most recent session in this workspace
+dino replay <id>         # a named one
+dino replay --last 3     # only the last three submissions
 ```
 
 Rendering goes through the same `Renderer` the live session uses, fed recorded

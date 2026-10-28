@@ -8,7 +8,7 @@
 
 ## 1. Decision
 
-The first tool slice is a separate `dancho-tools` crate with three operations:
+The first tool slice is a separate `dino-tools` crate with three operations:
 
 - `read`, for bounded numbered ranges from UTF-8 files;
 - `search`, for bounded literal search through ignored-aware workspace files;
@@ -20,7 +20,7 @@ This resolves RFC-0001's initial format question for the first eval corpus. A
 unified-diff variant may be evaluated later against the same stale-content and
 path rules.
 
-The crate implements `dancho-core::ToolRuntime`. It was not wired into a live CLI
+The crate implements `dino-core::ToolRuntime`. It was not wired into a live CLI
 agent until the approval layer existed; RFC-0006 supplied that layer, and
 `WorkspaceTools` now also classifies each call so a policy can decide it.
 
@@ -31,7 +31,7 @@ model path must be relative, non-empty and free of parent, root or platform
 prefix components. Existing targets are canonicalised and required to remain
 beneath the canonical root.
 
-**Amended 2026-08-27.** This rule now lives in `dancho-core::workspace` because
+**Amended 2026-08-27.** This rule now lives in `dino-core::workspace` because
 `exec` needs the same one for its working directory, and two implementations of
 one security check is how they come to disagree. The tests below did not move;
 they now cover the shared implementation.
@@ -158,11 +158,11 @@ directory and cost more context than it returned.
 ### 6.1 What the listing hides, and how to ask
 
 **Measured on 2026-08-27.** RFC-0012's ablation runs caught the model calling
-`exec find . -maxdepth 3 -name .dancho` in a run where `list` was available and had
+`exec find . -maxdepth 3 -name .dino` in a run where `list` was available and had
 already been used.
 
 That is not the model preferring a shell. `list` walks with the search rules, so
-it cannot show `.dancho`, `target/`, `.gitignore` or anything else hidden or
+it cannot show `.dino`, `target/`, `.gitignore` or anything else hidden or
 ignored, and there was no way to ask it to. The property that keeps a listing
 from being mostly build output also makes it blind, and a model that wants to
 know about those paths has no tool but `exec`.

@@ -1,0 +1,27 @@
+[package]
+name = "dino-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dino-core.workspace = true
+dino-protocol.workspace = true
+dino-sandbox.workspace = true
+futures-util.workspace = true
+html2text.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

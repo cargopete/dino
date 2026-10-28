@@ -65,7 +65,7 @@ object: build the session as usual, then hand it its past.
 **The state file holds the conversation, and the conversation holds your
 source.** Tool results are in there: file contents, search hits, compiler
 output. So is whatever reasoning the provider returned and the adapter retained.
-It is written to `.dancho/sessions/<id>.state.json`, which is inside the workspace
+It is written to `.dino/sessions/<id>.state.json`, which is inside the workspace
 and already ignored by git, with owner-only permissions.
 
 That is a real disclosure rather than a footnote. A person who would not commit
@@ -90,11 +90,11 @@ was resumed, so one file remains one conversation.
 ## 6. Command surface
 
 ```console
-dancho --resume            # the most recent session in this workspace
-dancho --resume <id>       # a named one
+dino --resume            # the most recent session in this workspace
+dino --resume <id>       # a named one
 ```
 
-`dancho run` writes state too, so a one-shot can be picked up interactively. State
+`dino run` writes state too, so a one-shot can be picked up interactively. State
 is written after each completed submission rather than continuously, because a
 submission is the unit that either happened or did not.
 
@@ -123,9 +123,9 @@ boundary. The state file is mode `0600`.
 The three refusals, each in one line:
 
 ```text
-dancho: model configuration is invalid: this state belongs to a Qwen session, not Anthropic
-dancho: no session "nonsense" in /…/ws7
-dancho: no session to resume in /…/ws8; run without --resume to start one
+dino: model configuration is invalid: this state belongs to a Qwen session, not Anthropic
+dino: no session "nonsense" in /…/ws7
+dino: no session to resume in /…/ws8; run without --resume to start one
 ```
 
 ### 8.1 A round-trip bug the tests caught

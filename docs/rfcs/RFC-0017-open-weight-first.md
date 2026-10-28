@@ -10,7 +10,7 @@
 
 ## 1. Decision
 
-DanchoAI becomes an open, hobbyist alternative to Claude Code whose primary
+Dino becomes an open, hobbyist alternative to Claude Code whose primary
 target is an open-weight model on hardware one person owns or rents by the hour.
 The Qwen family in RFC-0003 is that target. The hosted Anthropic and OpenAI
 profiles stay, but their role changes: they are **baselines**, the thing an
@@ -59,7 +59,7 @@ Three things have changed since RFC-0001 put three providers side by side.
    passed the cross-provider conformance suite (RFC-0003 §7.1), which proves the
    wire and not the model: it has **never been driven against a live endpoint**.
    Even so, five Qwen profiles, and the OpenAI profile `terra`, are marked
-   `supported` in the catalogue (observed in source, `dancho-model/src/lib.rs`,
+   `supported` in the catalogue (observed in source, `dino-model/src/lib.rs`,
    2026-10-19), which RFC-0003 §3.1 says requires a completed behavioural eval. The profile the project describes
    as its widest behavioural range is the one with the least evidence, and the
    catalogue currently claims otherwise.
@@ -82,7 +82,7 @@ per-seat subscription:
 | B    | one 24 to 48 GB GPU, or 64 GB+ unified memory       | `qwen3.6-27b`, `qwen3.6-35b-a3b`, `qwen3-coder-30b-a3b` |
 | C    | 8 to 16 GB GPU laptop, MoE experts offloaded to CPU | `qwen3.6-35b-a3b`, `qwen3-coder-30b-a3b` at Q4_K_M      |
 
-**Inferred, not measured by DanchoAI.** The tier boundaries are estimates from
+**Inferred, not measured by Dino.** The tier boundaries are estimates from
 model sizes and quantisation, not runs. The only throughput figure the
 project family has for tier C is honeyguide's: about 359 tok/s prefill and
 25 tok/s decode for `Qwen3.6-35B-A3B` Q4_K_M on Ollama, measured 2026-08-12
@@ -105,17 +105,17 @@ would miss within the first hour of switching.
 - Bounded reads, literal search, ignore-aware listing, exact patching.
 - Structured `cargo` with parsed diagnostics.
 - Approvals below the model and an OS sandbox on macOS and Linux.
-- An append-only log with replay, and a one-shot `dancho run` for scripts and CI.
+- An append-only log with replay, and a one-shot `dino run` for scripts and CI.
 
 ### 4.2 Required for this RFC to be accepted as done
 
 1. **Project instructions.** Read `AGENTS.md` at the workspace root, and
-   `.dancho/instructions.md` if present, into the system prompt under a hard byte
+   `.dino/instructions.md` if present, into the system prompt under a hard byte
    cap that is reported when it truncates. `AGENTS.md` rather than a new name,
    because the repositories hobbyists already have use it. A project file is
    repository content and may not change approvals, sandbox or `api_base`, as
    RFC-0015 already requires.
-2. **`dancho probe`.** A command that runs the conformance suite against the
+2. **`dino probe`.** A command that runs the conformance suite against the
    user's own endpoint, not a mock. It reports, per check, pass or fail with
    the evidence:
    - the served context window, measured by a canary near the declared limit,
@@ -125,16 +125,16 @@ would miss within the first hour of switching.
    - whether thinking controls are honoured;
    - whether the system prompt and tool schemas arrived whole;
    - decode and prefill throughput, warmed, three trials, all reported.
-   A profile is usable against an endpoint only after `dancho probe` passes there.
+   A profile is usable against an endpoint only after `dino probe` passes there.
    This turns RFC-0003 §7's "a real model run must complete the behavioural
    evals" into something a user can run, rather than something only the
    maintainer can.
 3. **Served context, not native context.** RFC-0013's budget watches reported
    tokens against the documented window. For open models the documented window
    is a ceiling the server may not offer. The budget uses the smaller of the
-   documented window and the window `dancho probe` measured, and says which.
+   documented window and the window `dino probe` measured, and says which.
 4. **A quickstart per tier.** One page each: the exact serving command, the
-   parser flags RFC-0003 §6 requires, the expected `dancho probe` output, and what
+   parser flags RFC-0003 §6 requires, the expected `dino probe` output, and what
    it costs (watts, or dollars an hour). A hobbyist who cannot get a model
    serving correctly in twenty minutes is not a hobbyist who will stay.
 
@@ -169,11 +169,11 @@ rediscover it.
   loop does, including its failures.
 - **Cloud sessions, a desktop app, IDE extensions.** Each is a product of its
   own. The terminal is the product here.
-- **A plugin or MCP marketplace.** A catalogue is a supply chain. DanchoAI
+- **A plugin or MCP marketplace.** A catalogue is a supply chain. Dino
   does not want to operate one.
 - **Arbitrary OpenAI-compatible endpoints as a supported target.** The envelope
   is compatible; the behaviour is not (RFC-0003 §6). An unlisted model can be
-  run under a `development` profile and `dancho probe`, never as `supported`.
+  run under a `development` profile and `dino probe`, never as `supported`.
 - **Reusing a Claude or ChatGPT consumer subscription**, as RFC-0001 §3 already
   says, until the provider explicitly supports third-party clients doing so.
 - **Windows**, per RFC-0001 §8.
@@ -186,9 +186,9 @@ server. This RFC keeps the rule and changes how it is applied.
 
 | Stack            | Status after this RFC | Condition                                                 |
 | ---------------- | --------------------- | --------------------------------------------------------- |
-| vLLM             | supported             | RFC-0003 §6 parser flags, `dancho probe` and the corpus pass |
+| vLLM             | supported             | RFC-0003 §6 parser flags, `dino probe` and the corpus pass |
 | SGLang           | supported             | as vLLM                                                   |
-| llama.cpp server | development           | promoted per profile when `dancho probe` and the corpus pass |
+| llama.cpp server | development           | promoted per profile when `dino probe` and the corpus pass |
 | Ollama           | development           | as llama.cpp, and `num_ctx` set explicitly                |
 
 `supported` and `development` are the `ProfileStatus` values from RFC-0003
@@ -201,12 +201,12 @@ until a pair has passed, it is `development`, including on vLLM.
 Two known hazards are restated because they fail silently:
 
 - **Ollama truncates rather than refusing** when the prompt exceeds `num_ctx`,
-  and the default is far below the native window. `dancho probe` must detect this.
-  DanchoAI refuses to start a session against an Ollama endpoint whose measured
+  and the default is far below the native window. `dino probe` must detect this.
+  Dino refuses to start a session against an Ollama endpoint whose measured
   window is smaller than the system prompt plus tool schemas plus a working
   margin, and says so with the numbers.
 - **Quantisation below Q4_K_M** degrades tool calling before chat (measured in
-  honeyguide). Profiles declare a minimum quantisation; `dancho probe` reports the
+  honeyguide). Profiles declare a minimum quantisation; `dino probe` reports the
   served one where the stack exposes it and warns where it cannot tell.
 
 ## 7. Harness changes for open models
@@ -249,7 +249,7 @@ mode becomes a profile option in a later RFC, not a fork.
 
 This RFC is done when, for at least one tier B profile on a supported stack:
 
-- `dancho probe` passes;
+- `dino probe` passes;
 - the corpus has grown to at least twenty cases, including those in
   section 8.2;
 - every case has run at least ten trials, with a Wilson interval printed beside
@@ -311,7 +311,7 @@ not argued.
 **Measured.** `qwen3.8-27b` on vLLM 0.32.0, one A100 SXM 80GB on Runpod
 ($1.81/hour), 64K context, the recipe's `qwen3_coder` and `qwen3` parsers,
 thinking left at the server's default, sampling at the server's default. Nine
-cases, one trial each, `dancho eval` with the workspace sandbox.
+cases, one trial each, `dino eval` with the workspace sandbox.
 
 | case | result | turns | wall time |
 |---|---|---:|---:|
@@ -339,17 +339,17 @@ RFC-0012 §9.12 already found too easy to separate Opus from Sonnet. The serving
 stack was a rented datacentre GPU, which is tier A hardware serving a tier B
 model; tier B and C hardware were not tried. Before this run, the profile had
 already been checked by hand with one direct tool-call request and one
-read-only `dancho run` question, both correct.
+read-only `dino run` question, both correct.
 
 **Against Claude 5.5, same day, a different harness.** The same nine cases were
 given to headless Claude Code (2.1.303) on `claude-sonnet-5-5` and
 `claude-opus-5-5`, through a subscription rather than the API, and judged by a
-script applying the corpus's own assertions. DanchoAI has no 5.5 profiles and
+script applying the corpus's own assertions. Dino has no 5.5 profiles and
 does not use subscription credentials (section 5), so this compares model and
 harness together, which is the comparison a person choosing between the two
 tools would make.
 
-| | Qwen3.8 27B in `dancho` | Sonnet 5.5 in Claude Code | Opus 5.5 in Claude Code |
+| | Qwen3.8 27B in `dino` | Sonnet 5.5 in Claude Code | Opus 5.5 in Claude Code |
 |---|---:|---:|---:|
 | passed | 9/9 | 9/9 | 9/9 |
 | wall time | 607 s | 136 s | 183 s |
@@ -370,7 +370,7 @@ waiting at a terminal that may matter more than anything this corpus asserts.
 **Setup.** Six cases with hidden tests (`interval-set`, `diagnose-the-panic`,
 `make-it-thread-safe`, `large-workspace-find-the-cause`,
 `pratt-expression-parser`, `zero-copy-tokenizer`), three trials each, 40 model
-turns. Qwen ran in `dancho` on vLLM 0.32.0, one A100 80GB, 64K context, with the
+turns. Qwen ran in `dino` on vLLM 0.32.0, one A100 80GB, 64K context, with the
 three trials sharing the GPU. `scripts/bench.sh` ran it and
 `scripts/analyse-bench.py --rescore` mined the logs. "Rescored" means a run that
 did not finish is judged by running the hidden tests against the code it left.
@@ -381,7 +381,7 @@ had the missing-TMPDIR bug. The second run (2026-10-20) used `c359355` on
 window read from the server, retries, `write_file`, staleness judged by what
 the model last saw, the turn budget and countdown, and `report_blocker`.
 
-| Qwen3.8 27B in `dancho` | 2026-10-19 | 2026-10-20 |
+| Qwen3.8 27B in `dino` | 2026-10-19 | 2026-10-20 |
 |---|---:|---:|
 | passed | 11/18 | 15/18 |
 | passed, rescored | 14/18 | 16/18 |
@@ -482,7 +482,7 @@ spans. Whether that moves the single-call share is for the next bench.
 - **RFC-0001 §1.** The second paragraph's "three provider families" are kept.
   The primary target is the Qwen family; the others are baselines.
 - **RFC-0001 §3.** "Arbitrary compatible APIs" stays a non-goal for
-  `supported`. Running one under a `development` profile with `dancho probe` is
+  `supported`. Running one under a `development` profile with `dino probe` is
   allowed.
 - **RFC-0001 §10.** Item 11, ChatGPT OAuth, moves behind every item in §4.2 of
   this document.
@@ -500,7 +500,7 @@ spans. Whether that moves the single-call share is for the next bench.
 
 1. Demote the five Qwen profiles and `terra` to `development`, so the
    catalogue stops claiming what nothing has measured. **Done 2026-10-19.**
-2. `dancho probe`, against vLLM serving `qwen3.8-27b` (section 1.1). Early,
+2. `dino probe`, against vLLM serving `qwen3.8-27b` (section 1.1). Early,
    because every later step depends on knowing the endpoint is what it claims.
    The default profile is **done 2026-10-19**, ahead of the probe, and has been
    driven live on vLLM 0.32.0; section 8.5 records the first run.
@@ -515,7 +515,7 @@ spans. Whether that moves the single-call share is for the next bench.
    including the bad ones.
 8. Corpus growth to twenty cases, meeting §8.2; baseline rerun.
 9. Quickstarts for tiers A, B and C, each tested from a clean machine.
-10. llama.cpp and Ollama `dancho probe` runs, and promotion of whatever passes.
+10. llama.cpp and Ollama `dino probe` runs, and promotion of whatever passes.
 11. Plan mode, hooks, `rename`, stdio MCP, each with its own RFC.
 
 As in RFC-0001: each step is a working vertical slice. A quickstart nobody has
@@ -528,7 +528,7 @@ followed from a clean machine is a hypothesis with formatting.
   which tier the project recommends.
 - **Serving misconfiguration will look like model weakness.** Honeyguide's
   first behavioural readings were dominated by harness and serving defects, five
-  of seven of which made the model look worse than it was. `dancho probe` exists to
+  of seven of which made the model look worse than it was. `dino probe` exists to
   separate the two. Until it passes, no model comparison is reported.
 - **Offline sandboxed cargo is hobbyist friction.** A sandboxed run has no
   network, so adding a crate needs `--sandbox none` or a person. Landlock
@@ -536,7 +536,7 @@ followed from a clean machine is a hypothesis with formatting.
   Linux. This stays a known cost rather than a weakened boundary.
 - **Numbers decay.** Model releases, serving stacks and quantisations move
   monthly. Every quantitative claim carries a date and method, as the rest of
-  the design record does, and `dancho probe` output is the thing to trust over any
+  the design record does, and `dino probe` output is the thing to trust over any
   table in this document.
 
 ## 12. Open questions
@@ -551,6 +551,6 @@ followed from a clean machine is a hypothesis with formatting.
   should come from demand measured in issues, not from symmetry.
 - Whether a tier C profile should default to a reduced tool set before the
   corpus has said so, or only after.
-- What the README says DanchoAI *is* once this lands. Proposed: "an open
+- What the README says Dino *is* once this lands. Proposed: "an open
   coding agent for open models, that does less than Claude Code and tells you
   exactly what it did."

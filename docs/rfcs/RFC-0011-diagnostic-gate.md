@@ -173,7 +173,7 @@ measurement, and line numbers still are not. Section 3 always said identity was
 `(level, code, file, message)`; what it did not say, and now does by way of this
 note, is that an identity carries a count and the count is load-bearing.
 
-**Observed on 2026-08-27**, driving the built `dancho` binary against a local fake
+**Observed on 2026-08-27**, driving the built `dino` binary against a local fake
 endpoint over a two-error fixture, with the sandbox in force: `gate start`,
 `apply_patch`, `gate check`. The model received `verdict: improving`, two errors
 down to one, one file changed by minus four bytes, and "Fewer distinct errors
@@ -215,7 +215,7 @@ repeatedly, and after nine cases I have not managed it.
 
 So: kept, because that case may yet be written and the code is correct. Not
 offered, because every measurement so far says it costs turns and tokens and
-changes nothing. Putting it back is one line in `dancho_eval::session_tools`.
+changes nothing. Putting it back is one line in `dino_eval::session_tools`.
 
 Building something, arguing for it, measuring it twice and then withdrawing it
 is the outcome this repository's method is supposed to produce. It is not a
@@ -227,7 +227,7 @@ The gate came back in one narrow form (#31). In bench v5, Qwen ended its turn
 after 9 of 80 turns with 19 compile errors and no message, and the run ended
 there.
 
-In `dancho run` and `dancho eval` only, when a model ends its turn in a Cargo
+In `dino run` and `dino eval` only, when a model ends its turn in a Cargo
 workspace, the harness runs `cargo check`. If there are errors, the model is
 sent back with the count and the first three, and told to fix them or call
 `report_blocker`. This happens once per submission, never on the last turn,
