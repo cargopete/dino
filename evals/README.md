@@ -30,6 +30,12 @@ scored 99 and was left out. The first runs scored 88 and 55 before two ambiguous
 sentences in the prompts were fixed, so read a low score on a new case against its
 prompt before trusting it.
 
+`slugify-unprompted` (2026-10-28) asks for a small function and never mentions
+tests. It passes only if the hidden tests pass and at least one new `#[test]`
+was written (`new_tests = 1`), and every run reports `untested_at_end`, whether a
+Rust file was edited after the last passing `cargo test`. It measures whether a
+model verifies its work without being told to (#129).
+
 Two rules the harness applies to every case, whether or not the case remembers:
 
 - A case where nothing in the workspace changed fails, even if the code already

@@ -1116,6 +1116,16 @@ fn check(
             None => failures.push(format!("{} could not be read", expectation.file)),
         }
     }
+    if case.expect.new_tests > 0 {
+        let before = count_tests(&case.directory.join("workspace"));
+        let added = count_tests(workspace).saturating_sub(before);
+        if added < case.expect.new_tests {
+            failures.push(format!(
+                "expected at least {} new tests, and {added} were added",
+                case.expect.new_tests
+            ));
+        }
+    }
     for expectation in &case.expect.not_contains {
         if read(workspace, &expectation.file).is_some_and(|body| body.contains(&expectation.text)) {
             failures.push(format!(
@@ -1135,6 +1145,34 @@ fn read(workspace: &Path, relative: &str) -> Option<String> {
 /// # Errors
 ///
 /// Returns [`EvalError`] when Cargo cannot be run at all.
+/// Test functions under `root`, by their attributes, outside `target/`.
+fn count_tests(root: &Path) -> usize {
+    ignore::WalkBuilder::new(root)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "rs")
+        })
+        .filter(|entry| {
+            entry.path().strip_prefix(root).is_ok_and(|relative| {
+                !relative
+                    .components()
+                    .any(|part| part.as_os_str() == "target")
+            })
+        })
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("#[test]") || line.starts_with("#[tokio::test"))
+                .count()
+        })
+        .sum()
+}
+
 async fn check_hidden_tests(
     workspace: &Path,
     sandbox: Arc<dyn Sandbox>,
