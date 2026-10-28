@@ -189,6 +189,8 @@ pub struct Renderer {
     calls: HashMap<String, ToolCall>,
     /// Calls a person approved at the prompt, which showed their change.
     asked: HashSet<String>,
+    /// Drawing a log, where no prompt was drawn to show a change.
+    replaying: bool,
     /// When the current submission started, for the closing line.
     started: Option<std::time::Instant>,
     spinner: crate::spinner::Spinner,
@@ -225,6 +227,7 @@ impl Renderer {
             last: None,
             calls: HashMap::new(),
             asked: HashSet::new(),
+            replaying: false,
             started: None,
             spinner: crate::spinner::Spinner::new(Arc::clone(&status)),
             status,
@@ -232,6 +235,13 @@ impl Renderer {
             requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             context_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// For drawing a recorded session rather than a live one.
+    #[must_use]
+    pub fn replaying(mut self) -> Self {
+        self.replaying = true;
+        self
     }
 
     /// Set by a context warning, for a session that compacts on its own.
@@ -413,7 +423,7 @@ impl Renderer {
             }
             ApprovalDecision::Allowed {
                 source: DecisionSource::User,
-            } => {
+            } if !self.replaying => {
                 self.asked.insert(call_id.to_owned());
                 Ok(())
             }
@@ -1002,20 +1012,28 @@ impl Renderer {
 /// The changed lines of a patch, beneath its call: removed in terracotta,
 /// added in green, behind a faint gutter.
 fn patch_preview(call: &ToolCall) -> String {
-    use crate::summary::Change;
+    use crate::diff::Row;
     const PREVIEW_LINES: usize = 10;
-    crate::summary::patch_preview(call, PREVIEW_LINES)
+    let text = |parts: &[(bool, String)]| {
+        let line: String = parts.iter().map(|(_, text)| text.as_str()).collect();
+        cap(&line, MAX_SUMMARY_BYTES)
+    };
+    let changed: Vec<String> = crate::diff::of_call(call, None)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|row| match row {
+            Row::Removed { parts, .. } => Some(style::paint(RUST, &format!("- {}", text(parts)))),
+            Row::Added { parts, .. } => Some(style::paint(OK, &format!("+ {}", text(parts)))),
+            Row::Same { .. } | Row::Gap => None,
+        })
+        .collect();
+    let shown = calls::shown(changed.len(), PREVIEW_LINES);
+    let hidden = changed.len() - shown;
+    changed
         .into_iter()
-        .fold(String::new(), |mut block, change| {
-            let line = match change {
-                Change::Removed(text) => {
-                    style::paint(RUST, &format!("- {}", cap(&text, MAX_SUMMARY_BYTES)))
-                }
-                Change::Added(text) => {
-                    style::paint(OK, &format!("+ {}", cap(&text, MAX_SUMMARY_BYTES)))
-                }
-                Change::More(hidden) => style::paint(FAINT, &format!("… {hidden} more")),
-            };
+        .take(shown)
+        .chain((hidden > 0).then(|| style::paint(FAINT, &format!("… {hidden} more"))))
+        .fold(String::new(), |mut block, line| {
             block.push_str(&style::paint(FAINT, "      │ "));
             block.push_str(&line);
             block.push('\n');

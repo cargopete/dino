@@ -84,67 +84,6 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
     }
 }
 
-/// One line of a patch preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Change {
-    Removed(String),
-    Added(String),
-    /// Lines not shown, to keep the preview short.
-    More(usize),
-}
-
-/// The lines a patch changes, without the lines its old and new text share at
-/// either end, at most `limit` of them unless only one more would be hidden.
-#[must_use]
-pub fn patch_preview(call: &ToolCall, limit: usize) -> Vec<Change> {
-    let edits: Vec<&Value> = match call.arguments.get("edits").and_then(Value::as_array) {
-        Some(edits) => edits.iter().collect(),
-        None => vec![&call.arguments],
-    };
-    let changes: Vec<Change> = edits.into_iter().flat_map(edit_changes).collect();
-    let shown = crate::calls::shown(changes.len(), limit);
-    if shown == changes.len() {
-        return changes;
-    }
-    let hidden = changes.len() - shown;
-    changes
-        .into_iter()
-        .take(shown)
-        .chain(std::iter::once(Change::More(hidden)))
-        .collect()
-}
-
-fn edit_changes(edit: &Value) -> Vec<Change> {
-    let text = |key: &str| {
-        edit.get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
-    let (old, new) = (text("old_text"), text("new_text"));
-    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let tail = old[head..]
-        .iter()
-        .rev()
-        .zip(new[head..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let changes: Vec<Change> = old[head..old.len() - tail]
-        .iter()
-        .cloned()
-        .map(Change::Removed)
-        .chain(
-            new[head..new.len() - tail]
-                .iter()
-                .cloned()
-                .map(Change::Added),
-        )
-        .collect();
-    changes
-}
-
 fn cargo(call: &ToolCall, value: &Value) -> (Tone, String) {
     let command = call
         .arguments
@@ -349,51 +288,6 @@ mod tests {
                 json!({"created": true})
             ),
             Some((Tone::Fine, "created, 1 line".into()))
-        );
-    }
-
-    #[test]
-    fn a_patch_preview_shows_only_the_changed_lines() {
-        let patch = call(
-            "apply_patch",
-            json!({"old_text": "fn a() {\n    1\n}", "new_text": "fn a() {\n    2\n    + 3\n}"}),
-        );
-        assert_eq!(
-            patch_preview(&patch, 10),
-            [
-                Change::Removed("    1".into()),
-                Change::Added("    2".into()),
-                Change::Added("    + 3".into())
-            ]
-        );
-        assert_eq!(
-            patch_preview(&patch, 1),
-            [Change::Removed("    1".into()), Change::More(2)]
-        );
-        assert_eq!(
-            patch_preview(&patch, 2).len(),
-            3,
-            "one hidden line is shown"
-        );
-    }
-
-    #[test]
-    fn a_preview_covers_every_edit() {
-        let patch = call(
-            "apply_patch",
-            json!({"edits": [
-                {"old_text": "a", "new_text": "b"},
-                {"old_text": "c", "new_text": "d"}
-            ]}),
-        );
-        assert_eq!(
-            patch_preview(&patch, 10),
-            [
-                Change::Removed("a".into()),
-                Change::Added("b".into()),
-                Change::Removed("c".into()),
-                Change::Added("d".into())
-            ]
         );
     }
 
