@@ -178,6 +178,8 @@ async fn a_case_that_fixes_the_fixture_passes() {
                 patch("src/lib.rs", &second, "\"two\"", "2"),
             ),
             text_turn("Both fixed."),
+            // Sent back once: the edit was never tested.
+            text_turn("Both fixed."),
         ],
     )
     .await;
@@ -295,20 +297,22 @@ async fn the_metrics_match_the_moves_the_script_made() {
                 patch("src/lib.rs", &sha, "pub fn one", "pub fn uno"),
             ),
             text_turn("Renamed it."),
+            text_turn("Renamed it."),
         ],
     )
     .await;
 
     // Every one of these came out of the session log rather than out of the
     // agent, which is also the test that the log is sufficient.
-    assert_eq!(outcome.metrics.model_turns, 4);
+    // The fifth is the send-back for an untested edit.
+    assert_eq!(outcome.metrics.model_turns, 5);
     assert_eq!(outcome.metrics.tool_calls.get("read"), Some(&1));
     assert_eq!(outcome.metrics.tool_calls.get("search"), Some(&1));
     assert_eq!(outcome.metrics.tool_calls.get("apply_patch"), Some(&1));
     assert_eq!(outcome.metrics.refusals, 0);
     assert_eq!(outcome.metrics.tool_errors, 0);
-    assert_eq!(outcome.metrics.tokens.input_tokens, 120);
-    assert_eq!(outcome.metrics.tokens.cached_input_tokens, 20);
+    assert_eq!(outcome.metrics.tokens.input_tokens, 240);
+    assert_eq!(outcome.metrics.tokens.cached_input_tokens, 40);
     assert_eq!(outcome.metrics.stop_reason, Some(StopReason::EndTurn));
     assert!(outcome.passed, "failures: {:?}", outcome.failures);
 }
@@ -400,6 +404,7 @@ async fn answer_two_with(case: &Case, scratch: &Scratch, value: &str) -> dino_ev
                 "apply_patch",
                 patch("src/lib.rs", &sha, "    1\n", &format!("    {value}\n")),
             ),
+            text_turn("Done."),
             text_turn("Done."),
         ],
     )
@@ -668,7 +673,7 @@ async fn a_noop_patch_does_not_pass_until_it_is_refused() {
 
     // Drop the refusal and this script stops after the identical patch.
     assert_eq!(outcome.metrics.tool_errors, 1);
-    assert_eq!(outcome.metrics.model_turns, 4);
+    assert_eq!(outcome.metrics.model_turns, 5);
     assert!(outcome.passed, "failures: {:?}", outcome.failures);
 }
 

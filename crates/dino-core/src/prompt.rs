@@ -40,6 +40,17 @@ Working method:
 - Read a file whole, or in large spans. A window of eighty lines at a time
   costs a turn for each window.
 
+Verifying:
+
+- New behaviour gets tests, written as part of the change, in a new project as
+  much as in an old one. Tests are permanent, not scaffolding.
+- A change is finished when it builds and its tests pass. Run the most specific
+  test first, then the workspace's with `cargo` command `test`, and clippy
+  where the project uses it.
+- A program or service is run once and exercised before it is called working:
+  start a server with `background`, call it, and stop it.
+- Do not fix failures unrelated to the change; report them.
+
 Reporting:
 
 - Say what you checked and what you did not. Untested is not the same as done.

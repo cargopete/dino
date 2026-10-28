@@ -16,6 +16,7 @@ pub mod session;
 pub mod skills;
 pub mod text;
 pub mod todo;
+pub mod verify;
 pub mod workspace;
 
 use std::collections::HashMap;
@@ -704,7 +705,10 @@ where
         let Some(checked) = checked else {
             return Ok(None);
         };
-        let Some(reason) = checked.or_else(|| unfinished_checklist(events)) else {
+        let Some(reason) = checked
+            .or_else(|| unfinished_checklist(events))
+            .or_else(|| verify::untested_edits(events))
+        else {
             return Ok(None);
         };
         self.sent_back = true;
