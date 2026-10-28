@@ -118,6 +118,9 @@ pub trait ToolRuntime: Send + Sync {
     /// back output it has already returned must stop, or it withholds bytes
     /// the model no longer has.
     fn history_lost(&self) {}
+
+    /// Told every call of a model turn before the first runs.
+    fn begin_turn(&self, _calls: &[ToolCall]) {}
 }
 
 /// Several tool runtimes behind one, dispatching by tool name.
@@ -190,6 +193,12 @@ impl ToolRuntime for ToolSet {
     fn history_lost(&self) {
         for runtime in &self.runtimes {
             runtime.history_lost();
+        }
+    }
+
+    fn begin_turn(&self, calls: &[ToolCall]) {
+        for runtime in &self.runtimes {
+            runtime.begin_turn(calls);
         }
     }
 }
@@ -605,6 +614,7 @@ where
             .filter_map(|call| Some((call.clone(), self.tools.classify(call).ok()?)))
             .collect();
         self.policy.begin_turn(&classified);
+        self.tools.begin_turn(&calls);
         for call in calls {
             let reported = (call.name == blocker::REPORT_BLOCKER)
                 .then(|| blocker::describe(&call).ok())

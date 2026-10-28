@@ -173,6 +173,10 @@ impl ToolRuntime for Without {
     fn history_lost(&self) {
         self.inner.history_lost();
     }
+
+    fn begin_turn(&self, calls: &[ToolCall]) {
+        self.inner.begin_turn(calls);
+    }
 }
 
 /// Builds the provider session for one case.
