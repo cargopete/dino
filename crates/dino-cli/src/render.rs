@@ -192,6 +192,8 @@ pub struct Renderer {
     /// When the current submission started, for the closing line.
     started: Option<std::time::Instant>,
     spinner: crate::spinner::Spinner,
+    /// What the status row shows, shared with the session, which names the model.
+    status: Arc<Mutex<crate::spinner::Status>>,
     /// Accumulated across every submission, because a session's cost is the
     /// question a person actually has. Shared so `/status` can read the same
     /// number the turn summary prints, rather than keeping a second tally that
@@ -213,6 +215,7 @@ enum Stream {
 impl Renderer {
     #[must_use]
     pub fn new(show_reasoning: bool) -> Self {
+        let status = Arc::new(Mutex::new(crate::spinner::Status::default()));
         Self {
             show_reasoning,
             stream: Stream::Idle,
@@ -223,7 +226,8 @@ impl Renderer {
             calls: HashMap::new(),
             asked: HashSet::new(),
             started: None,
-            spinner: crate::spinner::Spinner::default(),
+            spinner: crate::spinner::Spinner::new(Arc::clone(&status)),
+            status,
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             context_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -246,6 +250,12 @@ impl Renderer {
     #[must_use]
     pub fn usage_handle(&self) -> Arc<Mutex<TokenUsage>> {
         Arc::clone(&self.usage)
+    }
+
+    /// A handle on the status row's figures, for naming the model and window.
+    #[must_use]
+    pub fn status_handle(&self) -> Arc<Mutex<crate::spinner::Status>> {
+        Arc::clone(&self.status)
     }
 
     /// Draws whatever is held back: a partial line of text, an open call.
@@ -334,6 +344,11 @@ impl Renderer {
                     total.cached_input_tokens += usage.cached_input_tokens;
                     total.output_tokens += usage.output_tokens;
                     total.reasoning_tokens += usage.reasoning_tokens;
+                }
+                if let Ok(mut status) = self.status.lock() {
+                    status.context = usage.input_tokens;
+                    status.input += usage.input_tokens;
+                    status.output += usage.output_tokens;
                 }
                 Ok(())
             }
@@ -454,6 +469,10 @@ impl EventSink for Renderer {
                 self.started = Some(std::time::Instant::now());
                 self.calls.clear();
                 self.asked.clear();
+                if let Ok(mut status) = self.status.lock() {
+                    status.input = 0;
+                    status.output = 0;
+                }
                 submitted(text)
             }
             AgentEvent::Model { event, .. } => self.model_event(event),

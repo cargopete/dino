@@ -302,6 +302,8 @@ pub struct Session<S> {
     pub auto_compact: bool,
     /// Set by the renderer when the core warns the context is filling.
     pub context_full: Arc<std::sync::atomic::AtomicBool>,
+    /// The status row's figures, told which model is answering.
+    pub status: Arc<Mutex<crate::spinner::Status>>,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -544,6 +546,11 @@ where
 
     /// Runs one prepared message and saves the conversation after it.
     async fn run_submission(&mut self, text: String) -> Option<dino_core::RunResult> {
+        // Each time, since `/model` and `/resume` change it and a run can learn
+        // the window the server really serves.
+        if let Ok(mut status) = self.status.lock() {
+            status.answering(self.agent.session().profile());
+        }
         let cancel = CancellationToken::new();
         let signal = cancel.clone();
         let interrupt = tokio::spawn(async move {
