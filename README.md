@@ -86,13 +86,23 @@ CI and evals.
   appeared are discarded and unknown keys ignored. Beyond once and always, it
   offers every pending call of the model's turn (`t`), one program whatever its
   arguments (`p`, for `exec` and `cargo` but never a `shell` line), and every
-  process this session (`s`, still sandboxed). Answering `r` keeps the rule for the
+  process this session (`s`, still sandboxed). An edit's prompt shows its diff
+  before it is applied, numbered from the file with two lines of context and the
+  changed words picked out. Answering `r` keeps the rule for the
   workspace in `~/.config/dino/approvals/`, outside the repository, so a checkout
   cannot approve its own commands; the file is plain JSON, to read or prune.
 - **A line-based session.** Not an alternate-screen interface, deliberately: the
   transcript belongs in the terminal's scrollback, where a person goes to find
   what the agent did an hour ago and where selection and copying still work.
-  Paste arrives as one message; a trailing backslash continues a typed line.
+  Each call is one line, `✓ $ cargo test · 7 passed`: an icon for its kind, a
+  mark for running, done, failed or refused (by you, or blocked by policy), and
+  a run of reads, lists and searches folded into one `explored` line. The line
+  is redrawn in place only while it is still the last one written. Beneath it,
+  while a turn runs, one status row gives the model, the context used, the
+  submission's tokens, the elapsed time and the interrupt key, and is cleared
+  before anything else is written. Under `--plain` every line is written once,
+  in order, as before. Paste arrives as one message; ctrl-j, alt-enter or a
+  trailing backslash starts a new line without sending.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events
