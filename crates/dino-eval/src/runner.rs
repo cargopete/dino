@@ -133,6 +133,8 @@ pub struct ToolOptions {
     pub memory: Option<dino_core::memory::MemoryFiles>,
     /// After-edit hooks around the file tools. None in evals.
     pub hooks: Vec<dino_exec::Hook>,
+    /// Leave out the `cargo check` that follows a turn's Rust edits.
+    pub skip_edit_check: bool,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -517,6 +519,7 @@ fn eval_session(
                 hooks: Vec::new(),
                 memory: None,
                 skills: Vec::new(),
+                skip_edit_check: false,
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -946,16 +949,30 @@ fn file_tools(
     let tools = WorkspaceTools::new(workspace, ToolLimits::default())
         .map_err(|error| EvalError::Setup(error.to_string()))?
         .protecting(options.protected.clone());
-    if options.hooks.is_empty() {
-        return Ok(Box::new(tools));
+    let mut tools: Box<dyn ToolRuntime> = Box::new(tools);
+    if !options.hooks.is_empty() {
+        tools = Box::new(dino_exec::AfterEdit::new(
+            tools,
+            options.hooks.clone(),
+            workspace,
+            Arc::clone(sandbox),
+        ));
     }
-    Ok(Box::new(dino_exec::AfterEdit::new(
-        Box::new(tools),
-        options.hooks.clone(),
-        workspace,
-        Arc::clone(sandbox),
-    )))
+    if !options.skip_edit_check {
+        // Outside the hooks, so the check sees the file as formatted.
+        let limits = CargoLimits {
+            timeout: std::time::Duration::from_secs(EDIT_CHECK_SECONDS),
+            ..CargoLimits::default()
+        };
+        let cargo = CargoTool::new(workspace, limits, Arc::clone(sandbox))
+            .map_err(|error| EvalError::Setup(error.to_string()))?;
+        tools = Box::new(dino_rust::EditCheck::new(tools, cargo));
+    }
+    Ok(tools)
 }
+
+/// How long the check after an edit may take before it is skipped.
+const EDIT_CHECK_SECONDS: u64 = 90;
 
 /// An agent for one unattended case: everything allowed, inside the sandbox.
 fn eval_agent<S: ModelSession, T: ToolRuntime>(

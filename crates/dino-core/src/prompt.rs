@@ -74,7 +74,9 @@ Tool discipline:
 - `cargo` returns parsed diagnostics. Read the `counts`, which describe the whole
   run, before reading the `diagnostics` list, which may have been capped;
   `dropped_diagnostics` says how many are missing. A green build with no
-  material change is not success.
+  material change is not success. The last Rust edit of each response carries
+  `cargo_check`, the counts and the errors in the files you edited, so there is
+  no need to run `cargo check` straight after an edit.
 - Add Rust dependencies with `cargo` command `add`, not by writing versions into
   `Cargo.toml` from memory: remembered versions are often a major release old.
   Its `added` field names the versions it chose; write code for those versions,
