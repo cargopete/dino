@@ -37,6 +37,10 @@ pub struct Status {
     /// This submission's tokens so far.
     pub input: u64,
     pub output: u64,
+    /// What the person is typing during the run, not yet entered.
+    pub typed: String,
+    /// Messages entered during the run and not yet delivered.
+    pub queued: usize,
 }
 
 impl Status {
@@ -175,7 +179,13 @@ fn row(label: &str, elapsed: Duration, status: &Status, room: usize) -> String {
             ),
         ));
     }
-    parts.push((3, "ctrl-c to interrupt".to_owned()));
+    if status.queued > 0 {
+        parts.push((4, format!("{} queued", status.queued)));
+    }
+    if !status.typed.is_empty() {
+        parts.push((5, format!("› {}", status.typed)));
+    }
+    parts.push((3, crate::listen::INTERRUPT_HINT.to_owned()));
     loop {
         let line = parts
             .iter()
@@ -207,6 +217,7 @@ mod tests {
             context: 65_536,
             input: 18_200,
             output: 1_100,
+            ..Status::default()
         }
     }
 
@@ -214,7 +225,7 @@ mod tests {
     fn the_row_says_what_the_turn_is_doing_and_what_it_has_cost() {
         assert_eq!(
             row("thinking", Duration::from_secs(4), &status(), 200),
-            "thinking 4s · Qwen3.7-Max · 25% context · 18.2k in · 1.1k out · ctrl-c to interrupt"
+            "thinking 4s · Qwen3.7-Max · 25% context · 18.2k in · 1.1k out · esc to interrupt"
         );
     }
 
@@ -223,13 +234,10 @@ mod tests {
         let row = |room| row("running", Duration::from_secs(72), &status(), room);
         assert_eq!(
             row(70),
-            "running 1m 12s · Qwen3.7-Max · 25% context · ctrl-c to interrupt"
+            "running 1m 12s · Qwen3.7-Max · 25% context · esc to interrupt"
         );
-        assert_eq!(
-            row(50),
-            "running 1m 12s · 25% context · ctrl-c to interrupt"
-        );
-        assert_eq!(row(36), "running 1m 12s · ctrl-c to interrupt");
+        assert_eq!(row(50), "running 1m 12s · 25% context · esc to interrupt");
+        assert_eq!(row(36), "running 1m 12s · esc to interrupt");
         assert_eq!(row(10), "running 1…");
     }
 
@@ -242,7 +250,7 @@ mod tests {
         };
         assert_eq!(
             row("thinking", Duration::from_secs(1), &fresh, 200),
-            "thinking 1s · Qwen3.7-Max · ctrl-c to interrupt"
+            "thinking 1s · Qwen3.7-Max · esc to interrupt"
         );
     }
 }

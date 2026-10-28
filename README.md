@@ -102,7 +102,11 @@ CI and evals.
   submission's tokens, the elapsed time and the interrupt key, and is cleared
   before anything else is written. Under `--plain` every line is written once,
   in order, as before. Paste arrives as one message; alt-enter or a
-  trailing backslash starts a new line without sending.
+  trailing backslash starts a new line without sending. While a turn runs, Esc
+  interrupts it, and a line typed and entered goes to the model with its next
+  tool results, shown in the status row as queued until then; anything entered
+  that no tool result came after is sent when the turn ends, and anything typed
+  but not entered starts the next prompt.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events

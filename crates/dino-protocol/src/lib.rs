@@ -397,6 +397,12 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         documented_tokens: Option<u32>,
     },
+    /// What the person typed while the model worked, delivered with the next
+    /// tool results rather than waiting for the run to end.
+    Steered {
+        model_turn: u32,
+        text: String,
+    },
     /// A long task moved to a fresh session, carried by its progress record.
     /// RFC-0018 section 5.
     HandedOver {

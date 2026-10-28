@@ -367,7 +367,12 @@ pub struct Agent<S, T> {
     /// submission must answer them before anything else.
     unsent: Option<Vec<ToolResult>>,
     loops: loops::LoopWatch,
+    /// Messages the person typed during a run, for its next tool results.
+    inbox: Option<Inbox>,
 }
+
+/// Where a frontend leaves what the person types while a run is under way.
+pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 impl<S, T> Agent<S, T>
 where
@@ -391,6 +396,7 @@ where
             pending_images: Vec::new(),
             unsent: None,
             loops: loops::LoopWatch::default(),
+            inbox: None,
         }
     }
 
@@ -399,6 +405,13 @@ where
     #[must_use]
     pub fn with_finish_check(mut self, check: impl FinishCheck + 'static) -> Self {
         self.finish_check = Some(Box::new(check));
+        self
+    }
+
+    /// Delivers what the person types during a run with the next tool results.
+    #[must_use]
+    pub fn with_inbox(mut self, inbox: Inbox) -> Self {
+        self.inbox = Some(inbox);
         self
     }
 
@@ -738,6 +751,7 @@ where
         }
         self.count_down(model_turn, &mut results, events, cancel)
             .await?;
+        self.deliver_inbox(model_turn, &mut results, events)?;
         Ok(Ok(TurnInput::ToolResults { results }))
     }
 
@@ -772,6 +786,34 @@ where
             events,
         )?;
         Ok(Some(note))
+    }
+
+    /// Hands the model, with its tool results, anything the person has typed
+    /// since the last ones.
+    fn deliver_inbox(
+        &mut self,
+        model_turn: u32,
+        results: &mut [ToolResult],
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<(), AgentError> {
+        let Some(last) = results.last_mut() else {
+            return Ok(());
+        };
+        let typed: Vec<String> = match &self.inbox {
+            Some(inbox) => inbox
+                .lock()
+                .map(|mut inbox| std::mem::take(&mut *inbox))
+                .unwrap_or_default(),
+            None => return Ok(()),
+        };
+        for text in typed {
+            let _ = write!(
+                last.output.content,
+                "\n\n[dino: the person wrote this while you were working:]\n{text}"
+            );
+            self.emit(AgentEvent::Steered { model_turn, text }, events)?;
+        }
+        Ok(())
     }
 
     /// Tells the model, with its tool results, how few turns remain, and what

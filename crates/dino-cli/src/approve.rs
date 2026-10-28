@@ -173,6 +173,8 @@ fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
 /// A closed or non-interactive standard input reaches the same place: refusal.
 /// An approval that a person did not give is not an approval.
 fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str) -> ApprovalReply {
+    // The keyboard is the prompt's alone until it has its answer.
+    let _keyboard = crate::listen::hold();
     crate::render::others_wrote();
     let mut err = stderr().lock();
     // The one moment a person is directly addressed.
@@ -360,7 +362,7 @@ fn refusal_reason() -> String {
     );
     let _ = err.flush();
     let mut reason = String::new();
-    let _ = stdin().lock().read_line(&mut reason);
+    let _ = crate::listen::cooked(|| stdin().lock().read_line(&mut reason));
     match reason.trim() {
         "" => "the operator refused this action".to_owned(),
         reason => format!("the operator refused this action: {reason}"),

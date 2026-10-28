@@ -174,6 +174,7 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, ToolCall>, event: &
         // Counted by nothing: a submission is the unit a metric is per, not a
         // metric itself.
         AgentEvent::Submitted { .. }
+        | AgentEvent::Steered { .. }
         | AgentEvent::Model { .. }
         | AgentEvent::ToolDecided { .. } => {}
     }
