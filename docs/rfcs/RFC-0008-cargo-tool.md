@@ -13,7 +13,7 @@ already pointing at it.
 
 ## 1. Decision
 
-DanchoAI's first process-executing tool is `cargo`, not `exec`.
+Dino's first process-executing tool is `cargo`, not `exec`.
 
 RFC-0001 section 6 lists both, and section 7 asks for the compiler as a source
 of structured evidence. A general `exec` is a shell by another name: its
@@ -23,7 +23,7 @@ of subcommands is narrower, is the thing the Rust specialisation actually needs,
 and can ship honestly before the sandbox.
 
 This is a deferral, not a reprieve. `exec` waits for the sandbox and gets its
-own RFC. Until then, DanchoAI cannot run an arbitrary command, and says so.
+own RFC. Until then, Dino cannot run an arbitrary command, and says so.
 
 ## 2. What it does not protect you from
 
@@ -124,7 +124,7 @@ The tool returns JSON, never raw compiler noise:
   "counts": {"errors": 2, "warnings": 7},
   "diagnostics": [
     {"level": "error", "code": "E0308", "message": "mismatched types",
-     "file": "crates/dancho-core/src/lib.rs", "line": 214, "column": 9,
+     "file": "crates/dino-core/src/lib.rs", "line": 214, "column": 9,
      "rendered": "error[E0308]: mismatched types\n ..."}
   ],
   "dropped_diagnostics": 0,
@@ -173,7 +173,7 @@ tool result is fabricated for the call that was interrupted.
 ## 8. Composing tool sets
 
 `Agent` held one `ToolRuntime`. A session now needs filesystem tools and Cargo
-tools at once, so `ToolRuntime` gains a `definitions` method and `dancho-core`
+tools at once, so `ToolRuntime` gains a `definitions` method and `dino-core`
 gains a `ToolSet` that dispatches by tool name across several runtimes.
 
 Declaring definitions on the trait rather than as an associated function means a
@@ -183,7 +183,7 @@ time and being quietly wrong for the rest of the session.
 
 ## 9. Crate
 
-A new `dancho-rust` crate holds the Cargo tool and the diagnostic types. It is not
+A new `dino-rust` crate holds the Cargo tool and the diagnostic types. It is not
 an empty crate awaiting content, per RFC-0001 section 4.1: it ships the tool,
 the JSON parsing, the environment policy and its tests together.
 
@@ -225,7 +225,7 @@ network, and they are part of `cargo test --workspace`.
 - Deduplication, capping and the rendered budget, unit tested against recorded
   compiler JSON.
 
-**Observed on 2026-08-27**, driving the built `dancho` binary against a local fake
+**Observed on 2026-08-27**, driving the built `dino` binary against a local fake
 vLLM endpoint over a fixture with a deliberate type error: the approval prompt
 names the full command and the unsandboxed caveat, and the model receives 566
 bytes of structured diagnostics naming `E0308` at `src/lib.rs:2:5` in place of a

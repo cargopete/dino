@@ -1,14 +1,14 @@
 [workspace]
 members = [
-    "crates/dancho-cli",
-    "crates/dancho-core",
-    "crates/dancho-eval",
-    "crates/dancho-exec",
-    "crates/dancho-model",
-    "crates/dancho-protocol",
-    "crates/dancho-rust",
-    "crates/dancho-sandbox",
-    "crates/dancho-tools",
+    "crates/dino-cli",
+    "crates/dino-core",
+    "crates/dino-eval",
+    "crates/dino-exec",
+    "crates/dino-model",
+    "crates/dino-protocol",
+    "crates/dino-rust",
+    "crates/dino-sandbox",
+    "crates/dino-tools",
 ]
 resolver = "2"
 
@@ -16,7 +16,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/cargopete/danchoai"
+repository = "https://github.com/cargopete/dino"
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -26,14 +26,14 @@ clap = { version = "4.5.51", features = ["derive"] }
 futures-core = "0.3.31"
 base64 = "0.22.1"
 futures-util = "0.3.31"
-dancho-core = { path = "crates/dancho-core" }
-dancho-eval = { path = "crates/dancho-eval" }
-dancho-exec = { path = "crates/dancho-exec" }
-dancho-model = { path = "crates/dancho-model" }
-dancho-protocol = { path = "crates/dancho-protocol" }
-dancho-rust = { path = "crates/dancho-rust" }
-dancho-sandbox = { path = "crates/dancho-sandbox" }
-dancho-tools = { path = "crates/dancho-tools" }
+dino-core = { path = "crates/dino-core" }
+dino-eval = { path = "crates/dino-eval" }
+dino-exec = { path = "crates/dino-exec" }
+dino-model = { path = "crates/dino-model" }
+dino-protocol = { path = "crates/dino-protocol" }
+dino-rust = { path = "crates/dino-rust" }
+dino-sandbox = { path = "crates/dino-sandbox" }
+dino-tools = { path = "crates/dino-tools" }
 html2text = "0.17.4"
 globset = "0.4.20"
 ignore = "0.4.33"

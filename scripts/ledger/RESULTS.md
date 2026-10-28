@@ -3,7 +3,7 @@
 `run.sh` sends `brief.md` to one model in an empty crate; `score.sh` checks the
 result. One run per model, so a close result settles nothing.
 
-## 2026-10-25, Alibaba Token Plan, dancho after the loopback and unparsed-arguments fixes
+## 2026-10-25, Alibaba Token Plan, dino after the loopback and unparsed-arguments fixes
 
 | Model | Turns | Minutes | Tests | Clippy, fmt | HTTP and gRPC clients | Versions | Notes |
 |---|---|---|---|---|---|---|---|

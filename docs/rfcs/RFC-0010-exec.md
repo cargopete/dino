@@ -41,7 +41,7 @@ evidence for it should come from an eval corpus rather than from an afternoon's
 irritation.
 
 **Amended 2026-10-23.** Answered by a change of scope rather than by the
-corpus. DanchoAI is now also a daily agent for its author's own repositories,
+corpus. Dino is now also a daily agent for its author's own repositories,
 not all of them Rust, where `npm run`, `&&` chains and `| tail` are the normal
 idiom and have no flag to stand in for them. A `shell` tool now runs one line
 through `sh -c` beside `exec`. The audit concern is met as far as it can be: the
@@ -73,7 +73,7 @@ automatic commits, and an approval a person gave is not automatic.
 ## 4. Command surface
 
 ```json
-{"command": ["cargo", "tree", "--depth", "1"], "directory": "crates/dancho-core"}
+{"command": ["cargo", "tree", "--depth", "1"], "directory": "crates/dino-core"}
 ```
 
 `command` is a non-empty array of strings; the first is the program. `directory`
@@ -118,21 +118,21 @@ child is killed and `timed_out` is set rather than a failure being invented.
 
 ## 6. One workspace fence, not two
 
-`dancho-tools` resolves a model-supplied path against the workspace root: relative
+`dino-tools` resolves a model-supplied path against the workspace root: relative
 only, no parent or root components, canonicalised, and required to remain
 beneath the root. `exec` needs exactly the same rule for its working directory
 and its program path.
 
 Two implementations of one security check is how they drift. The rule moves to
-`dancho-core::workspace`, `dancho-tools` is changed to call it, and its existing
+`dino-core::workspace`, `dino-tools` is changed to call it, and its existing
 traversal and symlink-escape tests now cover the shared implementation rather
 than a private copy of it.
 
 ## 7. Crates
 
-A new `dancho-exec` crate holds the `exec` tool and the process runner that RFC-0008
-put in `dancho-rust`. The runner was never Rust-specific; it spawns, caps, times out
-and kills. `dancho-rust` depends on `dancho-exec` for it and keeps the Cargo-specific
+A new `dino-exec` crate holds the `exec` tool and the process runner that RFC-0008
+put in `dino-rust`. The runner was never Rust-specific; it spawns, caps, times out
+and kills. `dino-rust` depends on `dino-exec` for it and keeps the Cargo-specific
 argument building and diagnostic parsing, which is what that crate is for.
 
 ## 8. Out of scope
@@ -151,7 +151,7 @@ hung agent.
 **Measured on 2026-08-27.** The workspace passes 91 tests and Clippy with
 `-D warnings`.
 
-- The shared fence: the existing `dancho-tools` traversal and symlink-escape tests
+- The shared fence: the existing `dino-tools` traversal and symlink-escape tests
   now exercise the shared implementation rather than a private copy.
 - An empty command array, and an unknown argument field, refused before anything
   is spawned.
@@ -170,7 +170,7 @@ hung agent.
 - On macOS, a confined `curl` reaching the network: nothing returned.
 - The wall clock killing a sleeping child after two seconds.
 
-**Observed on 2026-08-27**, driving the built `dancho` binary against a local fake
+**Observed on 2026-08-27**, driving the built `dino` binary against a local fake
 endpoint over this repository:
 
 - `exec git log --oneline -3` prompted with the argument vector and the

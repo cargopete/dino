@@ -8,7 +8,7 @@
 
 ## 1. Method and evidence labels
 
-This document records what DanchoAI is taking from earlier work and what it is
+This document records what Dino is taking from earlier work and what it is
 refusing to repeat. Findings use four labels:
 
 - **Measured**: produced by a recorded experiment with method and result.
@@ -45,7 +45,7 @@ project by path checks, with the source honestly describing that check as a
 fence rather than a sandbox because it does not resolve symlink escapes.
 
 **Inference:** These simple deterministic contracts carry more safety and
-reliability than elaborate prompting. DanchoAI keeps them, enforced in Rust
+reliability than elaborate prompting. Dino keeps them, enforced in Rust
 below the provider layer.
 
 ### Limits not carried forward
@@ -59,7 +59,7 @@ tool decoding difficult to test independently.
 context, restart state and user-visible history. Compaction rewrites that shared
 representation.
 
-**Inference:** DanchoAI separates provider-native history, normalised events
+**Inference:** Dino separates provider-native history, normalised events
 and presentation. It also treats malformed or incomplete tool output as a
 protocol error rather than silently interpreting ordinary prose as completion.
 
@@ -97,7 +97,7 @@ success. A verifier must require a material diff and a task-specific oracle.
 
 **Measured:** Three trials per configuration could not support claimed model or
 harness comparisons. Honeyguide withdrew those comparisons and retained only
-deterministic behavioural findings. DanchoAI's evals will report intervals and
+deterministic behavioural findings. Dino's evals will report intervals and
 separate debugging runs from comparative evidence.
 
 **Measured:** Ollama timing probes taken after model unload folded load time into
@@ -109,7 +109,7 @@ multiple trials and end-to-end timing are mandatory.
 
 **Observed in source:** Honeyguide deliberately specialises the runtime loop for
 small local models and uses a strong model only to prepare an index or handle an
-escalation. DanchoAI instead supports both frontier and open-weight models as
+escalation. Dino instead supports both frontier and open-weight models as
 first-class interactive providers.
 
 **Inference:** The semantic index is valuable but not an M0 prerequisite. A
@@ -158,7 +158,7 @@ OpenAI-style `tool` role.
 
 **Provider-documented:** Anthropic publishes trained-in schemas for common
 client tools, including shell and text editing. These should be tested against
-DanchoAI's own schemas rather than copied on aesthetic grounds.
+Dino's own schemas rather than copied on aesthetic grounds.
 
 **Inference:** The Anthropic adapter must own message ordering and native
 content blocks. The core should never be able to construct an invalid Claude
@@ -187,7 +187,7 @@ Qwen3.6 models document the `qwen3` reasoning parser and `qwen3_coder` tool-call
 parser. Qwen3-Coder-Next and Qwen3-Coder-30B-A3B-Instruct are non-thinking
 models. Qwen3.6-27B and Qwen3.6-35B-A3B are reasoning-capable.
 
-**Inference:** DanchoAI uses one Qwen transport implementation but explicit
+**Inference:** Dino uses one Qwen transport implementation but explicit
 model profiles. Parser, reasoning, context and sampling capabilities are data,
 not conditionals scattered through the loop.
 
@@ -211,6 +211,6 @@ The agent loop is small. The difficult work sits at its boundaries:
 - distinguishing a compiling repository from a completed task;
 - measuring stochastic systems without flattering them accidentally.
 
-DanchoAI's architecture is arranged around those boundaries. Features that do
+Dino's architecture is arranged around those boundaries. Features that do
 not strengthen one of them must justify their presence with a real task and an
 eval.

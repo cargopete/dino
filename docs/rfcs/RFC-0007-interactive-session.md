@@ -9,7 +9,7 @@
 
 ## 1. Decision
 
-`dancho` with no subcommand opens a persistent session. `dancho run` stays exactly as
+`dino` with no subcommand opens a persistent session. `dino run` stays exactly as
 it is: one submission, one exit code, no terminal required.
 
 Two entry points rather than one, because they serve different things. A session
@@ -52,7 +52,7 @@ quoted.
 
 **One thing does not translate, and pretending otherwise would be the kind of
 lie this style exists to avoid.** `--bg: #171614` is a page canvas. A line-based
-terminal program does not own its background; the terminal does. DanchoAI
+terminal program does not own its background; the terminal does. Dino
 therefore ships the ink and the accents and leaves the ground alone. The palette
 assumes a warm dark terminal, which is what it was drawn for. On a light
 terminal it will read badly, and the honest answer to that is `--plain`, not a
@@ -77,7 +77,7 @@ prompt  →  submission  →  model turn(s) and tools  →  summary  →  prompt
 ```
 
 The provider session already retains native history, so a session is the same
-`Agent` driven repeatedly rather than a new mechanism. Nothing in `dancho-core`
+`Agent` driven repeatedly rather than a new mechanism. Nothing in `dino-core`
 changes.
 
 The session log gains a shape rather than a feature: one `started` record for
@@ -90,7 +90,7 @@ otherwise be entitled to assume the second.
 
 `rustyline` supplies line editing, history and the usual key bindings, because
 hand-rolling a line editor is a week of work to arrive somewhere worse. History
-persists to `.dancho/history` beside the session logs.
+persists to `.dino/history` beside the session logs.
 
 A line beginning with `/` is a command rather than a submission. The set is
 deliberately small:
@@ -152,7 +152,7 @@ command and costs the design nothing.
   sequence: colour was suppressed and the attribute was not, which is not plain
   but untidy.
 
-**Observed on 2026-08-27**, driving the built `dancho` binary against a local fake
+**Observed on 2026-08-27**, driving the built `dino` binary against a local fake
 endpoint with four lines piped at it:
 
 - Two submissions and a `/status` between them. The second request carried
@@ -195,6 +195,6 @@ three lines with the backslashes gone.
   section 7.1: paste already did the right thing, and typed lines continue on a
   trailing backslash.
 - Whether `/status` should show a context-window estimate, which needs a
-  tokeniser DanchoAI does not currently have and should not guess at.
+  tokeniser Dino does not currently have and should not guess at.
 - Whether the session should offer to resume the previous session's transcript,
   which needs the log to be a replay source and it is not one yet.

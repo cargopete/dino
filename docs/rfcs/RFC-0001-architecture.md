@@ -1,4 +1,4 @@
-# RFC-0001: DanchoAI architecture
+# RFC-0001: Dino architecture
 
 | | |
 |---|---|
@@ -8,7 +8,7 @@
 
 ## 1. Purpose
 
-DanchoAI is a terminal coding agent written in Rust. It is intended to be a
+Dino is a terminal coding agent written in Rust. It is intended to be a
 serious educational implementation of the machinery behind tools such as
 Claude Code and Codex, and a useful Rust coding agent in its own right. It is
 open source, including its design record, failures, measurements and evals.
@@ -54,7 +54,7 @@ The central boundary is a provider-owned session and a normalised event stream.
  user submission
        |
        v
-  dancho-core agent loop ------> append-only AgentEvent log
+  dino-core agent loop ------> append-only AgentEvent log
        |                                  |
        | TurnInput                        +--> CLI/TUI
        v                                  +--> replay
@@ -77,11 +77,11 @@ next request.
 
 ### 4.1 Crates
 
-- `dancho-protocol`: stable internal values crossing crate and frontend boundaries.
-- `dancho-model`: provider session traits and the explicit model catalogue.
-- `dancho-core`: agent state machine, tool dispatch and session event emission.
-- `dancho-tools`: workspace-rooted filesystem tools and their hard output limits.
-- `dancho-cli`: the `dancho` executable. A line UI comes before a full TUI.
+- `dino-protocol`: stable internal values crossing crate and frontend boundaries.
+- `dino-model`: provider session traits and the explicit model catalogue.
+- `dino-core`: agent state machine, tool dispatch and session event emission.
+- `dino-tools`: workspace-rooted filesystem tools and their hard output limits.
+- `dino-cli`: the `dino` executable. A line UI comes before a full TUI.
 - Provider crates will be introduced one at a time once their contract tests
   exist. Empty crates are not architecture.
 
@@ -135,7 +135,7 @@ results into their native history shape.
 
 ## 7. Rust specialisation
 
-DanchoAI treats the compiler as a source of structured evidence.
+Dino treats the compiler as a source of structured evidence.
 
 - `cargo metadata` supplies the workspace and package graph.
 - `cargo check --workspace --all-targets --message-format=json` supplies
@@ -166,7 +166,7 @@ Prompt instructions are guidance. Safety is code.
 - Destructive, external, costly and scope-expanding actions stop for approval.
 - The event log records the proposed action, decision, execution and result.
 
-DanchoAI supports macOS and Linux. **Windows is not a target**, decided
+Dino supports macOS and Linux. **Windows is not a target**, decided
 2026-08-27 rather than deferred: it would need a containment design of its own,
 and claiming support because the Rust compiles there is exactly the kind of
 claim this document exists to refuse. On Windows, `detect` reports unavailable
@@ -193,7 +193,7 @@ chosen that retention mode.
 4. OpenAI Responses adapter and API-key authentication. **Done.**
 5. Anthropic Messages adapter and API-key authentication. **Done.**
 6. Approval UI and OS sandbox enforcement. **Approval done** in RFC-0006, along
-   with the session log, cancellation and a one-shot `dancho run`. **The sandbox is
+   with the session log, cancellation and a one-shot `dino run`. **The sandbox is
    not**, so the current boundary is a filesystem fence and a policy, not an
    operating-system boundary.
 7. The structured `cargo` tool. **Done** in RFC-0008. General `exec` was

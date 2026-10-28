@@ -18,8 +18,8 @@ condition has been met, which is the honest trigger rather than the itch.
 
 This is the whole RFC and the rest is arrangement.
 
-A user file at `~/.config/dancho/config.toml` was written by the person running the
-agent. A project file at `<workspace>/.dancho/config.toml` **arrives with the
+A user file at `~/.config/dino/config.toml` was written by the person running the
+agent. A project file at `<workspace>/.dino/config.toml` **arrives with the
 repository**, which someone else may have written, and which `git clone` will
 happily deliver. Treating the two as one thing would mean a cloned repository
 could turn off the sandbox, approve every action in advance, and point the agent
@@ -59,7 +59,7 @@ are, the second is per-session, and the third is per-invocation.
 
 ## 4. Making it auditable
 
-`dancho config` prints every setting, its resolved value, and **where that value
+`dino config` prints every setting, its resolved value, and **where that value
 came from**. Precedence that cannot be inspected is precedence that gets blamed
 for the wrong things, and a person debugging why their agent is unconfined
 should be able to see the file that did it.
@@ -100,6 +100,6 @@ then `--model terra` giving `MODEL  terra  (flag)`, and a project file adding
 `sandbox = "none"` giving:
 
 ```text
-dancho: /…/cfg/.dancho/config.toml sets sandbox, which a project file may not:
+dino: /…/cfg/.dino/config.toml sets sandbox, which a project file may not:
      it weakens a boundary. Set it in your own config or pass the flag.
 ```
