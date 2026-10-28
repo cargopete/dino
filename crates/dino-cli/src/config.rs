@@ -18,6 +18,7 @@ use dino_model::anthropic::AnthropicConfig;
 use dino_model::anthropic::AnthropicSession;
 use dino_model::builtin_profile;
 use dino_model::builtin_profiles;
+use dino_model::fallback::FallbackSession;
 use dino_model::openai::OpenAiConfig;
 use dino_model::openai::OpenAiSession;
 use dino_model::qwen::QwenConfig;
@@ -32,6 +33,9 @@ use dino_sandbox::Unconfined;
 /// hard bench (vLLM 0.32, Qwen3.8 27B): the same pass rate as no budget, and
 /// pratt-expression-parser in 92 minutes over three trials instead of 157.
 pub const DEFAULT_THINKING_BUDGET: u32 = 4_096;
+
+/// Models that offer Anthropic's fast mode.
+const FAST_MODELS: [&str; 2] = ["claude-opus-5", "claude-opus-5-5"];
 
 /// How much the operating system confines a process Dino starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
@@ -105,6 +109,9 @@ pub struct RunSettings {
     /// Emit no terminal colour. Resolved like everything else, so a config file
     /// can ask for it.
     pub plain: bool,
+    /// Where to continue when the provider refuses the account. Never set for
+    /// evals, whose results would otherwise mix two models.
+    pub fallback: Option<ModelProfile>,
 }
 
 /// Resolves the model profile named by a flag or `DINO_MODEL`.
@@ -158,7 +165,32 @@ fn build_session_from(
     tools: Vec<ToolDefinition>,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Box<dyn ModelSession>> {
-    let profile = &settings.profile;
+    let primary = build_provider(
+        settings,
+        &settings.profile,
+        system_prompt.clone(),
+        tools.clone(),
+        env,
+    )?;
+    let Some(backup) = &settings.fallback else {
+        return Ok(primary);
+    };
+    let backup = build_provider(settings, backup, system_prompt, tools, env)?;
+    Ok(Box::new(FallbackSession::new(
+        primary,
+        backup,
+        Box::new(|message| eprintln!("dino: {message}")),
+    )))
+}
+
+fn build_provider(
+    settings: &RunSettings,
+    profile: &ModelProfile,
+    system_prompt: String,
+    tools: Vec<ToolDefinition>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Box<dyn ModelSession>> {
+    let is_fallback = settings.profile.key != profile.key;
     match profile.provider {
         ProviderKind::Anthropic => {
             let key = require_env(env, "ANTHROPIC_API_KEY", profile)?;
@@ -168,6 +200,8 @@ fn build_session_from(
             if let Some(limit) = profile.max_output_tokens {
                 config.max_output_tokens = limit;
             }
+            // A backstop is there so work does not stop, so it should not crawl.
+            config.fast = is_fallback && FAST_MODELS.contains(&profile.provider_model.as_str());
             Ok(Box::new(AnthropicSession::new(config)?))
         }
         ProviderKind::OpenAi => {
@@ -282,6 +316,7 @@ mod tests {
             disable_thinking: false,
             enable_thinking: None,
             plain: true,
+            fallback: None,
         }
     }
 

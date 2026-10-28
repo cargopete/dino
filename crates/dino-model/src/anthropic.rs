@@ -36,8 +36,9 @@ use crate::sse::SseDecoder;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Bump when the persisted history shape changes. RFC-0014 section 3.
-const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 const ERROR_BODY_LIMIT: usize = 4_096;
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingMode {
@@ -56,6 +57,9 @@ pub struct AnthropicConfig {
     pub max_output_tokens: u32,
     pub effort: ReasoningEffort,
     pub thinking: ThinkingMode,
+    /// Fast mode: the same model at up to 2.5 times the output speed, at twice
+    /// the price. Opus 5 and 5.5 only.
+    pub fast: bool,
 }
 
 impl AnthropicConfig {
@@ -70,6 +74,7 @@ impl AnthropicConfig {
             max_output_tokens: 32_768,
             effort: ReasoningEffort::High,
             thinking: ThinkingMode::AdaptiveSummarized,
+            fast: false,
         }
     }
 }
@@ -106,6 +111,24 @@ impl AnthropicSession {
             config,
             history: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    async fn send(&self, body: &Value) -> Result<reqwest::Response, ModelError> {
+        let mut request = self
+            .client
+            .post(self.endpoint.clone())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(body);
+        if body.get("speed").is_some() {
+            request = request.header("anthropic-beta", FAST_MODE_BETA);
+        }
+        if let Some(api_key) = &self.config.api_key {
+            request = request.header("x-api-key", api_key);
+        }
+        request
+            .send()
+            .await
+            .map_err(|error| ModelError::Transport(error.to_string()))
     }
 
     fn pending_message(input: TurnInput) -> AnthropicMessage {
@@ -169,6 +192,9 @@ impl AnthropicSession {
             json!({"effort": effort_name(self.config.effort)?}),
         );
         body.insert("thinking".into(), thinking_config(self.config.thinking));
+        if self.config.fast {
+            body.insert("speed".into(), json!("fast"));
+        }
         if !self.config.system_prompt.is_empty() {
             body.insert("system".into(), json!(self.config.system_prompt));
         }
@@ -279,20 +305,18 @@ impl ModelSession for AnthropicSession {
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
             let pending = Self::pending_message(input);
-            let body = self.request_body(&pending)?;
-            let mut request = self
-                .client
-                .post(self.endpoint.clone())
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .json(&body);
-            if let Some(api_key) = &self.config.api_key {
-                request = request.header("x-api-key", api_key);
+            let mut body = self.request_body(&pending)?;
+            let mut response = self.send(&body).await?;
+            // Fast mode has a rate limit of its own; standard speed may still
+            // have room, and switching only costs the prompt cache.
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                && body.get("speed").is_some()
+            {
+                if let Some(fields) = body.as_object_mut() {
+                    fields.remove("speed");
+                }
+                response = self.send(&body).await?;
             }
-
-            let response = request
-                .send()
-                .await
-                .map_err(|error| ModelError::Transport(error.to_string()))?;
             let status = response.status();
             if !status.is_success() {
                 let body = response
@@ -367,6 +391,13 @@ fn validate_request_settings(config: &AnthropicConfig) -> Result<(), ModelError>
     {
         return Err(ModelError::Configuration(
             "Claude Opus 5 cannot disable thinking at xhigh or max effort".into(),
+        ));
+    }
+    if config.thinking == ThinkingMode::Disabled
+        && config.profile.provider_model == "claude-opus-5-5"
+    {
+        return Err(ModelError::Configuration(
+            "Claude Opus 5.5 cannot disable thinking at any effort".into(),
         ));
     }
     Ok(())

@@ -19,6 +19,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub mod anthropic;
+pub mod fallback;
 pub mod openai;
 pub mod qwen;
 mod sse;
@@ -253,6 +254,10 @@ pub enum ModelError {
     Protocol(String),
     #[error("model configuration is invalid: {0}")]
     Configuration(String),
+    /// The provider refused the account itself: no quota left, unpaid, or not
+    /// authorised. Retrying will not help; another provider might.
+    #[error("the provider refused the account: {0}")]
+    Account(String),
 }
 
 /// One HTTP client for every provider. Alibaba's Coding Plan refuses a request
@@ -290,6 +295,7 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
     vec![
         terra(),
         claude_opus(),
+        claude_opus_5_5(),
         claude_sonnet(),
         qwen_coder_480b(),
         qwen_coder_next(),
@@ -336,6 +342,20 @@ fn terra() -> ModelProfile {
         reasoning_parser: None,
         sampling: None,
         chat_server: ChatServer::Vllm,
+    }
+}
+
+/// **Provider-documented, inspected 2026-10-28:** `claude-opus-5-5` has the
+/// same window and output as Opus 5, cannot disable thinking at any effort, and
+/// offers fast mode. Kept beside `claude-opus` so earlier eval results keep
+/// their meaning.
+fn claude_opus_5_5() -> ModelProfile {
+    ModelProfile {
+        key: "claude-opus-5.5".into(),
+        provider_model: "claude-opus-5-5".into(),
+        display_name: "Claude Opus 5.5".into(),
+        status: ProfileStatus::Development,
+        ..claude_opus()
     }
 }
 
@@ -647,7 +667,7 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-        assert_eq!(all.len(), 15);
+        assert_eq!(all.len(), 16);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 

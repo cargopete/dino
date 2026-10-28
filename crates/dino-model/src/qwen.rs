@@ -187,6 +187,9 @@ impl QwenSession {
                         "Qwen endpoint returned {status}: {}",
                         truncate_for_error(&response_body)
                     );
+                    if refuses_account(status.as_u16(), &response_body) {
+                        return Err(ModelError::Account(message));
+                    }
                     (message, retryable)
                 }
                 // A connection dropped before the response is `is_request`, not
@@ -494,6 +497,23 @@ fn commit_history(
     history.extend(pending.iter().cloned());
     history.push(assistant);
     Ok(())
+}
+
+/// Whether a refusal is about the account rather than the request.
+///
+/// Model Studio's codes for an unpaid balance, a spent allocation and an
+/// unbought plan; `Throttling.RateQuota` is a rate limit and is not here.
+fn refuses_account(status: u16, body: &str) -> bool {
+    const MARKERS: [&str; 6] = [
+        "arrearage",
+        "allocationquota",
+        "insufficient_quota",
+        "exceeded your current quota",
+        "unpurchased",
+        "freetieronly",
+    ];
+    let body = body.to_ascii_lowercase();
+    matches!(status, 401..=403) || MARKERS.iter().any(|marker| body.contains(marker))
 }
 
 fn truncate_for_error(body: &str) -> &str {
@@ -892,6 +912,24 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[test]
+    fn a_spent_quota_is_an_account_refusal_and_a_rate_limit_is_not() {
+        assert!(refuses_account(
+            429,
+            r#"{"error":{"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}}"#
+        ));
+        assert!(refuses_account(
+            400,
+            r#"{"code":"Arrearage","message":"Access denied"}"#
+        ));
+        assert!(refuses_account(401, "invalid api key"));
+        assert!(!refuses_account(
+            429,
+            r#"{"error":{"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"}}"#
+        ));
+        assert!(!refuses_account(400, "context length exceeded"));
+    }
 
     #[test]
     fn state_round_trips_into_a_request_that_is_byte_identical() {

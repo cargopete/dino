@@ -16,12 +16,13 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 5] = [
+const RESTRICTED: [(&str, &str); 6] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
     ("sandbox", "weakens a boundary"),
     ("api_base", "redirects where a credential is sent"),
+    ("fallback", "sends the conversation to another provider"),
 ];
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
@@ -49,6 +50,9 @@ pub struct FileConfig {
     pub thinking_budget: Option<u32>,
     /// Compact on its own once the context window passes the warning mark.
     pub auto_compact: Option<bool>,
+    /// A model to continue on when the provider refuses the account. User
+    /// file only.
+    pub fallback: Option<String>,
 }
 
 /// One `[mcp.<name>]` table.

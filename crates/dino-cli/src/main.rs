@@ -770,6 +770,7 @@ struct Resolved {
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
     auto_compact: bool,
+    fallback: Option<String>,
     hooks: (Vec<dino_exec::Hook>, Source),
     end_turn_hooks: Vec<dino_exec::Hook>,
     start_hooks: Vec<dino_exec::Hook>,
@@ -872,6 +873,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         auto_compact: layers
             .pick(|file| file.auto_compact)
             .is_some_and(|(on, _)| on),
+        fallback: layers
+            .pick_user_only(|file| file.fallback.clone())
+            .map(|(key, _)| key),
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
@@ -920,6 +924,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
     let resolved = resolve(&common, &workspace)?;
 
     let show = |value: String, source: Source| format!("{value}  ({})", source.label());
+    let fallback = resolved.fallback.as_deref().unwrap_or("none").to_owned();
     let rows = vec![
         (
             "model",
@@ -984,6 +989,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
             "plain",
             show(resolved.plain.0.to_string(), resolved.plain.1),
         ),
+        ("fallback", fallback),
         (
             "project file",
             resolved
@@ -1045,6 +1051,11 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         disable_thinking: resolved.no_thinking.0,
         enable_thinking: None,
         plain: resolved.plain.0,
+        fallback: resolved
+            .fallback
+            .as_deref()
+            .map(|key| config::resolve_profile(Some(key)))
+            .transpose()?,
     })
 }
 
