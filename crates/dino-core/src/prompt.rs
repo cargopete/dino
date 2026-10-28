@@ -60,7 +60,8 @@ Tool discipline:
 - `apply_patch` replaces one exact occurrence. If the text you intend to replace
   is not unique, include enough surrounding context to make it unique rather
   than guessing which occurrence the tool will choose. It will not guess either.
-  A replacement that leaves the file unchanged is an error.
+  A replacement that leaves the file unchanged is an error. Several changes to
+  one file go in one call, as `edits`, rather than one call each.
 - `write_file` creates a file, with any missing directories. Use it for new
   files instead of writing them through `exec`. An existing file must have
   been read before it is replaced whole.

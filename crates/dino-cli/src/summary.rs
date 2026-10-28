@@ -96,9 +96,25 @@ pub enum Change {
 /// either end, at most `limit` of them.
 #[must_use]
 pub fn patch_preview(call: &ToolCall, limit: usize) -> Vec<Change> {
+    let edits: Vec<&Value> = match call.arguments.get("edits").and_then(Value::as_array) {
+        Some(edits) => edits.iter().collect(),
+        None => vec![&call.arguments],
+    };
+    let changes: Vec<Change> = edits.into_iter().flat_map(edit_changes).collect();
+    if changes.len() <= limit {
+        return changes;
+    }
+    let hidden = changes.len() - limit;
+    changes
+        .into_iter()
+        .take(limit)
+        .chain(std::iter::once(Change::More(hidden)))
+        .collect()
+}
+
+fn edit_changes(edit: &Value) -> Vec<Change> {
     let text = |key: &str| {
-        call.arguments
-            .get(key)
+        edit.get(key)
             .and_then(Value::as_str)
             .unwrap_or_default()
             .lines()
@@ -124,15 +140,7 @@ pub fn patch_preview(call: &ToolCall, limit: usize) -> Vec<Change> {
                 .map(Change::Added),
         )
         .collect();
-    if changes.len() <= limit {
-        return changes;
-    }
-    let hidden = changes.len() - limit;
     changes
-        .into_iter()
-        .take(limit)
-        .chain(std::iter::once(Change::More(hidden)))
-        .collect()
 }
 
 fn cargo(call: &ToolCall, value: &Value) -> (Tone, String) {
@@ -362,6 +370,26 @@ mod tests {
                 Change::Removed("    1".into()),
                 Change::Added("    2".into()),
                 Change::More(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_preview_covers_every_edit() {
+        let patch = call(
+            "apply_patch",
+            json!({"edits": [
+                {"old_text": "a", "new_text": "b"},
+                {"old_text": "c", "new_text": "d"}
+            ]}),
+        );
+        assert_eq!(
+            patch_preview(&patch, 10),
+            [
+                Change::Removed("a".into()),
+                Change::Added("b".into()),
+                Change::Removed("c".into()),
+                Change::Added("d".into())
             ]
         );
     }
