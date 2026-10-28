@@ -124,9 +124,15 @@ CI and evals.
   harness builds: the task, the record, why the last session ended, `git status`
   and the current `cargo check`. RFC-0018; not yet measured against the plain
   loop.
-- **A turn budget.** `--max-turns` bounds a submission. The model is told the
-  limit in its system prompt and counted down over its last three turns, so it
-  can finish and say what is done rather than be cut off.
+- **A turn budget.** `--max-turns` bounds a submission, 100 by default. The
+  model is told the limit in its system prompt, sees the count from half-way, is
+  counted down over its last three turns, and is told to make no calls in its
+  last, so it can say what is done rather than be cut off. A run that reaches the
+  limit anyway keeps its last tool results, and the next message carries them, so
+  replying "continue" picks the work up.
+- **Loop detection.** The third identical call in a row, or a run of calls
+  alternating between the same two, gets a note saying the result will not
+  change; a fifth identical call is refused rather than run.
 - **Unattended runs check their own build.** In `dino run` and `dino eval`, a
   model that ends its turn while `cargo check` reports errors is sent back once
   with the first of them, and the countdown names them too. An interactive
