@@ -286,13 +286,5 @@ pub(crate) fn json_output<T: Serialize>(value: &T) -> Result<ToolOutput, ToolErr
         .map_err(|error| ToolError::new(format!("cannot encode exec output: {error}")))
 }
 
-pub(crate) fn capped(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n… (truncated)", &value[..end])
-}
+pub(crate) use dino_core::text::capped_head;
+pub(crate) use dino_core::text::capped_output as capped;

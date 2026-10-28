@@ -8,6 +8,7 @@ use std::time::Duration;
 use dino_core::ToolError;
 use dino_core::ToolFuture;
 use dino_core::ToolRuntime;
+use dino_core::text::capped_output as capped;
 use dino_protocol::ToolAction;
 use dino_protocol::ToolCall;
 use dino_protocol::ToolDefinition;
@@ -398,8 +399,10 @@ impl CargoTool {
                 output.diagnostics = kept;
                 output.dropped_diagnostics = dropped;
                 // Cargo's own failures, as opposed to the compiler's, arrive on
-                // stderr and are not JSON. They matter when nothing parsed.
+                // stderr and are not JSON. They count as one error, so `errors: 0`
+                // never describes a build that failed.
                 if output.counts.errors == 0 && execution.exit_code != Some(0) {
+                    output.counts.errors = 1;
                     output.output = capped(&execution.stderr, self.limits.max_output_bytes);
                 }
             }
@@ -789,17 +792,6 @@ fn json_output<T: Serialize>(value: &T) -> Result<ToolOutput, ToolError> {
     serde_json::to_string(value)
         .map(ToolOutput::success)
         .map_err(|error| ToolError::new(format!("cannot encode cargo output: {error}")))
-}
-
-fn capped(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n… (truncated)", &value[..end])
 }
 
 #[cfg(test)]

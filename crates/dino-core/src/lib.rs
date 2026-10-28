@@ -14,6 +14,7 @@ pub mod prompt;
 pub mod resume;
 pub mod session;
 pub mod skills;
+pub mod text;
 pub mod todo;
 pub mod workspace;
 
@@ -1065,13 +1066,13 @@ fn unfinished_checklist(events: &[AgentEvent]) -> Option<String> {
     let open: Vec<String> = todo::items(&call.arguments)
         .ok()?
         .into_iter()
-        .filter(|item| item.status != todo::Status::Done)
+        .filter(|item| !matches!(item.status, todo::Status::Done | todo::Status::Blocked))
         .map(|item| item.text)
         .collect();
     (!open.is_empty()).then(|| {
         format!(
-            "your checklist still has {} item(s) not done: {}. Finish them, or update the \
-             list and say plainly which are not done and why.",
+            "your checklist still has {} item(s) not done: {}. Finish them, or mark the \
+             ones that cannot be done here blocked, with the reason.",
             open.len(),
             open.join("; ")
         )

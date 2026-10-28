@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
-use crate::exec::capped;
+use crate::exec::capped_head as capped;
 use crate::exec::json_output;
 
 const NAME: &str = "web_fetch";
