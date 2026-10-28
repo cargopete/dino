@@ -136,13 +136,40 @@ pub struct Instructions {
 #[must_use]
 pub fn load_instructions(user_file: Option<&Path>, workspace: &Path) -> Vec<Instructions> {
     let user = user_file.map(|path| (path.display().to_string(), path.to_path_buf()));
+    // A workspace inside a repository also gets the AGENTS.md files between the
+    // repository root and itself, outermost first, so the nearest speaks last.
+    let enclosing = enclosing_dirs(workspace).into_iter().map(|dir| {
+        let path = dir.join("AGENTS.md");
+        (path.display().to_string(), path)
+    });
     let project = PROJECT_INSTRUCTIONS
         .iter()
         .map(|name| ((*name).to_owned(), workspace.join(name)));
     user.into_iter()
+        .chain(enclosing)
         .chain(project)
         .filter_map(|(source, path)| read_capped(source, &path))
         .collect()
+}
+
+/// The directories above `workspace` up to the root of the git repository
+/// holding it, outermost first. Empty when the workspace is the repository root
+/// or is not inside one.
+fn enclosing_dirs(workspace: &Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if workspace.join(".git").exists() {
+        return dirs;
+    }
+    let mut current = workspace.parent();
+    while let Some(dir) = current {
+        dirs.push(dir.to_path_buf());
+        if dir.join(".git").exists() {
+            dirs.reverse();
+            return dirs;
+        }
+        current = dir.parent();
+    }
+    Vec::new()
 }
 
 /// The user's and this workspace's memory files, as they will appear.
@@ -271,6 +298,27 @@ fn cap(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_files_between_the_repository_root_and_the_workspace_are_read_outermost_first() {
+        let root = std::env::temp_dir().join(format!("dino-nested-{}", std::process::id()));
+        let workspace = root.join("crates").join("app");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "root rules").unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "app rules").unwrap();
+
+        let texts: Vec<String> = load_instructions(None, &workspace)
+            .into_iter()
+            .map(|instructions| instructions.text)
+            .collect();
+        assert_eq!(texts, ["root rules", "app rules"]);
+        assert!(
+            load_instructions(None, &root).len() == 1,
+            "the root is read once"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn caps_an_over_long_workspace_root() {

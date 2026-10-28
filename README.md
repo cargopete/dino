@@ -113,7 +113,9 @@ CI and evals.
   rewrite what the model believes happened. Summarising is `/compact`, asked
   for by a person and starting a fresh conversation, never done behind one.
 - **Instructions.** `~/.config/dino/instructions.md` for your own rules, then
-  the repository's `AGENTS.md` and `.dino/instructions.md`, each capped at 16 KiB
+  any `AGENTS.md` between the git repository's root and a workspace inside it,
+  outermost first, then the workspace's `AGENTS.md` and `.dino/instructions.md`,
+  each capped at 16 KiB
   and named when a session starts. They go below the built-in rules and cannot
   change approvals or the sandbox. Evals read none of them, so a personal file
   cannot move a measurement.
