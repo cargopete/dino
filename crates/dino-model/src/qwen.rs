@@ -58,6 +58,9 @@ pub struct QwenConfig {
     /// reasoning stops one token short of the budget and the model still
     /// answers.
     pub thinking_budget: Option<u32>,
+    /// Mark the system prompt and the newest message for `DashScope`'s explicit
+    /// context cache, which replaces its implicit one for the request.
+    pub explicit_cache: bool,
 }
 
 /// How often a request that never reached the model is tried again.
@@ -96,6 +99,7 @@ impl QwenConfig {
             preserve_thinking: true,
             retry: RetryPolicy::default(),
             thinking_budget: None,
+            explicit_cache: false,
         }
     }
 }
@@ -167,6 +171,9 @@ impl QwenSession {
         let mut attempt = 1;
         loop {
             let mut request = self.client.post(self.endpoint.clone()).json(body);
+            if self.explicit_cache() {
+                request = request.header("X-DashScope-CacheControl", "enable");
+            }
             if let Some(api_key) = &self.config.api_key {
                 request = request.bearer_auth(api_key);
             }
@@ -208,6 +215,10 @@ impl QwenSession {
         }
     }
 
+    fn explicit_cache(&self) -> bool {
+        self.config.explicit_cache && self.config.profile.chat_server == ChatServer::DashScope
+    }
+
     fn request_body(
         &self,
         pending: &[ChatMessage],
@@ -239,7 +250,11 @@ impl QwenSession {
 
         let mut body = serde_json::Map::new();
         body.insert("model".into(), json!(self.config.profile.provider_model));
-        body.insert("messages".into(), with_image_parts(json!(messages)));
+        let mut messages = with_image_parts(json!(messages));
+        if self.explicit_cache() {
+            mark_for_cache(&mut messages);
+        }
+        body.insert("messages".into(), messages);
         body.insert("stream".into(), json!(true));
         body.insert("stream_options".into(), json!({ "include_usage": true }));
 
@@ -875,6 +890,40 @@ struct FunctionDelta {
     arguments: Option<String>,
 }
 
+/// Puts `DashScope`'s `cache_control` marker on the system message and on the
+/// newest message with text, turning each one's string content into a text
+/// part. Two markers of the four a request may carry: the stable prefix, and
+/// everything up to now, which the next turn will extend.
+fn mark_for_cache(messages: &mut Value) {
+    let Some(messages) = messages.as_array_mut() else {
+        return;
+    };
+    let mut marked = Vec::new();
+    if messages
+        .first()
+        .is_some_and(|first| first["role"] == "system")
+    {
+        marked.push(0);
+    }
+    if let Some(last) = messages
+        .iter()
+        .rposition(|message| message["content"].is_string())
+        && !marked.contains(&last)
+    {
+        marked.push(last);
+    }
+    for index in marked {
+        let content = &mut messages[index]["content"];
+        if let Some(text) = content.as_str().map(str::to_owned) {
+            *content = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"}
+            }]);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Usage {
     prompt_tokens: u64,
@@ -1275,6 +1324,34 @@ mod tests {
             ])
         );
         assert!(body["messages"][0].get("images").is_none());
+    }
+
+    #[test]
+    fn explicit_cache_marks_the_system_prompt_and_the_newest_text() {
+        let profile = crate::builtin_profile("qwen3.7-max").unwrap();
+        let mut config = QwenConfig::new("https://dashscope.example/v1", profile);
+        config.system_prompt = "You are Dino.".into();
+        config.explicit_cache = true;
+        let session = QwenSession::new(config).unwrap();
+        let body = session
+            .request_body(&[ChatMessage::user("fix the bug".to_owned())])
+            .unwrap();
+
+        let marked = |index: usize| body["messages"][index]["content"][0]["cache_control"].clone();
+        assert_eq!(marked(0), json!({"type": "ephemeral"}));
+        assert_eq!(body["messages"][0]["content"][0]["text"], "You are Dino.");
+        assert_eq!(marked(1), json!({"type": "ephemeral"}));
+        assert_eq!(body["messages"][1]["content"][0]["text"], "fix the bug");
+    }
+
+    #[test]
+    fn without_explicit_cache_content_stays_a_string() {
+        let profile = crate::builtin_profile("qwen3.7-max").unwrap();
+        let mut config = QwenConfig::new("https://dashscope.example/v1", profile);
+        config.system_prompt = "You are Dino.".into();
+        let session = QwenSession::new(config).unwrap();
+        let body = session.request_body(&[]).unwrap();
+        assert_eq!(body["messages"][0]["content"], "You are Dino.");
     }
 
     #[test]

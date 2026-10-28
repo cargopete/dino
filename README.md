@@ -157,6 +157,12 @@ CI and evals.
   a process, except those listed in `read_only_tools`. Servers run inside the
   sandbox unless `sandbox = false`, which the session banner says. Remote
   servers and catalogues stay out (RFC-0017 §5).
+- **Explicit prompt caching, on trial.** `DINO_EXPLICIT_CACHE=1` marks the system
+  prompt and the newest message for DashScope's explicit context cache, which
+  replaces its implicit one. Published prices make a hit 10% of input instead of
+  20%, and a write 125%, which pays once the history is more than about two and a
+  half times a turn's new tokens. Whether the Token Plan bills it that way is not
+  yet known, so it is off by default.
 - **Hooks.** `[[hooks]]` in the user file run after the file tools edit a file,
   inside the sandbox, with `{path}` for the file and an optional `extension`.
   With `extension = "rs"`, this formats every Rust edit:
