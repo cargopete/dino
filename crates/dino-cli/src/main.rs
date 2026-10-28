@@ -6,6 +6,7 @@ mod evals;
 mod handover;
 mod markdown;
 mod probe;
+mod recall;
 mod render;
 mod replay;
 mod session;
@@ -631,6 +632,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         planning: prepared.planning,
         awaiting_plan: false,
         carried: None,
+        recall: crate::recall::Recall::default(),
         auto_compact: prepared.settings.compaction == config::Compaction::Automatic,
         context_full: prepared.context_full,
         model: prepared.settings.profile.display_name.clone(),
