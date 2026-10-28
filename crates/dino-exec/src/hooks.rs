@@ -3,8 +3,10 @@
 //! They come from the user file only, never a project file, because a hook is
 //! code execution. Each runs in the session's sandbox, like `exec`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use dino_core::ToolError;
@@ -49,6 +51,10 @@ impl Hook {
 pub struct AfterEdit {
     inner: Box<dyn ToolRuntime>,
     hooks: Vec<Hook>,
+    /// Per path, the edits still to run this model turn and whether one has
+    /// succeeded, so the hooks run once, after the last. Running them after
+    /// each would reformat the file under the turn's later edits.
+    pending: Mutex<HashMap<String, (usize, bool)>>,
     root: PathBuf,
     sandbox: Arc<dyn Sandbox>,
     timeout: Duration,
@@ -65,6 +71,7 @@ impl AfterEdit {
         Self {
             inner,
             hooks,
+            pending: Mutex::new(HashMap::new()),
             root: root.into(),
             sandbox,
             timeout: Duration::from_secs(120),
@@ -133,30 +140,81 @@ impl ToolRuntime for AfterEdit {
         Box::pin(async move {
             let output = self.inner.execute(&call).await?;
             let path = call.arguments.get("path").and_then(Value::as_str);
-            let (Some(path), false) = (path, output.is_error) else {
+            let Some(path) = path else {
                 return Ok(output);
             };
             let wanted = self.hooks.iter().any(|hook| hook.applies_to(path));
             if !wanted || !EDITS.contains(&call.name.as_str()) {
                 return Ok(output);
             }
+            let (last, any_succeeded) = self.settle_edit(path, !output.is_error);
+            if !last {
+                return Ok(with_report(
+                    &output,
+                    json!({"deferred": "the hooks run after this turn's last edit to this file"}),
+                ));
+            }
+            if !any_succeeded {
+                return Ok(output);
+            }
             let report = self.run_hooks(path).await;
-            let content = match serde_json::from_str::<Value>(&output.content) {
-                Ok(Value::Object(mut fields)) => {
-                    fields.insert("hooks".into(), report);
-                    Value::Object(fields).to_string()
-                }
-                _ => format!("{}\n\nhooks: {report}", output.content),
-            };
-            Ok(ToolOutput {
-                content,
-                is_error: false,
-            })
+            Ok(with_report(&output, report))
         })
     }
 
     fn history_lost(&self) {
         self.inner.history_lost();
+    }
+
+    fn begin_turn(&self, calls: &[ToolCall]) {
+        let mut counts: HashMap<String, (usize, bool)> = HashMap::new();
+        for call in calls
+            .iter()
+            .filter(|call| EDITS.contains(&call.name.as_str()))
+        {
+            if let Some(path) = call.arguments.get("path").and_then(Value::as_str) {
+                counts.entry(path.to_owned()).or_default().0 += 1;
+            }
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = counts;
+        }
+        self.inner.begin_turn(calls);
+    }
+}
+
+impl AfterEdit {
+    /// Counts one edit to `path` as run, and says whether it was the turn's last
+    /// to that path and whether any of them succeeded. An edit the turn did not
+    /// announce counts as its own last.
+    fn settle_edit(&self, path: &str, succeeded: bool) -> (bool, bool) {
+        let Ok(mut pending) = self.pending.lock() else {
+            return (true, succeeded);
+        };
+        let Some((left, any)) = pending.get_mut(path) else {
+            return (true, succeeded);
+        };
+        *left = left.saturating_sub(1);
+        *any |= succeeded;
+        let settled = (*left == 0, *any);
+        if *left == 0 {
+            pending.remove(path);
+        }
+        settled
+    }
+}
+
+fn with_report(output: &ToolOutput, report: Value) -> ToolOutput {
+    let content = match serde_json::from_str::<Value>(&output.content) {
+        Ok(Value::Object(mut fields)) => {
+            fields.insert("hooks".into(), report);
+            Value::Object(fields).to_string()
+        }
+        _ => format!("{}\n\nhooks: {report}", output.content),
+    };
+    ToolOutput {
+        content,
+        is_error: output.is_error,
     }
 }
 
