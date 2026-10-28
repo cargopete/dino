@@ -65,6 +65,9 @@ pub struct AskContext {
     /// The program a [`ApprovalReply::ForProgram`] rule would cover, when the
     /// tool runs one program per call.
     pub program: Option<String>,
+    /// The model's reason, when the call asks to run outside the sandbox. Only
+    /// a one-off yes or a refusal is offered then.
+    pub unconfined: Option<String>,
 }
 
 /// A frontend that can ask a person about a proposed action.
@@ -234,8 +237,38 @@ impl<A> Interactive<A> {
         }
     }
 
+    /// Asks about a call outside the sandbox. Whatever the person answers, at
+    /// most this one call is allowed: no rule is granted, saved or consulted.
+    fn ask_unconfined(
+        &self,
+        call: &ToolCall,
+        action: &ToolAction,
+        reason: String,
+    ) -> DecisionFuture<'_>
+    where
+        A: Approver,
+    {
+        let context = AskContext {
+            unconfined: Some(reason),
+            ..AskContext::default()
+        };
+        let call = call.clone();
+        let action = action.clone();
+        Box::pin(async move {
+            match self.approver.ask_in(&call, &action, &context).await {
+                ApprovalReply::Reject(reason) => ApprovalDecision::denied(
+                    reason.unwrap_or_else(|| "the operator refused this action".to_owned()),
+                ),
+                _ => ApprovalDecision::allowed(DecisionSource::User),
+            }
+        })
+    }
+
     /// Whether a rule already covers the call, and by what.
     fn covered(&self, call: &ToolCall, action: &ToolAction) -> Option<DecisionSource> {
+        if action.unconfined.is_some() {
+            return None;
+        }
         let key = action.rule_key(&call.name);
         if self.saved.contains(&key) {
             return Some(DecisionSource::SavedRule);
@@ -268,6 +301,9 @@ where
         if action.class == ToolClass::ReadOnly {
             return Box::pin(async { ApprovalDecision::allowed(DecisionSource::Policy) });
         }
+        if let Some(reason) = &action.unconfined {
+            return self.ask_unconfined(call, action, reason.clone());
+        }
 
         if let Some(source) = self.covered(call, action) {
             return Box::pin(async move { ApprovalDecision::allowed(source) });
@@ -290,6 +326,7 @@ where
         let context = AskContext {
             also_pending,
             program: program.clone(),
+            unconfined: None,
         };
         let call = call.clone();
         let action = action.clone();
@@ -342,7 +379,9 @@ where
         let asking: Vec<(String, String)> = calls
             .iter()
             .filter(|(call, action)| {
-                action.class != ToolClass::ReadOnly && self.covered(call, action).is_none()
+                action.class != ToolClass::ReadOnly
+                    && action.unconfined.is_none()
+                    && self.covered(call, action).is_none()
             })
             .map(|(call, action)| {
                 let subject = action.subject.clone().unwrap_or_else(|| call.name.clone());
@@ -469,6 +508,31 @@ mod tests {
         };
         assert!(!policy.decide(&shell2, &other).await.is_allowed());
         assert_eq!(policy.approver.asked.lock().unwrap()[0].1.program, None);
+    }
+
+    #[tokio::test]
+    async fn an_unconfined_call_is_asked_every_time_and_never_remembered() {
+        let policy = Interactive::new(Script::new(vec![
+            ApprovalReply::AllProcesses,
+            ApprovalReply::Remember,
+            ApprovalReply::Reject(None),
+        ]));
+        let call = ToolCall {
+            id: "1".into(),
+            name: "exec".into(),
+            arguments: serde_json::Value::Null,
+        };
+        let push = ToolAction::unconfined_process("git push", "publish the branch");
+        assert!(policy.decide(&call, &push).await.is_allowed());
+        assert!(policy.decide(&call, &push).await.is_allowed());
+        assert!(!policy.decide(&call, &push).await.is_allowed());
+
+        let asked = policy.approver.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 3);
+        assert_eq!(asked[0].1.unconfined.as_deref(), Some("publish the branch"));
+        assert!(policy.granted_rules().is_empty());
+        // Nor did the first answer reach sandboxed processes.
+        assert!(!allowed(&policy, &exec("2", "git status")).await);
     }
 
     #[tokio::test]

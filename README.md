@@ -203,7 +203,10 @@ One consequence is load-bearing. RFC-0001 lists automatic commits, pushes,
 deployments and purchases as non-goals. Under confinement `git push` fails with
 `connect to host github.com port 22: Operation not permitted`, because the
 sandbox refused the socket rather than because its name is on a list. There is no
-list.
+list. In a session a person is watching, `exec` and `shell` may ask to run one
+command unconfined, with a justification: the prompt says so in warning colour,
+offers only "once" or "refuse", and no rule, saved or session, ever covers such
+a call. Evals and probes never offer it.
 
 The one opening is for dependencies. The `cargo` tool's `fetch` and `add` run
 in the same confinement with outbound TCP to port 443 and writes to Cargo's

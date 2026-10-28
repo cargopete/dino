@@ -112,6 +112,12 @@ fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
         label: label.to_owned(),
         reply,
     };
+    if asking.context.unconfined.is_some() {
+        return vec![
+            choice('y', "run it once, unconfined", ApprovalReply::Once),
+            choice('n', "refuse", ApprovalReply::Reject(None)),
+        ];
+    }
     let mut choices = vec![choice('y', "once", ApprovalReply::Once)];
     let others = asking.context.also_pending.len();
     if others > 0 {
@@ -153,7 +159,15 @@ fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str
         FAINT,
         &format!("      rule scope: {} on {}", asking.tool, asking.subject),
     );
-    let (always, caveat) = match asking.class {
+    let (always, caveat) = match (asking.class, &asking.context.unconfined) {
+        (_, Some(reason)) => (
+            "",
+            Some(format!(
+                "      OUTSIDE THE SANDBOX: full network, your credentials and every file · \
+                 reason: {reason}"
+            )),
+        ),
+        _ => match asking.class {
         // The containment line is the same every time, so it is said once.
         ToolClass::Process => (
             "always for this command",
@@ -171,6 +185,7 @@ fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str
             )),
         ),
         _ => ("always for this file", None),
+        },
     };
     let pending = &asking.context.also_pending;
     let also = (!pending.is_empty()).then(|| {
@@ -187,6 +202,10 @@ fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str
     let written = writeln!(err, "\n{header}  {}", asking.summary)
         .and_then(|()| writeln!(err, "{detail}"))
         .and_then(|()| match &caveat {
+            // Outside the sandbox is the one caveat that must not read as small print.
+            Some(caveat) if asking.context.unconfined.is_some() => {
+                writeln!(err, "{}", style::paint(style::WARN, caveat))
+            }
             Some(caveat) => writeln!(err, "{}", style::paint(FAINT, caveat)),
             None => Ok(()),
         })

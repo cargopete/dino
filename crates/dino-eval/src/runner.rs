@@ -117,6 +117,10 @@ pub struct Variant {
 
 /// What shapes the tools a session gets.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent switches, each read in one place"
+)]
 pub struct ToolOptions {
     /// Workspace-relative paths no tool may write.
     pub protected: Vec<std::path::PathBuf>,
@@ -135,6 +139,9 @@ pub struct ToolOptions {
     pub hooks: Vec<dino_exec::Hook>,
     /// Leave out the `cargo check` that follows a turn's Rust edits.
     pub skip_edit_check: bool,
+    /// Let `exec` and `shell` ask to run one command outside the sandbox, for
+    /// a person to approve. Never in evals, which have no person.
+    pub escalation: bool,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -520,6 +527,7 @@ fn eval_session(
                 memory: None,
                 skills: Vec::new(),
                 skip_edit_check: false,
+                escalation: false,
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -891,13 +899,24 @@ pub fn session_tools_with(
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         file_tools(workspace, options, &sandbox)?,
         Box::new(dino_core::blocker::BlockerTool),
-        Box::new(
-            ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox)).map_err(setup)?,
-        ),
-        Box::new(
-            ShellTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
-                .map_err(setup)?,
-        ),
+        {
+            let exec = ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
+                .map_err(setup)?;
+            Box::new(if options.escalation {
+                exec.with_escalation()
+            } else {
+                exec
+            })
+        },
+        {
+            let shell = ShellTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
+                .map_err(setup)?;
+            Box::new(if options.escalation {
+                shell.with_escalation()
+            } else {
+                shell
+            })
+        },
         Box::new(
             dino_exec::PackagesTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
                 .map_err(setup)?,
