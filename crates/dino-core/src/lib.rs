@@ -8,6 +8,7 @@
 pub mod approval;
 pub mod blocker;
 pub mod git;
+pub mod loops;
 pub mod memory;
 pub mod progress;
 pub mod prompt;
@@ -276,11 +277,17 @@ fn blocked(events: Vec<AgentEvent>, mut text: String, reason: &str, turns: u32) 
 /// Told to the model with its last tool result, because that is the one
 /// channel every provider carries into the next turn.
 fn turns_left_note(turns_left: u32, unfinished: Option<&str>) -> String {
-    let turns = if turns_left == 1 { "turn" } else { "turns" };
-    let mut note = format!(
-        "\n\n[dino: {turns_left} model {turns} left in this run, including your next \
-         response. Finish the change, check it once, and say what is done and what is not.]"
-    );
+    let mut note = if turns_left == 1 {
+        "\n\n[dino: your next response is the last in this run. Make no tool calls: say \
+         what is done, what is not, and what should happen next.]"
+            .to_owned()
+    } else {
+        format!(
+            "\n\n[dino: {turns_left} model turns left in this run, including your next \
+             response. Finish the change, check it once, and say what is done and what is \
+             not.]"
+        )
+    };
     if let Some(unfinished) = unfinished {
         let _ = write!(
             note,
@@ -355,6 +362,11 @@ pub struct Agent<S, T> {
     sent_back: bool,
     /// Images for the next submission's first turn.
     pending_images: Vec<dino_protocol::Image>,
+    /// Tool results a run computed but never sent, because it hit the turn
+    /// limit. The provider's history ends in those calls, so the next
+    /// submission must answer them before anything else.
+    unsent: Option<Vec<ToolResult>>,
+    loops: loops::LoopWatch,
 }
 
 impl<S, T> Agent<S, T>
@@ -377,6 +389,8 @@ where
             turns_started: 0,
             sent_back: false,
             pending_images: Vec::new(),
+            unsent: None,
+            loops: loops::LoopWatch::default(),
         }
     }
 
@@ -406,6 +420,17 @@ where
 
     /// The first turn of a submission, carrying any attached images.
     fn first_input(&mut self, content: String) -> TurnInput {
+        if let Some(mut results) = self.unsent.take() {
+            // Images wait for a submission that can carry them as a message.
+            if let Some(last) = results.last_mut() {
+                let _ = write!(
+                    last.output.content,
+                    "\n\n[dino: the last run reached its turn limit before these results \
+                     were sent. The person has since written:]\n{content}"
+                );
+            }
+            return TurnInput::ToolResults { results };
+        }
         let images = std::mem::take(&mut self.pending_images);
         if images.is_empty() {
             TurnInput::User { content }
@@ -514,6 +539,7 @@ where
         let budget = budget_window(documented, self.session.profile().context_window_tokens);
         let mut warned = false;
         self.sent_back = false;
+        self.loops.reset();
 
         for model_turn in 1..=self.config.max_model_turns.get() {
             if cancel.is_cancelled() {
@@ -594,6 +620,9 @@ where
             }
         }
 
+        if let TurnInput::ToolResults { results } = input {
+            self.unsent = Some(results);
+        }
         Err(AgentError::ModelTurnLimit(
             self.config.max_model_turns.get(),
         ))
@@ -619,9 +648,20 @@ where
             let reported = (call.name == blocker::REPORT_BLOCKER)
                 .then(|| blocker::describe(&call).ok())
                 .flatten();
-            let Some(result) = self.settle(model_turn, call, events, cancel).await? else {
+            if let Some(refusal) = self.loops.refuse(&call) {
+                let refused =
+                    self.finish_call(model_turn, call.id, ToolOutput::error(refusal), events)?;
+                results.push(refused);
+                continue;
+            }
+            let note = self.loops.record(&call);
+            let Some(mut result) = self.settle(model_turn, call, events, cancel).await? else {
                 return Ok(Settled::Cancelled);
             };
+            if let Some(note) = note {
+                result.output.content.push_str("\n\n");
+                result.output.content.push_str(&note);
+            }
             // Only a call that went through counts: a refused one is a refusal.
             if !result.output.is_error {
                 reported_blocker = reported_blocker.or(reported);
@@ -744,8 +784,21 @@ where
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        let turns_left = self.config.max_model_turns.get() - model_turn;
-        if turns_left == 0 || turns_left > self.config.turn_notice_at {
+        let max = self.config.max_model_turns.get();
+        let turns_left = max - model_turn;
+        if turns_left == 0 {
+            return Ok(());
+        }
+        if turns_left > self.config.turn_notice_at {
+            // From half-way the count rides along, so the end is no surprise.
+            if model_turn * 2 >= max
+                && let Some(last) = results.last_mut()
+            {
+                let _ = write!(
+                    last.output.content,
+                    "\n\n[dino: {model_turn} of {max} model turns used.]"
+                );
+            }
             return Ok(());
         }
         self.emit(

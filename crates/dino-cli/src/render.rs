@@ -396,6 +396,9 @@ impl EventSink for Renderer {
             .map_or_else(|_| TokenUsage::default(), |total| *total);
         let elapsed = self.started.take().map(|started| started.elapsed());
         let ending = match (&outcome.error, outcome.stop_reason) {
+            (Some(error), _) if error.starts_with("model-turn limit reached") => {
+                format!("stopped: {error} · reply to carry on where it left off")
+            }
             (Some(error), _) => format!("failed: {error}"),
             (None, Some(reason)) => stop_reason_label(reason).to_owned(),
             (None, None) => "ended without a stop reason".to_owned(),

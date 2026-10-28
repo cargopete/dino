@@ -845,7 +845,7 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         max_turns: args.max_turns.map_or_else(
             || {
                 layers.pick(|file| file.max_turns).unwrap_or((
-                    NonZeroU32::new(32).expect("32 is non-zero"),
+                    NonZeroU32::new(100).expect("100 is non-zero"),
                     Source::Default,
                 ))
             },
