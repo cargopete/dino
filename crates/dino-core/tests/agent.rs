@@ -446,7 +446,10 @@ async fn a_tool_set_dispatches_by_tool_name() {
 
     assert_eq!(names, vec!["first".to_owned(), "second".to_owned()]);
     assert_eq!(chosen.content, "second");
-    assert_eq!(unknown.to_string(), "unknown tool \"third\"");
+    assert_eq!(
+        unknown.to_string(),
+        "unknown tool \"third\". The tools are: first, second."
+    );
 }
 
 /// A window small enough that the fractions land on readable numbers.

@@ -242,24 +242,26 @@ fn a_plain_command_line_is_split_on_whitespace() {
 }
 
 #[test]
-fn a_line_a_shell_would_read_differently_is_refused_with_the_expected_shape() {
+fn a_line_a_shell_would_read_differently_is_sent_to_the_shell_tool() {
     let fixture = Fixture::new();
 
-    for (line, shape) in [
-        ("cargo test | head", r#"["cargo", "test", "|", "head"]"#),
-        ("rm tests/*.rs", r#"["rm", "tests/*.rs"]"#),
-        ("echo 'a b'", r#"["echo", "'a", "b'"]"#),
-        (
-            "RUST_LOG=debug cargo run",
-            r#"["RUST_LOG=debug", "cargo", "run"]"#,
-        ),
-        ("ls $HOME", r#"["ls", "$HOME"]"#),
+    for line in [
+        "cargo test 2>&1 | head",
+        "rm tests/*.rs",
+        "echo 'a b'",
+        "RUST_LOG=debug cargo run",
+        "ls $HOME",
     ] {
         let error = fixture
             .tool()
             .classify(&call(json!({"command": line})))
-            .unwrap_err();
-        assert!(error.to_string().contains(shape), "{line} said: {error}");
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("shell tool"), "{line} said: {error}");
+        assert!(
+            !error.contains("\"|\"") && !error.contains("2>&1"),
+            "{line} said: {error}"
+        );
     }
 }
 

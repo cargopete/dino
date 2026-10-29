@@ -160,7 +160,15 @@ impl ToolSet {
             .get(&call.name)
             .and_then(|index| self.runtimes.get(*index))
             .map(AsRef::as_ref)
-            .ok_or_else(|| ToolError::new(format!("unknown tool {:?}", call.name)))
+            .ok_or_else(|| {
+                let mut names: Vec<&str> = self.owners.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                ToolError::new(format!(
+                    "unknown tool {:?}. The tools are: {}.",
+                    call.name,
+                    names.join(", ")
+                ))
+            })
     }
 }
 

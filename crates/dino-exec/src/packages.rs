@@ -198,6 +198,11 @@ struct Request {
 
 impl Request {
     fn parse(arguments: &Value) -> Result<Self, ToolError> {
+        if arguments.get("manager").and_then(Value::as_str) == Some("cargo") {
+            return Err(ToolError::new(
+                "packages does not handle Rust: use the cargo tool's add or fetch command.",
+            ));
+        }
         serde_json::from_value(arguments.clone())
             .map_err(|error| ToolError::new(format!("invalid packages arguments: {error}")))
     }
@@ -330,6 +335,13 @@ mod tests {
         assert!(pnpm.contains(&"--ignore-scripts".to_owned()));
         let go = command(&json!({"manager": "go", "command": "add", "packages": ["github.com/google/uuid@v1.6.0"]})).unwrap();
         assert_eq!(go, ["go", "get", "github.com/google/uuid@v1.6.0"]);
+    }
+
+    #[test]
+    fn a_rust_request_is_pointed_at_the_cargo_tool() {
+        let error = command(&json!({"manager": "cargo", "command": "add", "packages": ["serde"]}))
+            .unwrap_err();
+        assert!(error.to_string().contains("cargo tool"), "{error}");
     }
 
     #[test]
