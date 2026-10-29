@@ -278,13 +278,12 @@ impl ExecRequest {
                 .ok()
                 .or_else(|| plain_words(line));
             let Some(command) = command else {
-                let example = serde_json::to_string(&line.split_whitespace().collect::<Vec<_>>())
-                    .unwrap_or_default()
-                    .replace("\",\"", "\", \"");
-                return Err(ToolError::new(format!(
-                    "invalid exec arguments: command must be an array with one string per \
-                     argument, such as {example}. No shell is involved."
-                )));
+                return Err(ToolError::new(
+                    "invalid exec arguments: this line needs a shell to read its quotes, pipes \
+                     or redirects, and exec runs no shell. Send it to the shell tool, or send \
+                     command as an array with one string per argument, such as \
+                     [\"cargo\", \"test\", \"--lib\"].",
+                ));
             };
             arguments["command"] = Value::from(command);
         }
