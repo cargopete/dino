@@ -86,7 +86,20 @@ struct Invocation {
     environment: Vec<(String, String)>,
     removed: Vec<&'static str>,
     files: Vec<(PathBuf, String)>,
+    /// Logins copied in from the person's own state, as (from, to).
+    logins: Vec<(PathBuf, PathBuf)>,
     writable: Vec<PathBuf>,
+}
+
+/// Login copies that are removed when the run ends, however it ends.
+struct Logins(Vec<PathBuf>);
+
+impl Drop for Logins {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 impl Harness {
@@ -278,16 +291,34 @@ impl Harness {
                         .push((state.join("models.json"), pi_models(provider, model)));
                 }
             }
-            (Self::Codex, Some(_)) => {
+            (Self::Codex, _) => {
                 // --ignore-user-config still loads ~/.codex's AGENTS.md, skills
                 // and memories. A provider keyed from the environment needs no login.
                 invocation
                     .environment
                     .push(("CODEX_HOME".to_owned(), state.display().to_string()));
+                if provider.is_none() {
+                    invocation
+                        .logins
+                        .push((codex_home().join("auth.json"), state.join("auth.json")));
+                }
             }
             (Self::ClaudeCode, Some((provider, key))) => {
                 invocation.environment = claude_code_environment(provider, model, key);
                 invocation.removed.push("ANTHROPIC_AUTH_TOKEN");
+            }
+            (Self::Grok, None) => {
+                // Grok reads Claude Code's and Cursor's personal instructions,
+                // skills, MCP servers and hooks as its own unless told not to.
+                invocation.environment = ["CLAUDE", "CURSOR"]
+                    .iter()
+                    .flat_map(|vendor| {
+                        ["RULES", "SKILLS", "AGENTS", "MCPS", "HOOKS"].map(|part| {
+                            (format!("GROK_{vendor}_{part}_ENABLED"), "false".to_owned())
+                        })
+                    })
+                    .chain([("GROK_MEMORY".to_owned(), "0".to_owned())])
+                    .collect();
             }
             (Self::Kimi | Self::Grok, Some((provider, _))) => {
                 return Err(EvalError::Setup(format!(
@@ -299,6 +330,19 @@ impl Harness {
         }
         Ok(invocation)
     }
+}
+
+/// The person's own Codex state, where its login lives.
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(".codex")
+        },
+        PathBuf::from,
+    )
 }
 
 /// Codex's overrides adding `provider` and selecting it. Codex reads the key
@@ -623,7 +667,8 @@ pub fn parse_pi(stream: &str) -> Parsed {
 }
 
 /// The harness's command for `case`, with a fresh state directory beside the
-/// workspace and the files it is given there written.
+/// workspace and the files it is given there written, and the logins copied
+/// there, which are removed when the returned [`Logins`] is dropped.
 fn prepare(
     case: &Case,
     scratch: &Path,
@@ -631,7 +676,7 @@ fn prepare(
     harness: Harness,
     model: &str,
     provider: Option<Provider>,
-) -> Result<Invocation, EvalError> {
+) -> Result<(Invocation, Logins), EvalError> {
     let key = provider
         .map(|provider| {
             std::env::var(provider.key_variable())
@@ -656,7 +701,22 @@ fn prepare(
             EvalError::Setup(format!("cannot write {}: {error}", path.display()))
         })?;
     }
-    Ok(invocation)
+    let logins = copy_logins(harness, &invocation.logins)?;
+    Ok((invocation, logins))
+}
+
+fn copy_logins(harness: Harness, logins: &[(PathBuf, PathBuf)]) -> Result<Logins, EvalError> {
+    let mut copied = Logins(Vec::new());
+    for (from, to) in logins {
+        std::fs::copy(from, to).map_err(|error| {
+            EvalError::Setup(format!(
+                "{harness:?} needs its login, {}: {error}; log in first",
+                from.display()
+            ))
+        })?;
+        copied.0.push(to.clone());
+    }
+    Ok(copied)
 }
 
 /// Runs one case through `harness` with `model` and scores the result.
@@ -675,7 +735,7 @@ pub async fn run_external(
 ) -> Result<Outcome, EvalError> {
     let workspace = case.materialise(scratch)?;
     let before = fingerprint_tree(&workspace)?;
-    let invocation = prepare(case, scratch, &workspace, harness, model, provider)?;
+    let (invocation, logins) = prepare(case, scratch, &workspace, harness, model, provider)?;
     let invocation = harness.contained(invocation, &workspace, sandbox.confines_writes())?;
     // Model names such as `kimi-code/k3.1-pro` would otherwise name a directory.
     let log_path = scratch.join(format!("{}.{}.jsonl", case.name, model.replace('/', "_")));
@@ -717,6 +777,7 @@ pub async fn run_external(
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
+    drop(logins);
     let _ = std::fs::write(&log_path, &stream);
 
     let parsed = match harness {
@@ -883,12 +944,80 @@ mod tests {
                 .environment
                 .contains(&("CODEX_HOME".to_owned(), state.display().to_string()))
         );
+        assert!(codex.logins.is_empty(), "the provider's key is the login");
+    }
 
+    #[test]
+    fn native_codex_gets_a_fresh_home_with_only_the_persons_login() {
+        let state = Path::new("/scratch/case.Codex-state");
         let native = Harness::Codex
             .command("gpt-6.1", "fix it", Path::new("/scratch/case"), None, state)
             .unwrap();
         assert!(setting(&native.arguments, "model_provider").is_none());
-        assert!(native.environment.is_empty(), "a login lives in ~/.codex");
+        assert_eq!(
+            native.environment,
+            [("CODEX_HOME".to_owned(), state.display().to_string())]
+        );
+        assert_eq!(
+            native.logins,
+            [(codex_home().join("auth.json"), state.join("auth.json"))]
+        );
+    }
+
+    #[test]
+    fn logins_are_copied_into_the_state_and_removed_with_the_run() {
+        let base = std::env::temp_dir().join(format!("dino-logins-{}", std::process::id()));
+        let (home, state) = (base.join("home"), base.join("state"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let login = home.join("auth.json");
+        let copy = state.join("auth.json");
+        std::fs::write(&login, "{}").unwrap();
+
+        let logins = copy_logins(Harness::Codex, &[(login.clone(), copy.clone())]).unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "{}");
+        drop(logins);
+        assert!(!copy.exists());
+        assert!(login.exists(), "the person's own login is left alone");
+
+        std::fs::remove_file(&login).unwrap();
+        let Err(EvalError::Setup(message)) = copy_logins(Harness::Codex, &[(login, copy)]) else {
+            panic!("a missing login is a setup error");
+        };
+        assert!(
+            message.contains("auth.json") && message.contains("log in"),
+            "{message}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn grok_is_kept_off_the_persons_claude_and_cursor_setup_and_memory() {
+        let grok = Harness::Grok
+            .command(
+                "grok-4",
+                "fix it",
+                Path::new("/scratch/case"),
+                None,
+                Path::new("/scratch/state"),
+            )
+            .unwrap();
+        for variable in [
+            "GROK_CLAUDE_RULES_ENABLED",
+            "GROK_CLAUDE_SKILLS_ENABLED",
+            "GROK_CLAUDE_MCPS_ENABLED",
+            "GROK_CURSOR_RULES_ENABLED",
+        ] {
+            assert!(
+                grok.environment
+                    .contains(&(variable.to_owned(), "false".to_owned())),
+                "{variable}"
+            );
+        }
+        assert!(
+            grok.environment
+                .contains(&("GROK_MEMORY".to_owned(), "0".to_owned()))
+        );
     }
 
     #[test]
