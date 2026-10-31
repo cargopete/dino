@@ -176,3 +176,10 @@ Rerun Kimi once #164, #166 and #163 land.
   writes its record only at the end, so `grok-4.7.json` is empty and Grok is not in the
   results. The finished records show a scorer fault (#165) and two Kimi-specific faults
   (#164, #166) that cost Kimi passes; see those issues before reading the TOML rows.
+- 2026-10-31, later: after the rescore (Sonnet 99 against Kimi 95) and the native
+  harness comparison (Codex 100, Claude Code 99, Kimi Code 93 on eight hard cases),
+  Chief runs Dino on Sonnet 5.5, with Kimi on Moonshot's API as the first fallback
+  (another provider, so an Anthropic refusal still has somewhere to go) and Qwen
+  until its plan lapses on 19 November. The built-in default stays Kimi, for
+  machines without an Anthropic key. The Kimi Code subscription is being
+  cancelled: Dino may not use it, and dancho stays on the API.
