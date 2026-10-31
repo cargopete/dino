@@ -167,6 +167,12 @@ CI and evals.
   a turn, through vLLM's `thinking_token_budget`. Measured on the four slowest
   hard cases, it gave the same pass rate in 15% less time (RFC-0017 §8.7).
   `thinking_budget` in a config file changes it.
+- **A reasoning effort, where a model offers one.** `reasoning_effort` in a
+  config file, or `--effort` on a session or `dino eval`, sets `none`, `low`,
+  `medium`, `high`, `xhigh` or `max` on Kimi, Claude and GPT. A level the model
+  does not list is an error naming those it does; a fallback without it keeps
+  its own default. Unset leaves each default as it was, and an eval records the
+  effort with every run.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `dino replay` renders a past session through the same renderer the live one

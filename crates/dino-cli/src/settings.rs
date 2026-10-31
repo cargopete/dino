@@ -48,6 +48,9 @@ pub struct FileConfig {
     /// Most reasoning tokens per turn, for a server that honours a budget.
     /// Qwen defaults to 4096.
     pub thinking_budget: Option<u32>,
+    /// How hard a model that offers a choice thinks: none, low, medium, high,
+    /// xhigh or max. Unset keeps each provider's default.
+    pub reasoning_effort: Option<dino_protocol::ReasoningEffort>,
     /// Compact on its own once the context window passes the warning mark.
     pub auto_compact: Option<bool>,
     /// Models to continue on, in order, when the provider refuses the account.
@@ -360,6 +363,22 @@ mod tests {
         assert_eq!(
             chain.fallback.unwrap().keys(),
             ["qwen3.7-max", "claude-opus-5.5"]
+        );
+    }
+
+    #[test]
+    fn a_reasoning_effort_is_a_named_level() {
+        let parsed = parse(Path::new("x"), "reasoning_effort = \"medium\"\n").unwrap();
+        assert_eq!(
+            parsed.reasoning_effort,
+            Some(dino_protocol::ReasoningEffort::Medium)
+        );
+
+        let error = parse(Path::new("cfg.toml"), "reasoning_effort = \"meduim\"\n").unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("meduim") && message.contains("medium"),
+            "{message}"
         );
     }
 

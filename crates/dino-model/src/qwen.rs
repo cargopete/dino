@@ -141,7 +141,7 @@ impl QwenSession {
             };
             if !offered || config.profile.chat_server != ChatServer::Moonshot {
                 return Err(ModelError::Configuration(format!(
-                    "{} does not offer {effort:?} reasoning effort",
+                    "{} does not offer {effort} reasoning effort",
                     config.profile.display_name
                 )));
             }
@@ -378,10 +378,7 @@ impl QwenSession {
         if self.config.enable_thinking == Some(false) || effort == Some(ReasoningEffort::None) {
             body.insert("thinking".into(), json!({"type": "disabled"}));
         } else if let Some(effort) = effort {
-            body.insert(
-                "reasoning_effort".into(),
-                json!(crate::openai::reasoning_effort_name(effort)),
-            );
+            body.insert("reasoning_effort".into(), json!(effort.name()));
         }
     }
 }

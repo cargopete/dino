@@ -72,6 +72,9 @@ pub struct Outcome {
     /// The reasoning budget the run was given, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
+    /// The reasoning effort the run asked for; absent is the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<dino_protocol::ReasoningEffort>,
     /// The run's score, when scoring was asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<crate::score::Score>,
@@ -111,6 +114,8 @@ pub struct Variant {
     /// The reasoning budget the session was built with. Recorded here; the
     /// session itself is the caller's to build.
     pub thinking_budget: Option<u32>,
+    /// The reasoning effort the session was built with, recorded likewise.
+    pub reasoning_effort: Option<dino_protocol::ReasoningEffort>,
     /// Ask for a `dino-report` and score the run. RFC-0019.
     pub score: bool,
 }
@@ -367,6 +372,7 @@ pub(crate) async fn conclude(
         without: variant.without.clone(),
         max_diagnostics: variant.max_diagnostics,
         thinking_budget: variant.thinking_budget,
+        reasoning_effort: variant.reasoning_effort,
         score: measured
             .as_ref()
             .map(|measured| crate::score::score(case, measured)),
@@ -439,6 +445,7 @@ pub(crate) fn wall_outcome(
         without: variant.without.clone(),
         max_diagnostics: variant.max_diagnostics,
         thinking_budget: variant.thinking_budget,
+        reasoning_effort: variant.reasoning_effort,
         score: None,
         measured: None,
         stopped: Some(EarlyStop::WallTime),
