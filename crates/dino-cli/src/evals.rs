@@ -16,6 +16,7 @@ use dino_eval::total_cost;
 use dino_eval::wilson;
 use dino_eval::wilson_interval;
 use dino_model::ModelSession;
+use futures_util::StreamExt as _;
 
 use crate::config;
 use crate::config::RunSettings;
@@ -75,6 +76,10 @@ pub struct EvalArgs {
     /// Run every case this many times.
     #[arg(long, default_value_t = 1)]
     pub trials: u32,
+    /// Run this many cases at once. Each makes its own model calls, so the
+    /// provider's rate limit is the ceiling. Results keep the serial order.
+    #[arg(long, default_value_t = 1)]
+    pub jobs: usize,
     /// Stop each case after this many seconds, instead of the case's own
     /// wall-time limit. A turn budget does not stop one turn that never returns.
     #[arg(long)]
@@ -174,52 +179,14 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
         );
     }
 
-    let mut outcomes = Vec::with_capacity(cases.len());
     let trials = args.trials.max(1);
-    for (trial, case) in (1..=trials).flat_map(|trial| cases.iter().map(move |case| (trial, case)))
-    {
-        let scratch = if trials > 1 {
-            scratch.join(format!("trial-{trial}"))
-        } else {
-            scratch.clone()
-        };
-        std::fs::create_dir_all(&scratch)?;
-        // Per case, because a sandbox is built around one workspace root and
-        // each case gets its own. An unattended run is exactly when the
-        // containment has to be real.
-        let workspace = case.materialise(&scratch)?;
-        let sandbox = config::build_sandbox(args.sandbox, &workspace, &case.protected)?;
-
-        if let (Some(harness), Some(model)) = (args.harness, &args.model) {
-            let outcome = dino_eval::external::run_external(
-                case,
-                &scratch,
-                Arc::clone(&sandbox),
-                harness.into(),
-                model,
-            )
-            .await?;
-            outcomes.push(record(outcome, rate.as_ref(), args.json));
-            continue;
-        }
-        let Some(profile) = &profile else {
-            unreachable!("a profile is resolved whenever there is no harness");
-        };
-        let settings = eval_settings(&args, profile, &workspace);
-        let build = |prompt: String, tools: Vec<dino_protocol::ToolDefinition>| {
-            config::build_session(&settings, prompt, tools)
-                .map_err(|error| dino_eval::EvalError::Setup(error.to_string()))
-                .map(|session| session as Box<dyn ModelSession>)
-        };
-
-        let variant = dino_eval::Variant {
-            without: args.without.clone(),
-            max_diagnostics: args.max_diagnostics,
-            thinking_budget: args.thinking_budget,
-            score: args.score,
-        };
-        let outcome = run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?;
-        outcomes.push(record(outcome, rate.as_ref(), args.json));
+    let runs = (1..=trials)
+        .flat_map(|trial| cases.iter().map(move |case| (trial, case)))
+        .map(|(trial, case)| run_one(&args, profile.as_ref(), &scratch, trials, trial, case));
+    let mut outcomes = Vec::with_capacity(cases.len());
+    let mut finished = std::pin::pin!(scheduled(runs, args.jobs));
+    while let Some(outcome) = finished.next().await {
+        outcomes.push(record(outcome?, rate.as_ref(), args.json));
     }
 
     report(&args, &label, trials, &cases, &outcomes)?;
@@ -230,6 +197,64 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// Runs up to `jobs` of `runs` at once, yielding each result in the order given.
+fn scheduled<F: Future>(
+    runs: impl IntoIterator<Item = F>,
+    jobs: usize,
+) -> impl futures_util::Stream<Item = F::Output> {
+    futures_util::stream::iter(runs).buffered(jobs.max(1))
+}
+
+/// One trial of one case, in its own workspace under the trial's scratch.
+async fn run_one(
+    args: &EvalArgs,
+    profile: Option<&dino_protocol::ModelProfile>,
+    scratch: &Path,
+    trials: u32,
+    trial: u32,
+    case: &Case,
+) -> Result<Outcome> {
+    let scratch = if trials > 1 {
+        scratch.join(format!("trial-{trial}"))
+    } else {
+        scratch.to_path_buf()
+    };
+    std::fs::create_dir_all(&scratch)?;
+    // Per case, because a sandbox is built around one workspace root and
+    // each case gets its own. An unattended run is exactly when the
+    // containment has to be real.
+    let workspace = case.materialise(&scratch)?;
+    let sandbox = config::build_sandbox(args.sandbox, &workspace, &case.protected)?;
+
+    if let (Some(harness), Some(model)) = (args.harness, &args.model) {
+        return Ok(dino_eval::external::run_external(
+            case,
+            &scratch,
+            Arc::clone(&sandbox),
+            harness.into(),
+            model,
+        )
+        .await?);
+    }
+    let Some(profile) = profile else {
+        unreachable!("a profile is resolved whenever there is no harness");
+    };
+    let settings = eval_settings(args, profile, &workspace);
+    let build = |prompt: String, tools: Vec<dino_protocol::ToolDefinition>| {
+        config::build_session(&settings, prompt, tools)
+            .map_err(|error| dino_eval::EvalError::Setup(error.to_string()))
+            .map(|session| session as Box<dyn ModelSession>)
+    };
+
+    let variant = dino_eval::Variant {
+        without: args.without.clone(),
+        max_diagnostics: args.max_diagnostics,
+        thinking_budget: args.thinking_budget,
+        score: args.score,
+    };
+    Ok(run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?)
 }
 
 /// Prints the runs, and the score when there is one, as a table or as JSON.
@@ -639,4 +664,40 @@ fn rates_json(outcomes: &[Outcome]) -> serde_json::Value {
         "wilson95": [low, high],
         "cases": cases,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use futures_util::StreamExt as _;
+
+    use super::scheduled;
+
+    async fn ran_with(jobs: usize) -> (Vec<usize>, usize) {
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        // Earlier runs take longer, so finishing order is the reverse of the given one.
+        let runs = (0..6).map(|index| {
+            let (running, peak) = (&running, &peak);
+            async move {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10 * (6 - index as u64))).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                index
+            }
+        });
+        let order = scheduled(runs, jobs).collect().await;
+        (order, peak.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn runs_keep_their_order_and_never_exceed_the_jobs() {
+        assert_eq!(ran_with(3).await, ((0..6).collect(), 3));
+        assert_eq!(ran_with(1).await, ((0..6).collect(), 1));
+        assert_eq!(ran_with(0).await, ((0..6).collect(), 1));
+    }
 }
