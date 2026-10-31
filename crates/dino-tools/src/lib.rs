@@ -73,6 +73,10 @@ pub struct WorkspaceTools {
     /// Ranges already returned in this session, with the fingerprint they were
     /// read at. The same range of an unchanged file is how a turn gets spent twice.
     reads: Mutex<HashMap<PathBuf, Vec<ReadSpan>>>,
+    /// The whole text of each file as the model last saw it, through a whole
+    /// read or its own `write_file`, which a later read can be a diff against.
+    /// A patch does not update it: the model holds the patch, not the result.
+    views: Mutex<HashMap<PathBuf, View>>,
 }
 
 impl WorkspaceTools {
@@ -90,6 +94,7 @@ impl WorkspaceTools {
             protected: Vec::new(),
             versions: Mutex::new(HashMap::new()),
             reads: Mutex::new(HashMap::new()),
+            views: Mutex::new(HashMap::new()),
         })
     }
 
@@ -126,9 +131,10 @@ impl WorkspaceTools {
         vec![
             ToolDefinition {
                 name: "read".into(),
-                description: "Read a bounded range from a UTF-8 file in the workspace. The same \
-                              range of an unchanged file returns a note instead of the bytes; \
-                              pass again to read it once more."
+                description: "Read a bounded range from a UTF-8 file in the workspace. Lines \
+                              you have already seen, unchanged, return a note instead of the \
+                              bytes, and a file changed since you last saw it whole may return \
+                              only the differences; pass again for the full text."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -138,7 +144,7 @@ impl WorkspaceTools {
                         "end_line": {"type": "integer", "minimum": 1},
                         "again": {
                             "type": "boolean",
-                            "description": "Return the bytes even when this range was already read and the file has not changed."
+                            "description": "Return the lines in full, even when you have already seen them or the file has changed only a little."
                         }
                     },
                     "required": ["path"],
@@ -235,8 +241,9 @@ impl WorkspaceTools {
             ToolDefinition {
                 name: "write_file".into(),
                 description: "Write a whole UTF-8 file in the workspace, creating it and any \
-                              missing directories. A file that already exists must have been \
-                              read first; for a small change to one, apply_patch is cheaper."
+                              missing directories. To change an existing file use apply_patch, \
+                              which sends only the lines that change; replace one whole only \
+                              when most of it changes, and only after reading it."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -341,29 +348,18 @@ impl WorkspaceTools {
         // Recorded before the stall, so a withheld re-read still counts as
         // having seen the file. `apply_patch` would otherwise demand another read.
         self.remember(&path, &sha256);
+        // A byte cap can stop partway through the range; only whole lines shown count.
+        let shown_end = if byte_truncated {
+            (start_line + content.matches('\n').count()).saturating_sub(1)
+        } else {
+            end_line
+        };
         let span = ReadSpan {
             start_line,
-            end_line,
+            end_line: shown_end,
             sha256: sha256.clone(),
         };
-        if !arguments.again && self.already_read(&path, &span) {
-            let content = format!(
-                "unchanged since the read of lines {start_line}-{end_line} at SHA-256 \
-                 {sha256}. Pass again to read it once more.\n"
-            );
-            return json_output(&ReadOutput {
-                path: self.root.relative(&path)?,
-                start_line,
-                end_line,
-                total_lines,
-                truncated,
-                sha256,
-                content,
-                repeated: true,
-            });
-        }
-        self.remember_read(&path, span);
-        let output = ReadOutput {
+        let mut output = ReadOutput {
             path: self.root.relative(&path)?,
             start_line,
             end_line,
@@ -372,15 +368,111 @@ impl WorkspaceTools {
             sha256,
             content,
             repeated: false,
+            diff: false,
         };
+        if !arguments.again {
+            if self.already_seen(&path, &span) {
+                output.content = format!(
+                    "unchanged since you last saw lines {start_line}-{end_line}, at SHA-256 {}; \
+                     the file has {total_lines} lines. Pass again to read it once more.\n",
+                    output.sha256
+                );
+                output.repeated = true;
+                return json_output(&output);
+            }
+            if let Some(diff) = self.changed_since_view(&path, &text, &output) {
+                output.content = diff;
+                output.diff = true;
+                self.remember_read(
+                    &path,
+                    ReadSpan {
+                        start_line: 1,
+                        end_line: total_lines,
+                        sha256: output.sha256.clone(),
+                    },
+                );
+                self.hold(&path, &output.sha256, text);
+                return json_output(&output);
+            }
+        }
+        if shown_end >= start_line || total_lines == 0 {
+            self.remember_read(&path, span);
+        }
+        if start_line == 1 && !truncated && end_line == total_lines {
+            self.hold(&path, &output.sha256, text);
+        }
         json_output(&output)
     }
 
-    /// Whether this exact resolved range was already returned for these bytes.
-    fn already_read(&self, path: &Path, span: &ReadSpan) -> bool {
-        self.reads
-            .lock()
-            .is_ok_and(|reads| reads.get(path).is_some_and(|spans| spans.contains(span)))
+    /// Whether every line of this range was already returned for these bytes,
+    /// or the model holds the whole file as it now is.
+    fn already_seen(&self, path: &Path, span: &ReadSpan) -> bool {
+        // A range past the end shows nothing, so only the same one again repeats.
+        if span.end_line < span.start_line {
+            return self
+                .reads
+                .lock()
+                .is_ok_and(|reads| reads.get(path).is_some_and(|spans| spans.contains(span)));
+        }
+        let held = self.views.lock().is_ok_and(|views| {
+            views
+                .get(path)
+                .is_some_and(|view| view.sha256 == span.sha256)
+        });
+        if held {
+            return true;
+        }
+        let Ok(reads) = self.reads.lock() else {
+            return false;
+        };
+        let mut spans: Vec<(usize, usize)> = reads
+            .get(path)
+            .into_iter()
+            .flatten()
+            .filter(|known| known.sha256 == span.sha256)
+            .map(|known| (known.start_line, known.end_line))
+            .collect();
+        if spans.is_empty() {
+            return false;
+        }
+        spans.sort_unstable();
+        let mut next = span.start_line;
+        for (start, end) in spans {
+            if next > span.end_line {
+                break;
+            }
+            if start <= next && end >= next {
+                next = end + 1;
+            }
+        }
+        next > span.end_line
+    }
+
+    /// The differences from the whole text the model last saw, when they are
+    /// much shorter than the range it asked for.
+    fn changed_since_view(&self, path: &Path, text: &str, output: &ReadOutput) -> Option<String> {
+        let views = self.views.lock().ok()?;
+        let view = views.get(path)?;
+        let diff = numbered_diff(&view.text, text);
+        let content = format!(
+            "changed since you last saw it whole, at SHA-256 {}. The differences, numbered as \
+             the file is now, + added and - removed; every other line is as you saw it. The \
+             file has {} lines. Pass again for lines {}-{} in full.\n{diff}",
+            view.sha256, output.total_lines, output.start_line, output.end_line
+        );
+        (content.len() * 2 < output.content.len()).then_some(content)
+    }
+
+    fn hold(&self, path: &Path, sha256: &str, text: String) {
+        if let Ok(mut views) = self.views.lock() {
+            views.insert(
+                path.to_path_buf(),
+                View {
+                    sha256: sha256.to_owned(),
+                    text,
+                },
+            );
+        }
     }
 
     fn remember_read(&self, path: &Path, span: ReadSpan) {
@@ -686,6 +778,7 @@ impl WorkspaceTools {
 
     fn write_file(&self, arguments: &WriteArguments) -> Result<ToolOutput, ToolError> {
         let path = self.writable(&arguments.path, false)?;
+        let mut previous = None;
         let created = match fs::read(&path) {
             Ok(bytes) => {
                 let found = fingerprint(&bytes);
@@ -703,6 +796,7 @@ impl WorkspaceTools {
                     arguments.expected_sha256.as_deref(),
                     &found,
                 )?;
+                previous = String::from_utf8(bytes).ok();
                 false
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -723,8 +817,14 @@ impl WorkspaceTools {
         };
         write_atomic(&path, arguments.content.as_bytes())?;
         let sha256 = fingerprint(arguments.content.as_bytes());
-        let note = self.notes(&path, &sha256, &arguments.path)?;
+        let rewrite =
+            previous.and_then(|before| rewrite_note(&before, &arguments.content, &arguments.path));
+        let note = match (self.notes(&path, &sha256, &arguments.path)?, rewrite) {
+            (Some(note), Some(rewrite)) => Some(format!("{note} {rewrite}")),
+            (note, rewrite) => note.or(rewrite),
+        };
         self.remember(&path, &sha256);
+        self.hold(&path, &sha256, arguments.content.clone());
         json_output(&WriteOutput {
             note,
             path: self.root.relative(&path)?,
@@ -754,6 +854,9 @@ impl ToolRuntime for WorkspaceTools {
     fn history_lost(&self) {
         if let Ok(mut reads) = self.reads.lock() {
             reads.clear();
+        }
+        if let Ok(mut views) = self.views.lock() {
+            views.clear();
         }
     }
 }
@@ -896,6 +999,70 @@ struct ReadOutput {
     /// The bytes were withheld because this range was already returned.
     #[serde(default, skip_serializing_if = "is_false")]
     repeated: bool,
+    /// The content is the differences from the whole file as last seen.
+    #[serde(default, skip_serializing_if = "is_false")]
+    diff: bool,
+}
+
+/// Lines below which rewriting a file whole costs too little to mention.
+const REWRITE_NOTE_LINES: usize = 30;
+
+/// Says so when a whole-file write changed little enough to have been a patch.
+fn rewrite_note(before: &str, after: &str, shown: &str) -> Option<String> {
+    let total = after.lines().count();
+    if total < REWRITE_NOTE_LINES {
+        return None;
+    }
+    let changed: usize = similar::TextDiff::from_lines(before, after)
+        .ops()
+        .iter()
+        .filter(|op| op.tag() != similar::DiffTag::Equal)
+        .map(|op| op.old_range().len().max(op.new_range().len()))
+        .sum();
+    (changed * 10 < total * 3).then(|| {
+        format!(
+            "this rewrite changed {changed} of the {total} lines of {shown}; apply_patch would \
+             have sent only those. Rewrite a file whole only when most of it changes."
+        )
+    })
+}
+
+/// A whole file as the model last saw it.
+#[derive(Debug)]
+struct View {
+    sha256: String,
+    text: String,
+}
+
+/// Unchanged lines kept either side of a change in a read's diff.
+const DIFF_CONTEXT: usize = 2;
+
+/// `after` as changes to `before`, each line numbered as in `after` so it can
+/// be read like a `read` result. A removed line has no number.
+fn numbered_diff(before: &str, after: &str) -> String {
+    use std::fmt::Write as _;
+
+    let diff = similar::TextDiff::from_lines(before, after);
+    let mut shown = String::new();
+    for (index, group) in diff.grouped_ops(DIFF_CONTEXT).iter().enumerate() {
+        if index > 0 {
+            shown.push_str("      …\n");
+        }
+        for op in group {
+            for change in diff.iter_changes(op) {
+                let text = change.value().strip_suffix('\n').unwrap_or(change.value());
+                let (marker, number) = match change.tag() {
+                    similar::ChangeTag::Equal => (' ', change.new_index()),
+                    similar::ChangeTag::Insert => ('+', change.new_index()),
+                    similar::ChangeTag::Delete => ('-', None),
+                };
+                let number = number.map_or_else(String::new, |number| (number + 1).to_string());
+                writeln!(&mut shown, "{marker}{number:>5}\t{text}")
+                    .expect("writing to a String cannot fail");
+            }
+        }
+    }
+    shown
 }
 
 // `skip_serializing_if` is given a reference.
@@ -1515,8 +1682,8 @@ mod tests {
         assert!(!second["content"].as_str().unwrap().contains("one"));
         assert_eq!(forced["content"], first["content"]);
         assert!(forced.get("repeated").is_none());
-        assert_eq!(other_range["content"], "     2\ttwo\n");
-        assert!(other_range.get("repeated").is_none());
+        // Inside the range already read, so it repeats too.
+        assert_eq!(other_range["repeated"], true);
         assert!(other_file["content"].as_str().unwrap().contains("one"));
         assert!(other_file.get("repeated").is_none());
 
@@ -1524,6 +1691,180 @@ mod tests {
         let changed = read(json!({"path": "src/lib.rs"}));
         assert!(changed.get("repeated").is_none(), "{changed}");
         assert!(changed["content"].as_str().unwrap().contains("three"));
+    }
+
+    #[test]
+    fn only_lines_already_shown_at_these_bytes_repeat() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\ntwo\nthree\nfour\nfive\n");
+        let tools = workspace.tools();
+        let read =
+            |arguments: Value| output_json(&tools.execute_sync(&call("read", arguments)).unwrap());
+
+        read(json!({"path": "src/lib.rs", "start_line": 1, "end_line": 2}));
+        read(json!({"path": "src/lib.rs", "start_line": 3, "end_line": 4}));
+        let joined = read(json!({"path": "src/lib.rs", "start_line": 2, "end_line": 3}));
+        let beyond = read(json!({"path": "src/lib.rs", "start_line": 4, "end_line": 5}));
+
+        assert_eq!(joined["repeated"], true, "{joined}");
+        assert!(beyond.get("repeated").is_none(), "{beyond}");
+        assert_eq!(beyond["content"], "     4\tfour\n     5\tfive\n");
+    }
+
+    #[test]
+    fn lines_cut_by_the_byte_cap_were_not_seen() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "aaaa\nbbbb\ncccc\n");
+        let tools = WorkspaceTools::new(
+            &workspace.path,
+            ToolLimits {
+                max_read_bytes: 26,
+                ..ToolLimits::default()
+            },
+        )
+        .unwrap();
+        let read =
+            |arguments: Value| output_json(&tools.execute_sync(&call("read", arguments)).unwrap());
+
+        let first = read(json!({"path": "src/lib.rs"}));
+        let tail = read(json!({"path": "src/lib.rs", "start_line": 3, "end_line": 3}));
+
+        assert_eq!(first["truncated"], true);
+        assert!(tail.get("repeated").is_none(), "{tail}");
+        assert!(tail["content"].as_str().unwrap().contains("cccc"), "{tail}");
+    }
+
+    fn numbered_lines(count: usize) -> String {
+        use std::fmt::Write as _;
+        (1..=count).fold(String::new(), |mut text, n| {
+            writeln!(&mut text, "line {n}").unwrap();
+            text
+        })
+    }
+
+    #[test]
+    fn a_file_changed_since_it_was_read_whole_comes_back_as_the_differences() {
+        let workspace = TestWorkspace::new();
+        let before = numbered_lines(60);
+        workspace.write("src/lib.rs", &before);
+        let tools = workspace.tools();
+        let read =
+            |arguments: Value| output_json(&tools.execute_sync(&call("read", arguments)).unwrap());
+        read(json!({"path": "src/lib.rs"}));
+
+        workspace.write(
+            "src/lib.rs",
+            &before.replace("line 30\n", "line 30\ninserted\n"),
+        );
+        let changed = read(json!({"path": "src/lib.rs"}));
+        let content = changed["content"].as_str().unwrap();
+
+        assert_eq!(changed["diff"], true, "{changed}");
+        assert_eq!(changed["total_lines"], 61);
+        assert!(content.contains("+   31\tinserted\n"), "{content}");
+        assert!(content.contains("    30\tline 30\n"), "{content}");
+        assert!(content.contains("    32\tline 31\n"), "{content}");
+        assert!(!content.contains("line 10\n"), "{content}");
+        // The model now holds the file as it is.
+        assert_eq!(read(json!({"path": "src/lib.rs"}))["repeated"], true);
+        let forced = read(json!({"path": "src/lib.rs", "again": true}));
+        assert!(forced.get("diff").is_none());
+        assert!(
+            forced["content"]
+                .as_str()
+                .unwrap()
+                .contains("    61\tline 60")
+        );
+    }
+
+    #[test]
+    fn a_patched_file_read_again_shows_what_the_patch_did() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", &numbered_lines(60));
+        let tools = workspace.tools();
+        let run = |name: &str, arguments: Value| {
+            output_json(&tools.execute_sync(&call(name, arguments)).unwrap())
+        };
+        run("read", json!({"path": "src/lib.rs"}));
+        run(
+            "apply_patch",
+            json!({"path": "src/lib.rs", "old_text": "line 7\n", "new_text": "seven\n"}),
+        );
+
+        let after = run("read", json!({"path": "src/lib.rs"}));
+        let content = after["content"].as_str().unwrap();
+
+        assert_eq!(after["diff"], true, "{after}");
+        assert!(content.contains("-     \tline 7\n"), "{content}");
+        assert!(content.contains("+    7\tseven\n"), "{content}");
+    }
+
+    #[test]
+    fn a_small_or_changed_file_is_returned_whole() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\n");
+        workspace.write("src/big.rs", &numbered_lines(60));
+        let tools = workspace.tools();
+        let read =
+            |arguments: Value| output_json(&tools.execute_sync(&call("read", arguments)).unwrap());
+        read(json!({"path": "src/lib.rs"}));
+        read(json!({"path": "src/big.rs"}));
+
+        workspace.write("src/lib.rs", "two\n");
+        workspace.write("src/big.rs", &numbered_lines(60).replace("line ", "row "));
+
+        for path in ["src/lib.rs", "src/big.rs"] {
+            let again = read(json!({"path": path}));
+            assert!(again.get("diff").is_none(), "{again}");
+            assert!(again.get("repeated").is_none(), "{again}");
+        }
+    }
+
+    #[test]
+    fn a_file_the_model_wrote_is_not_returned_to_it() {
+        let workspace = TestWorkspace::new();
+        let tools = workspace.tools();
+        let run = |name: &str, arguments: Value| {
+            output_json(&tools.execute_sync(&call(name, arguments)).unwrap())
+        };
+        run(
+            "write_file",
+            json!({"path": "src/new.rs", "content": "fn a() {}\n"}),
+        );
+
+        let read = run("read", json!({"path": "src/new.rs", "start_line": 1}));
+
+        assert_eq!(read["repeated"], true, "{read}");
+        tools.history_lost();
+        let after = run("read", json!({"path": "src/new.rs"}));
+        assert!(after["content"].as_str().unwrap().contains("fn a()"));
+    }
+
+    #[test]
+    fn a_rewrite_that_changes_little_says_a_patch_would_have_done() {
+        let workspace = TestWorkspace::new();
+        let original = numbered_lines(40);
+        workspace.write("src/lib.rs", &original);
+        workspace.write("src/other.rs", &original);
+        let tools = workspace.tools();
+        let run = |name: &str, arguments: Value| {
+            output_json(&tools.execute_sync(&call(name, arguments)).unwrap())
+        };
+        run("read", json!({"path": "src/lib.rs"}));
+        run("read", json!({"path": "src/other.rs"}));
+
+        let small = run(
+            "write_file",
+            json!({"path": "src/lib.rs", "content": original.replace("line 3\n", "three\n")}),
+        );
+        let large = run(
+            "write_file",
+            json!({"path": "src/other.rs", "content": original.replace("line ", "row ")}),
+        );
+
+        let note = small["note"].as_str().unwrap();
+        assert!(note.contains("changed 1 of the 40 lines"), "{note}");
+        assert!(large.get("note").is_none(), "{large}");
     }
 
     #[test]
