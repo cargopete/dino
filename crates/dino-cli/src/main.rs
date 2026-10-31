@@ -521,7 +521,7 @@ pub(crate) struct Prepared {
     context_full: Arc<std::sync::atomic::AtomicBool>,
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
-    meter: Arc<spend::Meter>,
+    spending: spend::Spending,
 }
 
 impl Prepared {
@@ -531,7 +531,7 @@ impl Prepared {
             settings,
             self.system_prompt.clone(),
             self.definitions.clone(),
-            &self.meter,
+            &self.spending,
         )
     }
 }
@@ -540,10 +540,10 @@ fn metered(
     settings: &RunSettings,
     prompt: String,
     definitions: Vec<ToolDefinition>,
-    meter: &Arc<spend::Meter>,
+    spending: &spend::Spending,
 ) -> Result<Box<dyn ModelSession>> {
     let model = config::build_session(settings, prompt, definitions)?;
-    Ok(Box::new(spend::Metered::new(model, Arc::clone(meter))))
+    Ok(Box::new(spend::Metered::new(model, spending)))
 }
 
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
@@ -589,8 +589,13 @@ fn prepare(
         .extend(start_hook_output(&settings, &sandbox));
     announce_instructions(&context);
     let prompt = system_prompt(&context);
-    let meter = Arc::new(spend::Meter::for_session(session_id.as_str()));
-    let mut model = metered(&settings, prompt.clone(), definitions.clone(), &meter)?;
+    let spending = spend::Spending {
+        meter: Arc::new(spend::Meter::for_session(session_id.as_str())),
+        cap: settings
+            .budget
+            .map(|budget| Arc::new(spend::Cap::new(budget, Box::new(approve::TerminalPurse)))),
+    };
+    let mut model = metered(&settings, prompt.clone(), definitions.clone(), &spending)?;
 
     let log = JsonlSessionLog::create(
         &settings.log_path,
@@ -628,7 +633,7 @@ fn prepare(
     let status = renderer.status_handle();
     if let Ok(mut status) = status.lock() {
         status.answering(&settings.profile);
-        status.meter = Some(Arc::clone(&meter));
+        status.meter = Some(Arc::clone(&spending.meter));
     }
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
@@ -665,7 +670,7 @@ fn prepare(
         context_full,
         status,
         sandbox,
-        meter,
+        spending,
     })
 }
 
@@ -674,7 +679,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
     let base = prepared.settings.clone();
     let prompt = prepared.system_prompt.clone();
     let definitions = prepared.definitions.clone();
-    let meter = Arc::clone(&prepared.meter);
+    let spending = prepared.spending.clone();
     let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
         let mut settings = base.clone();
         settings.profile = config::resolve_profile(Some(key))?;
@@ -683,7 +688,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
             .reasoning_effort
             .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
         let name = settings.profile.display_name.clone();
-        let model = metered(&settings, prompt.clone(), definitions.clone(), &meter)?;
+        let model = metered(&settings, prompt.clone(), definitions.clone(), &spending)?;
         Ok((model, name))
     });
     let inbox = dino_core::Inbox::default();
@@ -693,7 +698,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         typed_ahead: String::new(),
         usage: prepared.usage,
         requests: prepared.requests,
-        meter: Arc::clone(&prepared.meter),
+        meter: Arc::clone(&prepared.spending.meter),
         factory,
         model_key: prepared.settings.profile.key.clone(),
         workspace_root: prepared.settings.workspace.clone(),
@@ -717,7 +722,10 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
     session.run().await?;
     eprintln!(
         "{}",
-        style::paint(style::FAINT, &format!("  {}", prepared.meter.closing()))
+        style::paint(
+            style::FAINT,
+            &format!("  {}", prepared.spending.meter.closing())
+        )
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -835,7 +843,10 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         .await;
         eprintln!(
             "{}",
-            style::paint(style::FAINT, &format!("  {}", prepared.meter.closing()))
+            style::paint(
+                style::FAINT,
+                &format!("  {}", prepared.spending.meter.closing())
+            )
         );
         return Ok(match ended? {
             handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
@@ -856,7 +867,10 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     let result = prepared.agent.run_cancellable(request, &cancel).await;
     eprintln!(
         "{}",
-        style::paint(style::FAINT, &format!("  {}", prepared.meter.closing()))
+        style::paint(
+            style::FAINT,
+            &format!("  {}", prepared.spending.meter.closing())
+        )
     );
     let result = result?;
     save_state(&prepared.agent, &prepared.state_path)?;
@@ -922,6 +936,7 @@ struct Resolved {
     reasoning_effort: (Option<dino_protocol::ReasoningEffort>, Source),
     auto_compact: bool,
     fallback: Vec<String>,
+    budget: Option<spend::Budget>,
     hooks: (Vec<dino_exec::Hook>, Source),
     end_turn_hooks: Vec<dino_exec::Hook>,
     start_hooks: Vec<dino_exec::Hook>,
@@ -1028,6 +1043,7 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
             .pick_user_only(|file| file.fallback.clone())
             .map(|(fallback, _)| fallback.keys())
             .unwrap_or_default(),
+        budget: layers.budget()?,
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
@@ -1067,6 +1083,21 @@ fn reasoning_effort(
             .pick(|file| file.reasoning_effort.map(Some))
             .unwrap_or((None, Source::Default)),
     }
+}
+
+fn budget_row(budget: Option<spend::Budget>) -> String {
+    let Some(budget) = budget else {
+        return "none".to_owned();
+    };
+    let each = [("a session", budget.session), ("a day", budget.daily)]
+        .into_iter()
+        .filter_map(|(per, usd)| Some(format!("{} {per}", spend::usd(usd?))))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{each}, warned at {:.0}%  (user file)",
+        budget.warn_at * 100.0
+    )
 }
 
 fn listed(paths: &[PathBuf]) -> String {
@@ -1176,6 +1207,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
             show(resolved.plain.0.to_string(), resolved.plain.1),
         ),
         ("fallback", fallback),
+        ("budget", budget_row(resolved.budget)),
         (
             "project file",
             file_named(resolved.layers.project_path.as_ref()),
@@ -1229,6 +1261,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         reasoning_effort: resolved.reasoning_effort.0,
         plain: resolved.plain.0,
         fallback,
+        budget: resolved.budget,
     })
 }
 

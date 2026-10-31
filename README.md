@@ -472,7 +472,11 @@ cost. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost
 when it ends, along with today's total in UTC, which every session appends to
 `$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).
-Evals do not.
+Evals do not. A `[budget]` table in the user file, with `session_usd`,
+`daily_usd` or both, warns once at `warn_at` of either (0.8 unless set) and,
+when one is spent, asks before the next request; yes carries on as far again,
+and with nobody at the terminal the run stops. Evals ignore it; `dino eval
+--max-usd` stops a corpus at a ceiling of its own.
 `/compact` asks the model for a structured summary, with changes gated off,
 starts a fresh conversation and puts the summary ahead of your next message;
 the old conversation stays resumable in full. `auto_compact = true` in a config

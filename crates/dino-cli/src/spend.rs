@@ -3,6 +3,9 @@
 //! Priced as each response arrives rather than by the renderer, because a
 //! fallback can change the model partway through a submission and only the
 //! session knows which one answered.
+//!
+//! A budget is checked before each request, so a session that reaches one
+//! stops before spending more rather than after.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -172,15 +175,130 @@ impl Ledger {
     }
 }
 
+/// Optional ceilings in USD at list price, from the user's config.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Budget {
+    pub session: Option<f64>,
+    pub daily: Option<f64>,
+    /// The share of a budget at which a person is warned, once.
+    pub warn_at: f64,
+}
+
+/// Who is told a budget is running out, and asked once it has.
+pub trait Purse: Send + Sync {
+    fn warn(&self, message: &str);
+    /// Whether to go on spending past `message`'s budget.
+    fn approve(&self, message: &str) -> bool;
+}
+
+/// A budget being enforced. Approval to go past one raises it by its own
+/// amount, so a session that carries on is asked again rather than never.
+pub struct Cap {
+    budget: Budget,
+    state: Mutex<CapState>,
+    purse: Box<dyn Purse>,
+}
+
+#[derive(Debug, Default)]
+struct CapState {
+    session: Option<f64>,
+    daily: Option<f64>,
+    warned_session: bool,
+    warned_daily: bool,
+}
+
+impl Cap {
+    #[must_use]
+    pub fn new(budget: Budget, purse: Box<dyn Purse>) -> Self {
+        Self {
+            budget,
+            state: Mutex::new(CapState {
+                session: budget.session,
+                daily: budget.daily,
+                ..CapState::default()
+            }),
+            purse,
+        }
+    }
+
+    /// Lets the next request go, or says which budget stopped it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sentence the run ends with when a budget is spent and the
+    /// person did not approve going on.
+    pub fn admit(&self, meter: &Meter) -> Result<(), String> {
+        let session = meter.spent().usd;
+        // Without a ledger the day is known only to be at least this session.
+        let today = meter.today().unwrap_or(session).max(session);
+        let Ok(mut state) = self.state.lock() else {
+            return Ok(());
+        };
+        let state = &mut *state;
+        for (what, used, limit, step, warned) in [
+            (
+                "this session",
+                session,
+                &mut state.session,
+                self.budget.session,
+                &mut state.warned_session,
+            ),
+            (
+                "today (UTC)",
+                today,
+                &mut state.daily,
+                self.budget.daily,
+                &mut state.warned_daily,
+            ),
+        ] {
+            let (Some(cap), Some(step)) = (*limit, step) else {
+                continue;
+            };
+            if used >= cap {
+                let message = format!(
+                    "{what} has spent {} of a {} budget at list price",
+                    usd(used),
+                    usd(cap)
+                );
+                if !self.purse.approve(&message) {
+                    return Err(format!("stopped: {message}"));
+                }
+                *limit = Some(cap + step);
+                *warned = false;
+            } else if used >= cap * self.budget.warn_at && !*warned {
+                *warned = true;
+                self.purse.warn(&format!(
+                    "{what} has spent {} of a {} budget at list price",
+                    usd(used),
+                    usd(cap)
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One session's meter and budget, shared by every model it switches to.
+#[derive(Clone)]
+pub struct Spending {
+    pub meter: Arc<Meter>,
+    pub cap: Option<Arc<Cap>>,
+}
+
 /// A session whose responses are priced as they arrive.
 pub struct Metered<S> {
     inner: S,
     meter: Arc<Meter>,
+    cap: Option<Arc<Cap>>,
 }
 
 impl<S> Metered<S> {
-    pub fn new(inner: S, meter: Arc<Meter>) -> Self {
-        Self { inner, meter }
+    pub fn new(inner: S, spending: &Spending) -> Self {
+        Self {
+            inner,
+            meter: Arc::clone(&spending.meter),
+            cap: spending.cap.clone(),
+        }
     }
 }
 
@@ -191,6 +309,14 @@ impl<S: ModelSession> ModelSession for Metered<S> {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
+            if let Some(cap) = &self.cap {
+                let (cap, meter) = (Arc::clone(cap), Arc::clone(&self.meter));
+                // The person may be asked, which blocks on the terminal.
+                tokio::task::spawn_blocking(move || cap.admit(&meter))
+                    .await
+                    .map_err(|error| ModelError::Configuration(error.to_string()))?
+                    .map_err(ModelError::Account)?;
+            }
             let stream = self.inner.next(input).await?;
             // Read after the call, which is when a fallback has chosen its model.
             let model = self.inner.profile().key.clone();
@@ -298,6 +424,169 @@ mod tests {
         assert!((second.spent().usd - 1.0).abs() < 1e-9);
         assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 4);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct Asked {
+        answer: bool,
+        said: Mutex<Vec<String>>,
+    }
+
+    impl Purse for Arc<Asked> {
+        fn warn(&self, message: &str) {
+            self.said.lock().unwrap().push(format!("warn: {message}"));
+        }
+
+        fn approve(&self, message: &str) -> bool {
+            self.said.lock().unwrap().push(format!("ask: {message}"));
+            self.answer
+        }
+    }
+
+    fn capped(budget: Budget, answer: bool) -> (Cap, Arc<Asked>) {
+        let asked = Arc::new(Asked {
+            answer,
+            said: Mutex::new(Vec::new()),
+        });
+        (Cap::new(budget, Box::new(Arc::clone(&asked))), asked)
+    }
+
+    /// A dollar of input at Kimi's price.
+    fn spend_a_dollar(meter: &Meter) {
+        meter.record(
+            "kimi-k3.1-pro",
+            Some(Pricing::new(2.0, 0.2, 10.0)),
+            &usage(500_000, 0, 0),
+        );
+    }
+
+    #[test]
+    fn a_session_budget_warns_once_then_asks_and_stops_when_refused() {
+        let meter = Meter::new(None);
+        let budget = Budget {
+            session: Some(2.0),
+            daily: None,
+            warn_at: 0.5,
+        };
+        let (cap, asked) = capped(budget, false);
+
+        assert_eq!(cap.admit(&meter), Ok(()));
+        spend_a_dollar(&meter);
+        assert_eq!(cap.admit(&meter), Ok(()));
+        assert_eq!(cap.admit(&meter), Ok(()));
+        spend_a_dollar(&meter);
+        let stopped = cap.admit(&meter).unwrap_err();
+
+        assert_eq!(
+            *asked.said.lock().unwrap(),
+            [
+                "warn: this session has spent $1.00 of a $2.00 budget at list price",
+                "ask: this session has spent $2.00 of a $2.00 budget at list price",
+            ]
+        );
+        assert!(stopped.starts_with("stopped: this session"), "{stopped}");
+    }
+
+    #[test]
+    fn approval_raises_a_budget_by_its_own_amount() {
+        let meter = Meter::new(None);
+        let budget = Budget {
+            session: Some(1.0),
+            daily: None,
+            warn_at: 1.0,
+        };
+        let (cap, asked) = capped(budget, true);
+
+        spend_a_dollar(&meter);
+        assert_eq!(cap.admit(&meter), Ok(()));
+        assert_eq!(cap.admit(&meter), Ok(()));
+        spend_a_dollar(&meter);
+        assert_eq!(cap.admit(&meter), Ok(()));
+
+        let said = asked.said.lock().unwrap();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[1].contains("$2.00 of a $2.00"), "{said:?}");
+    }
+
+    #[test]
+    fn the_daily_budget_counts_other_sessions_in_the_ledger() {
+        let dir = state_dir("daily");
+        let earlier = Meter::new(Some(Ledger::new(&dir, "earlier")));
+        spend_a_dollar(&earlier);
+        spend_a_dollar(&earlier);
+        let meter = Meter::new(Some(Ledger::new(&dir, "now")));
+        let budget = Budget {
+            session: Some(10.0),
+            daily: Some(2.0),
+            warn_at: 0.8,
+        };
+        let (cap, asked) = capped(budget, false);
+
+        let stopped = cap.admit(&meter).unwrap_err();
+
+        assert!(stopped.contains("today (UTC) has spent $2.00"), "{stopped}");
+        assert_eq!(asked.said.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Answers every request with one dollar of Kimi input.
+    struct Dollars {
+        profile: ModelProfile,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ModelSession for Dollars {
+        fn profile(&self) -> &ModelProfile {
+            &self.profile
+        }
+
+        fn next(&mut self, _input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            let event = ModelEvent::Usage {
+                usage: usage(500_000, 0, 0),
+            };
+            Box::pin(async move {
+                Ok(Box::pin(futures_util::stream::iter([Ok(event)])) as ModelEventStream)
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_budget_sends_no_further_request() {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (cap, _) = capped(
+            Budget {
+                session: Some(2.0),
+                daily: None,
+                warn_at: 1.0,
+            },
+            false,
+        );
+        let spending = Spending {
+            meter: Arc::new(Meter::new(None)),
+            cap: Some(Arc::new(cap)),
+        };
+        let mut session = Metered::new(
+            Dollars {
+                profile: dino_model::builtin_profile("kimi-k3.1-pro").unwrap(),
+                requests: Arc::clone(&requests),
+            },
+            &spending,
+        );
+        let ask = || TurnInput::User {
+            content: "go on".into(),
+        };
+
+        for _ in 0..2 {
+            let stream = session.next(ask()).await.unwrap();
+            let _: Vec<_> = stream.collect().await;
+        }
+        let Err(error) = session.next(ask()).await else {
+            panic!("the budget is spent");
+        };
+
+        assert!(matches!(error, ModelError::Account(_)), "{error}");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!((spending.meter.spent().usd - 2.0).abs() < 1e-9);
     }
 
     #[test]

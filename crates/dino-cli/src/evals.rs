@@ -101,6 +101,10 @@ pub struct EvalArgs {
     /// GPU hire, in USD per hour of wall time.
     #[arg(long)]
     pub dollars_per_hour: Option<f64>,
+    /// Stop the corpus once its runs have cost this much at the model's list
+    /// price, cancelling those in flight. The config budgets never apply here.
+    #[arg(long)]
+    pub max_usd: Option<f64>,
     /// Score each case's untouched workspace and its reference solution, with
     /// no model, and fail unless every floor is under 10 and every ceiling 95
     /// or more. RFC-0019 section 5.
@@ -202,6 +206,7 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     let mut cases = select(&args)?;
     apply_wall(&mut cases, args.max_wall_secs)?;
     let rate = run_rate(&args)?;
+    let ceiling = ceiling(&args, profile.as_ref())?;
     let scratch = match &args.scratch {
         Some(path) => path.clone(),
         None => std::env::temp_dir().join(format!("dino-evals-{}", std::process::id())),
@@ -239,14 +244,35 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
         .map(|(trial, case)| run_one(&args, profile.as_ref(), &scratch, trials, trial, case));
     let mut outcomes = Vec::with_capacity(cases.len());
     let mut finished = std::pin::pin!(scheduled(runs, args.jobs));
+    let mut spent = 0.0;
+    let mut cut_short = false;
     while let Some(outcome) = finished.next().await {
-        outcomes.push(record(outcome?, rate.as_ref(), args.json));
+        let outcome = record(outcome?, rate.as_ref(), args.json);
+        if let Some((limit, price)) = ceiling {
+            spent += price.cost(&outcome.metrics.tokens);
+            cut_short = spent >= limit;
+        }
+        outcomes.push(outcome);
+        if cut_short {
+            eprintln!(
+                "{}",
+                style::paint(
+                    WARN,
+                    &format!(
+                        "  stopped after {} run(s): {} spent at list price, past --max-usd",
+                        outcomes.len(),
+                        crate::spend::usd(spent)
+                    )
+                )
+            );
+            break;
+        }
     }
 
     report(&args, &label, trials, &cases, &outcomes)?;
 
     let failed = outcomes.iter().filter(|outcome| !outcome.passed).count();
-    Ok(if failed == 0 {
+    Ok(if failed == 0 && !cut_short {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -345,6 +371,23 @@ fn report(
     Ok(())
 }
 
+/// The `--max-usd` ceiling and the price it is counted at.
+fn ceiling(
+    args: &EvalArgs,
+    profile: Option<&dino_protocol::ModelProfile>,
+) -> Result<Option<(f64, dino_protocol::Pricing)>> {
+    let Some(limit) = args.max_usd else {
+        return Ok(None);
+    };
+    if !(limit.is_finite() && limit > 0.0) {
+        bail!("--max-usd must be a number of dollars above zero");
+    }
+    match profile.and_then(|profile| profile.price) {
+        Some(price) => Ok(Some((limit, price))),
+        None => bail!("--max-usd needs a dino model with a list price in its profile"),
+    }
+}
+
 fn run_rate(args: &EvalArgs) -> Result<Option<RunRate>> {
     dino_eval::parse_rate(
         args.usd_per_million_in,
@@ -433,6 +476,7 @@ fn eval_settings(
         reasoning_effort: args.effort,
         plain: args.plain,
         fallback: Vec::new(),
+        budget: None,
     }
 }
 
@@ -794,6 +838,31 @@ mod tests {
         });
         let order = scheduled(runs, jobs).collect().await;
         (order, peak.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn the_spending_ceiling_needs_dollars_and_a_listed_price() {
+        #[derive(clap::Parser)]
+        struct Line {
+            #[command(flatten)]
+            args: super::EvalArgs,
+        }
+        let ceiling = |flags: &[&str], model: &str| {
+            let line = <Line as clap::Parser>::try_parse_from(
+                std::iter::once("eval").chain(flags.iter().copied()),
+            )
+            .unwrap();
+            let profile = dino_model::builtin_profile(model).unwrap();
+            super::ceiling(&line.args, Some(&profile)).map(|found| found.map(|(limit, _)| limit))
+        };
+
+        assert_eq!(ceiling(&[], "kimi-k3.1-pro").unwrap(), None);
+        assert_eq!(
+            ceiling(&["--max-usd", "5"], "kimi-k3.1-pro").unwrap(),
+            Some(5.0)
+        );
+        assert!(ceiling(&["--max-usd", "0"], "kimi-k3.1-pro").is_err());
+        assert!(ceiling(&["--max-usd", "5"], "qwen3-8b").is_err());
     }
 
     #[tokio::test]
