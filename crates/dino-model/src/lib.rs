@@ -6,6 +6,7 @@ use std::pin::Pin;
 use dino_protocol::ChatServer;
 use dino_protocol::ModelEvent;
 use dino_protocol::ModelProfile;
+use dino_protocol::Pricing;
 use dino_protocol::ProfileStatus;
 use dino_protocol::ProviderKind;
 use dino_protocol::ReasoningEffort;
@@ -369,6 +370,7 @@ fn terra() -> ModelProfile {
         reasoning_parser: None,
         sampling: None,
         chat_server: ChatServer::Vllm,
+        price: None,
     }
 }
 
@@ -378,6 +380,7 @@ fn terra_6_1() -> ModelProfile {
         key: "terra-6.1".into(),
         provider_model: "gpt-6.1-terra".into(),
         display_name: "GPT-6.1 Terra".into(),
+        price: Some(Pricing::new(1.00, 0.05, 5.00)),
         ..terra()
     }
 }
@@ -392,6 +395,7 @@ fn claude_opus_5_5() -> ModelProfile {
         provider_model: "claude-opus-5-5".into(),
         display_name: "Claude Opus 5.5".into(),
         status: ProfileStatus::Development,
+        price: Some(Pricing::new(4.00, 0.20, 20.00)),
         ..claude_opus()
     }
 }
@@ -404,6 +408,7 @@ fn claude_sonnet_5_5() -> ModelProfile {
         provider_model: "claude-sonnet-5-5".into(),
         display_name: "Claude Sonnet 5.5".into(),
         status: ProfileStatus::Development,
+        price: Some(Pricing::new(2.00, 0.20, 10.00)),
         ..claude_sonnet()
     }
 }
@@ -417,6 +422,7 @@ fn claude_haiku_5_5() -> ModelProfile {
         provider_model: "claude-haiku-5-5".into(),
         display_name: "Claude Haiku 5.5".into(),
         status: ProfileStatus::Development,
+        price: Some(Pricing::new(0.10, 0.01, 0.50)),
         ..claude_sonnet()
     }
 }
@@ -443,6 +449,7 @@ fn claude_opus() -> ModelProfile {
         reasoning_parser: None,
         sampling: None,
         chat_server: ChatServer::Vllm,
+        price: None,
     }
 }
 
@@ -473,6 +480,7 @@ fn claude_sonnet() -> ModelProfile {
         reasoning_parser: None,
         sampling: None,
         chat_server: ChatServer::Vllm,
+        price: None,
     }
 }
 
@@ -545,6 +553,7 @@ fn qwen_coder(
         reasoning_parser: None,
         sampling,
         chat_server: ChatServer::Vllm,
+        price: None,
     }
 }
 
@@ -576,6 +585,7 @@ fn qwen_3_8_27b() -> ModelProfile {
         reasoning_parser: Some("qwen3".into()),
         sampling: None,
         chat_server: ChatServer::Vllm,
+        price: None,
     }
 }
 
@@ -599,6 +609,7 @@ fn dashscope(key: &str, display_name: &str, window: u32, image_input: bool) -> M
         reasoning_parser: None,
         sampling: None,
         chat_server: ChatServer::DashScope,
+        price: None,
     }
 }
 
@@ -611,7 +622,10 @@ fn qwen_3_8_max() -> ModelProfile {
 }
 
 fn qwen_3_7_max() -> ModelProfile {
-    dashscope("qwen3.7-max", "Qwen3.7-Max", 262_144, false)
+    ModelProfile {
+        price: Some(Pricing::new(2.50, 0.50, 7.50)),
+        ..dashscope("qwen3.7-max", "Qwen3.7-Max", 262_144, false)
+    }
 }
 
 fn deepseek_v4_pro() -> ModelProfile {
@@ -632,6 +646,7 @@ fn kimi_k3_1_pro() -> ModelProfile {
             ReasoningEffort::High,
         ]),
         chat_server: ChatServer::Moonshot,
+        price: Some(Pricing::new(2.00, 0.20, 10.00)),
         ..dashscope("kimi-k3.1-pro", "", 1_048_576, true)
     }
 }
@@ -639,6 +654,10 @@ fn kimi_k3_1_pro() -> ModelProfile {
 fn grok_4_7() -> ModelProfile {
     ModelProfile {
         display_name: "Grok 4.7 (xAI)".into(),
+        price: Some(Pricing {
+            reasoning_beside_output: true,
+            ..Pricing::new(2.00, 0.50, 6.00)
+        }),
         ..dashscope("grok-4.7", "", 500_000, false)
     }
 }
@@ -683,6 +702,7 @@ fn qwen3_8b() -> ModelProfile {
             repetition_penalty: Some(1.0),
         }),
         chat_server: ChatServer::Vllm,
+        price: None,
     }
 }
 
@@ -709,6 +729,7 @@ fn qwen_3_6(key: &str, provider_model: &str, display_name: &str) -> ModelProfile
             repetition_penalty: Some(1.0),
         }),
         chat_server: ChatServer::Vllm,
+        price: None,
     }
 }
 
@@ -756,6 +777,34 @@ mod tests {
         assert_eq!(unique_keys.len(), all.len());
         assert_eq!(all.len(), 21);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
+    }
+
+    #[test]
+    fn list_prices_live_with_the_profiles_they_were_checked_for() {
+        let priced: Vec<(String, f64, f64, f64)> = builtin_profiles()
+            .into_iter()
+            .filter_map(|profile| {
+                let price = profile.price?;
+                Some((profile.key, price.input, price.cached_input, price.output))
+            })
+            .collect();
+        let expected = [
+            ("terra-6.1", 1.00, 0.05, 5.00),
+            ("claude-opus-5.5", 4.00, 0.20, 20.00),
+            ("claude-sonnet-5.5", 2.00, 0.20, 10.00),
+            ("claude-haiku-5.5", 0.10, 0.01, 0.50),
+            ("qwen3.7-max", 2.50, 0.50, 7.50),
+            ("kimi-k3.1-pro", 2.00, 0.20, 10.00),
+            ("grok-4.7", 2.00, 0.50, 6.00),
+        ]
+        .map(|(key, input, cached, output)| (key.to_owned(), input, cached, output));
+        assert_eq!(priced, expected);
+        for profile in builtin_profiles() {
+            let beside = profile
+                .price
+                .is_some_and(|price| price.reasoning_beside_output);
+            assert_eq!(beside, profile.key == "grok-4.7", "{}", profile.key);
+        }
     }
 
     #[test]

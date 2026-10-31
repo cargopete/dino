@@ -14,6 +14,7 @@ mod render;
 mod replay;
 mod session;
 mod settings;
+mod spend;
 mod spinner;
 mod style;
 mod summary;
@@ -520,10 +521,46 @@ pub(crate) struct Prepared {
     context_full: Arc<std::sync::atomic::AtomicBool>,
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
+    meter: Arc<spend::Meter>,
+}
+
+impl Prepared {
+    /// A fresh session for `settings`, priced into the same meter.
+    pub(crate) fn build_session(&self, settings: &RunSettings) -> Result<Box<dyn ModelSession>> {
+        metered(
+            settings,
+            self.system_prompt.clone(),
+            self.definitions.clone(),
+            &self.meter,
+        )
+    }
+}
+
+fn metered(
+    settings: &RunSettings,
+    prompt: String,
+    definitions: Vec<ToolDefinition>,
+    meter: &Arc<spend::Meter>,
+) -> Result<Box<dyn ModelSession>> {
+    let model = config::build_session(settings, prompt, definitions)?;
+    Ok(Box::new(spend::Metered::new(model, Arc::clone(meter))))
 }
 
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
 /// build back to.
+fn warn_unprotected(settings: &RunSettings, sandbox: &dyn Sandbox) {
+    if !settings.protected.is_empty() && !sandbox.protects_paths() {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                "protected paths are refused to the file tools only: this sandbox cannot \
+                 stop a process writing them"
+            )
+        );
+    }
+}
+
 fn prepare(
     common: &CommonArgs,
     unattended: bool,
@@ -538,16 +575,7 @@ fn prepare(
     let sandbox =
         config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
     let sandbox_label = sandbox.label();
-    if !settings.protected.is_empty() && !sandbox.protects_paths() {
-        eprintln!(
-            "{}",
-            style::paint(
-                style::WARN,
-                "protected paths are refused to the file tools only: this sandbox cannot \
-                 stop a process writing them"
-            )
-        );
-    }
+    warn_unprotected(&settings, sandbox.as_ref());
     let tools = session_tool_set(&settings, &sandbox, extra)?;
     let definitions = tools.definitions();
     let mut context = prompt_context(
@@ -561,7 +589,8 @@ fn prepare(
         .extend(start_hook_output(&settings, &sandbox));
     announce_instructions(&context);
     let prompt = system_prompt(&context);
-    let mut model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
+    let meter = Arc::new(spend::Meter::for_session(session_id.as_str()));
+    let mut model = metered(&settings, prompt.clone(), definitions.clone(), &meter)?;
 
     let log = JsonlSessionLog::create(
         &settings.log_path,
@@ -599,6 +628,7 @@ fn prepare(
     let status = renderer.status_handle();
     if let Ok(mut status) = status.lock() {
         status.answering(&settings.profile);
+        status.meter = Some(Arc::clone(&meter));
     }
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
@@ -635,6 +665,7 @@ fn prepare(
         context_full,
         status,
         sandbox,
+        meter,
     })
 }
 
@@ -643,6 +674,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
     let base = prepared.settings.clone();
     let prompt = prepared.system_prompt.clone();
     let definitions = prepared.definitions.clone();
+    let meter = Arc::clone(&prepared.meter);
     let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
         let mut settings = base.clone();
         settings.profile = config::resolve_profile(Some(key))?;
@@ -651,7 +683,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
             .reasoning_effort
             .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
         let name = settings.profile.display_name.clone();
-        let model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
+        let model = metered(&settings, prompt.clone(), definitions.clone(), &meter)?;
         Ok((model, name))
     });
     let inbox = dino_core::Inbox::default();
@@ -661,6 +693,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         typed_ahead: String::new(),
         usage: prepared.usage,
         requests: prepared.requests,
+        meter: Arc::clone(&prepared.meter),
         factory,
         model_key: prepared.settings.profile.key.clone(),
         workspace_root: prepared.settings.workspace.clone(),
@@ -682,6 +715,10 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         state_path: prepared.state_path,
     };
     session.run().await?;
+    eprintln!(
+        "{}",
+        style::paint(style::FAINT, &format!("  {}", prepared.meter.closing()))
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -788,33 +825,40 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     });
 
     if let Some(progress) = &progress {
-        return Ok(
-            match handover::run(
-                &mut prepared,
-                progress,
-                &request,
-                args.session_turns,
-                &cancel,
-            )
-            .await?
-            {
-                handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
-                handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
-                handover::Ended::Stalled => {
-                    eprintln!(
-                        "{}",
-                        style::paint(
-                            style::FAINT,
-                            "  stopped: two sessions in a row ended with the plan unfinished"
-                        )
-                    );
-                    ExitCode::FAILURE
-                }
-                _ => ExitCode::FAILURE,
-            },
+        let ended = handover::run(
+            &mut prepared,
+            progress,
+            &request,
+            args.session_turns,
+            &cancel,
+        )
+        .await;
+        eprintln!(
+            "{}",
+            style::paint(style::FAINT, &format!("  {}", prepared.meter.closing()))
         );
+        return Ok(match ended? {
+            handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
+            handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
+            handover::Ended::Stalled => {
+                eprintln!(
+                    "{}",
+                    style::paint(
+                        style::FAINT,
+                        "  stopped: two sessions in a row ended with the plan unfinished"
+                    )
+                );
+                ExitCode::FAILURE
+            }
+            _ => ExitCode::FAILURE,
+        });
     }
-    let result = prepared.agent.run_cancellable(request, &cancel).await?;
+    let result = prepared.agent.run_cancellable(request, &cancel).await;
+    eprintln!(
+        "{}",
+        style::paint(style::FAINT, &format!("  {}", prepared.meter.closing()))
+    );
+    let result = result?;
     save_state(&prepared.agent, &prepared.state_path)?;
     Ok(match result.stop_reason {
         StopReason::EndTurn => ExitCode::SUCCESS,
