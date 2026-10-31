@@ -134,7 +134,8 @@ impl WorkspaceTools {
                 description: "Read a bounded range from a UTF-8 file in the workspace. Lines \
                               you have already seen, unchanged, return a note instead of the \
                               bytes, and a file changed since you last saw it whole may return \
-                              only the differences; pass again for the full text."
+                              only the differences; pass again for the full text. Read the \
+                              files you need together, one call each in the same response."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -202,7 +203,9 @@ impl WorkspaceTools {
                               old_text with new_text, or several replacements at once in edits. \
                               Each old_text must occur exactly once in the file as it was before \
                               the call, unless the same edit is given once for each occurrence, \
-                              and edits may not overlap."
+                              and edits may not overlap. Related changes to other files go in \
+                              the same response, one call per file, and the test that checks \
+                              them can follow in it too: calls run in the order sent."
                     .into(),
                 input_schema: json!({
                     "type": "object",

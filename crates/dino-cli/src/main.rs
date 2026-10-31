@@ -5,6 +5,7 @@ mod calls;
 mod config;
 mod diff;
 mod evals;
+mod greeting;
 mod handover;
 mod listen;
 mod markdown;
@@ -14,6 +15,7 @@ mod render;
 mod replay;
 mod session;
 mod settings;
+mod spend;
 mod spinner;
 mod style;
 mod summary;
@@ -100,6 +102,8 @@ enum Command {
     Config(PromptArgs),
     /// Print a past session from its log.
     Replay(crate::replay::ReplayArgs),
+    /// Show the palette and the opening drawing as this terminal draws them.
+    Palette,
 }
 
 // These are switches rather than a state machine because each one means one
@@ -142,6 +146,10 @@ struct CommonArgs {
     /// when absent.
     #[arg(long)]
     no_thinking: bool,
+    /// Reasoning effort for a model that offers a choice: none, low, medium,
+    /// high, xhigh or max. Leaves the provider's default when absent.
+    #[arg(long)]
+    effort: Option<dino_protocol::ReasoningEffort>,
     /// Continue a previous session. Bare, the most recent in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
@@ -228,6 +236,11 @@ fn dispatch() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Replay(args)) => replay::run(&args),
+        Some(Command::Palette) => {
+            style::enable(false);
+            print!("{}", greeting::palette());
+            Ok(ExitCode::SUCCESS)
+        }
         None => on_runtime(session(cli.common)),
     }
 }
@@ -516,10 +529,83 @@ pub(crate) struct Prepared {
     context_full: Arc<std::sync::atomic::AtomicBool>,
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
+    spending: spend::Spending,
+}
+
+impl Prepared {
+    /// A fresh session for `settings`, priced into the same meter.
+    pub(crate) fn build_session(&self, settings: &RunSettings) -> Result<Box<dyn ModelSession>> {
+        metered(
+            settings,
+            self.system_prompt.clone(),
+            self.definitions.clone(),
+            &self.spending,
+        )
+    }
+}
+
+fn metered(
+    settings: &RunSettings,
+    prompt: String,
+    definitions: Vec<ToolDefinition>,
+    spending: &spend::Spending,
+) -> Result<Box<dyn ModelSession>> {
+    let model = config::build_session(settings, prompt, definitions)?;
+    Ok(Box::new(spend::Metered::new(model, spending)))
+}
+
+/// `agent` with what must hold before it ends a run: the finish checks, and
+/// the review when one is configured.
+fn guarded(
+    agent: Agent<Box<dyn ModelSession>, ToolSet>,
+    settings: &RunSettings,
+    sandbox: &Arc<dyn Sandbox>,
+    unattended: bool,
+    spending: &spend::Spending,
+) -> Result<Agent<Box<dyn ModelSession>, ToolSet>> {
+    let checks = finish_checks(settings, sandbox, unattended)?;
+    let agent = if checks.is_empty() {
+        agent
+    } else {
+        agent.with_finish_check(dino_core::FirstUnfinished::new(checks))
+    };
+    Ok(match &settings.review {
+        Some(review) => agent.with_reviewer(Arc::new(dino_core::review::Reviewer::new(
+            settings.workspace.clone(),
+            review_sessions(settings, review, spending)?,
+        ))),
+        None => agent,
+    })
+}
+
+/// The reviewer's sessions, priced into the session's meter.
+fn review_sessions(
+    settings: &RunSettings,
+    review: &dino_protocol::ModelProfile,
+    spending: &spend::Spending,
+) -> Result<dino_core::review::OpenSession> {
+    let settings = config::review_settings(settings, review)?;
+    let spending = spending.clone();
+    Ok(Box::new(move |system| {
+        metered(&settings, system, Vec::new(), &spending).map_err(|error| error.to_string())
+    }))
 }
 
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
 /// build back to.
+fn warn_unprotected(settings: &RunSettings, sandbox: &dyn Sandbox) {
+    if !settings.protected.is_empty() && !sandbox.protects_paths() {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                "protected paths are refused to the file tools only: this sandbox cannot \
+                 stop a process writing them"
+            )
+        );
+    }
+}
+
 fn prepare(
     common: &CommonArgs,
     unattended: bool,
@@ -534,16 +620,7 @@ fn prepare(
     let sandbox =
         config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
     let sandbox_label = sandbox.label();
-    if !settings.protected.is_empty() && !sandbox.protects_paths() {
-        eprintln!(
-            "{}",
-            style::paint(
-                style::WARN,
-                "protected paths are refused to the file tools only: this sandbox cannot \
-                 stop a process writing them"
-            )
-        );
-    }
+    warn_unprotected(&settings, sandbox.as_ref());
     let tools = session_tool_set(&settings, &sandbox, extra)?;
     let definitions = tools.definitions();
     let mut context = prompt_context(
@@ -557,7 +634,13 @@ fn prepare(
         .extend(start_hook_output(&settings, &sandbox));
     announce_instructions(&context);
     let prompt = system_prompt(&context);
-    let mut model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
+    let spending = spend::Spending {
+        meter: Arc::new(spend::Meter::for_session(session_id.as_str())),
+        cap: settings
+            .budget
+            .map(|budget| Arc::new(spend::Cap::new(budget, Box::new(approve::TerminalPurse)))),
+    };
+    let mut model = metered(&settings, prompt.clone(), definitions.clone(), &spending)?;
 
     let log = JsonlSessionLog::create(
         &settings.log_path,
@@ -595,6 +678,7 @@ fn prepare(
     let status = renderer.status_handle();
     if let Ok(mut status) = status.lock() {
         status.answering(&settings.profile);
+        status.meter = Some(Arc::clone(&spending.meter));
     }
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
@@ -610,12 +694,7 @@ fn prepare(
         Arc::clone(&planning),
     ))
     .with_sink((renderer, log));
-    let checks = finish_checks(&settings, &sandbox, unattended)?;
-    let agent = if checks.is_empty() {
-        agent
-    } else {
-        agent.with_finish_check(dino_core::FirstUnfinished::new(checks))
-    };
+    let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
 
     Ok(Prepared {
         agent,
@@ -631,6 +710,7 @@ fn prepare(
         context_full,
         status,
         sandbox,
+        spending,
     })
 }
 
@@ -639,11 +719,16 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
     let base = prepared.settings.clone();
     let prompt = prepared.system_prompt.clone();
     let definitions = prepared.definitions.clone();
+    let spending = prepared.spending.clone();
     let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
         let mut settings = base.clone();
         settings.profile = config::resolve_profile(Some(key))?;
+        // Switching to a model without the configured effort is not a refusal.
+        settings.reasoning_effort = settings
+            .reasoning_effort
+            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
         let name = settings.profile.display_name.clone();
-        let model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
+        let model = metered(&settings, prompt.clone(), definitions.clone(), &spending)?;
         Ok((model, name))
     });
     let inbox = dino_core::Inbox::default();
@@ -653,6 +738,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         typed_ahead: String::new(),
         usage: prepared.usage,
         requests: prepared.requests,
+        meter: Arc::clone(&prepared.spending.meter),
         factory,
         model_key: prepared.settings.profile.key.clone(),
         workspace_root: prepared.settings.workspace.clone(),
@@ -672,8 +758,20 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         log_path: prepared.settings.log_path.display().to_string(),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
         state_path: prepared.state_path,
+        greeting: greeting::shows(
+            prepared.settings.greeting,
+            style::enabled(),
+            stdin().is_terminal(),
+        ),
     };
     session.run().await?;
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            &format!("  {}", prepared.spending.meter.closing())
+        )
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -780,33 +878,46 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     });
 
     if let Some(progress) = &progress {
-        return Ok(
-            match handover::run(
-                &mut prepared,
-                progress,
-                &request,
-                args.session_turns,
-                &cancel,
+        let ended = handover::run(
+            &mut prepared,
+            progress,
+            &request,
+            args.session_turns,
+            &cancel,
+        )
+        .await;
+        eprintln!(
+            "{}",
+            style::paint(
+                style::FAINT,
+                &format!("  {}", prepared.spending.meter.closing())
             )
-            .await?
-            {
-                handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
-                handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
-                handover::Ended::Stalled => {
-                    eprintln!(
-                        "{}",
-                        style::paint(
-                            style::FAINT,
-                            "  stopped: two sessions in a row ended with the plan unfinished"
-                        )
-                    );
-                    ExitCode::FAILURE
-                }
-                _ => ExitCode::FAILURE,
-            },
         );
+        return Ok(match ended? {
+            handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
+            handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
+            handover::Ended::Stalled => {
+                eprintln!(
+                    "{}",
+                    style::paint(
+                        style::FAINT,
+                        "  stopped: two sessions in a row ended with the plan unfinished"
+                    )
+                );
+                ExitCode::FAILURE
+            }
+            _ => ExitCode::FAILURE,
+        });
     }
-    let result = prepared.agent.run_cancellable(request, &cancel).await?;
+    let result = prepared.agent.run_cancellable(request, &cancel).await;
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            &format!("  {}", prepared.spending.meter.closing())
+        )
+    );
+    let result = result?;
     save_state(&prepared.agent, &prepared.state_path)?;
     Ok(match result.stop_reason {
         StopReason::EndTurn => ExitCode::SUCCESS,
@@ -864,11 +975,15 @@ struct Resolved {
     show_reasoning: (bool, Source),
     no_thinking: (bool, Source),
     plain: (bool, Source),
+    greeting: (bool, Source),
     protected: (Vec<PathBuf>, Source),
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
+    reasoning_effort: (Option<dino_protocol::ReasoningEffort>, Source),
     auto_compact: bool,
     fallback: Vec<String>,
+    review_model: Option<String>,
+    budget: Option<spend::Budget>,
     hooks: (Vec<dino_exec::Hook>, Source),
     end_turn_hooks: Vec<dino_exec::Hook>,
     start_hooks: Vec<dino_exec::Hook>,
@@ -962,6 +1077,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         show_reasoning: switch(args.show_reasoning, |file| file.show_reasoning),
         no_thinking: switch(args.no_thinking, |file| file.no_thinking),
         plain: switch(args.plain, |file| file.plain),
+        greeting: layers
+            .pick(|file| file.greeting)
+            .unwrap_or((true, Source::Default)),
         protected: layers
             .pick(|file| file.protected.clone())
             .unwrap_or((Vec::new(), Source::Default)),
@@ -975,32 +1093,69 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
             .pick_user_only(|file| file.fallback.clone())
             .map(|(fallback, _)| fallback.keys())
             .unwrap_or_default(),
+        review_model: layers
+            .pick_user_only(|file| file.review_model.clone())
+            .map(|(key, _)| key),
+        budget: layers.budget()?,
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
+        reasoning_effort: reasoning_effort(args, &layers),
         hooks: (
             hooks_for(&layers, settings::HookEvent::AfterEdit),
             Source::UserFile,
         ),
         end_turn_hooks: hooks_for(&layers, settings::HookEvent::BeforeEndTurn),
         start_hooks: hooks_for(&layers, settings::HookEvent::SessionStart),
-        mcp: layers
-            .pick_user_only(|file| file.mcp.clone())
-            .map(|(servers, _)| {
-                servers
-                    .into_iter()
-                    .map(|(name, server)| dino_exec::McpServer {
-                        name,
-                        command: server.command,
-                        pass_env: server.pass_env,
-                        read_only_tools: server.read_only_tools,
-                        sandboxed: server.sandbox,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        mcp: mcp_servers(&layers),
         layers,
     })
+}
+
+/// The user file's MCP servers. A project file cannot set any.
+fn mcp_servers(layers: &Layers) -> Vec<dino_exec::McpServer> {
+    layers
+        .pick_user_only(|file| file.mcp.clone())
+        .map(|(servers, _)| {
+            servers
+                .into_iter()
+                .map(|(name, server)| dino_exec::McpServer {
+                    name,
+                    command: server.command,
+                    pass_env: server.pass_env,
+                    read_only_tools: server.read_only_tools,
+                    sandboxed: server.sandbox,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn reasoning_effort(
+    args: &CommonArgs,
+    layers: &Layers,
+) -> (Option<dino_protocol::ReasoningEffort>, Source) {
+    match args.effort {
+        Some(effort) => (Some(effort), Source::Flag),
+        None => layers
+            .pick(|file| file.reasoning_effort.map(Some))
+            .unwrap_or((None, Source::Default)),
+    }
+}
+
+fn budget_row(budget: Option<spend::Budget>) -> String {
+    let Some(budget) = budget else {
+        return "none".to_owned();
+    };
+    let each = [("a session", budget.session), ("a day", budget.daily)]
+        .into_iter()
+        .filter_map(|(per, usd)| Some(format!("{} {per}", spend::usd(usd?))))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{each}, warned at {:.0}%  (user file)",
+        budget.warn_at * 100.0
+    )
 }
 
 fn listed(paths: &[PathBuf]) -> String {
@@ -1021,6 +1176,10 @@ fn in_order(keys: &[String]) -> String {
     keys.join(", then ")
 }
 
+fn file_named(path: Option<&PathBuf>) -> String {
+    path.map_or_else(|| "none".to_owned(), |path| path.display().to_string())
+}
+
 fn print_config(args: &PromptArgs) -> Result<()> {
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let common = CommonArgs {
@@ -1030,6 +1189,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
     let resolved = resolve(&common, &workspace)?;
 
     let show = |value: String, source: Source| format!("{value}  ({})", source.label());
+    let switch = |(on, source): (bool, Source)| show(on.to_string(), source);
     let fallback = in_order(&resolved.fallback);
     let rows = vec![
         (
@@ -1080,38 +1240,34 @@ fn print_config(args: &PromptArgs) -> Result<()> {
                 resolved.api_base.1,
             ),
         ),
+        ("reasoning", switch(resolved.show_reasoning)),
+        ("thinking off", switch(resolved.no_thinking)),
         (
-            "reasoning",
+            "reasoning effort",
             show(
-                resolved.show_reasoning.0.to_string(),
-                resolved.show_reasoning.1,
+                resolved.reasoning_effort.0.map_or_else(
+                    || "provider default".to_owned(),
+                    |effort| effort.to_string(),
+                ),
+                resolved.reasoning_effort.1,
             ),
         ),
-        (
-            "thinking off",
-            show(resolved.no_thinking.0.to_string(), resolved.no_thinking.1),
-        ),
-        (
-            "plain",
-            show(resolved.plain.0.to_string(), resolved.plain.1),
-        ),
+        ("plain", switch(resolved.plain)),
+        ("greeting", switch(resolved.greeting)),
         ("fallback", fallback),
         (
-            "project file",
+            "review model",
             resolved
-                .layers
-                .project_path
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), |path| path.display().to_string()),
+                .review_model
+                .clone()
+                .map_or_else(|| "off".to_owned(), |key| format!("{key}  (user file)")),
         ),
+        ("budget", budget_row(resolved.budget)),
         (
-            "user file",
-            resolved
-                .layers
-                .user_path
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), |path| path.display().to_string()),
+            "project file",
+            file_named(resolved.layers.project_path.as_ref()),
         ),
+        ("user file", file_named(resolved.layers.user_path.as_ref())),
     ];
     print!("{}", crate::render::status_block(&rows));
     println!(
@@ -1129,6 +1285,11 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
     let resolved = resolve(args, &workspace)?;
     let profile = config::resolve_profile(resolved.model.0.as_deref())?;
     let fallback = config::resolve_fallback(&resolved.fallback, &profile)?;
+    let review = resolved
+        .review_model
+        .as_deref()
+        .map(|key| config::resolve_profile(Some(key)))
+        .transpose()?;
     let mode = resolved.approvals.0;
     let log_path = match &args.log {
         Some(path) => path.clone(),
@@ -1157,8 +1318,12 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,
         enable_thinking: None,
+        reasoning_effort: resolved.reasoning_effort.0,
         plain: resolved.plain.0,
+        greeting: resolved.greeting.0,
         fallback,
+        budget: resolved.budget,
+        review,
     })
 }
 

@@ -23,7 +23,7 @@ use crate::render::status_block;
 use crate::style;
 use crate::style::FAINT;
 use crate::style::MUTED;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 
 /// Lets a line ending in a backslash continue onto the next.
 ///
@@ -284,6 +284,7 @@ pub struct Session<S> {
     pub agent: Agent<S, ToolSet>,
     pub usage: Arc<Mutex<TokenUsage>>,
     pub requests: Arc<std::sync::atomic::AtomicU64>,
+    pub meter: Arc<crate::spend::Meter>,
     pub factory: SessionFactory<S>,
     pub model_key: String,
     pub workspace_root: std::path::PathBuf,
@@ -316,6 +317,8 @@ pub struct Session<S> {
     pub history_path: std::path::PathBuf,
     /// Where this conversation is persisted after each submission.
     pub state_path: std::path::PathBuf,
+    /// Open with the dinosaur rather than the plain heading.
+    pub greeting: bool,
 }
 
 impl<S> Session<S>
@@ -346,7 +349,7 @@ where
 
         println!("{}", self.opening());
         // The prompt is the person's own line, so it wears the person's colour.
-        let prompt = match style::RUST.sequence() {
+        let prompt = match style::EMBER.sequence() {
             sequence if sequence.is_empty() => "› ".to_owned(),
             sequence => format!("{sequence}› {}", style::RESET),
         };
@@ -681,7 +684,7 @@ where
         println!(
             "{}",
             style::paint(
-                SLATE,
+                PURPLE,
                 "  plan: [y] carry it out   [n] drop it   or type what to change"
             )
         );
@@ -790,7 +793,7 @@ where
             let _ = writeln!(
                 &mut block,
                 "  {marker} {}  {}",
-                style::paint(SLATE, &format!("{:<24}", profile.key)),
+                style::paint(PURPLE, &format!("{:<24}", profile.key)),
                 style::paint(MUTED, &profile.display_name)
             );
         }
@@ -820,7 +823,7 @@ where
             let _ = writeln!(
                 &mut block,
                 "  {marker} {}  {}",
-                style::paint(SLATE, &format!("{:<22}", item.id)),
+                style::paint(PURPLE, &format!("{:<22}", item.id)),
                 style::paint(MUTED, &format!("{age:>8} ago  {model}"))
             );
         }
@@ -836,6 +839,7 @@ where
         status_block(&[
             ("requests", requests.to_string()),
             ("tokens", describe_usage(usage)),
+            ("cost", self.meter.closing()),
         ])
     }
 
@@ -846,13 +850,19 @@ where
             std::path::Path::new(&self.workspace),
             std::path::Path::new(""),
         );
-        let rule = style::paint(crate::style::FAINT, "  ────────");
+        let hello = if self.greeting {
+            crate::greeting::greeting(&self.model, &workspace)
+        } else {
+            format!(
+                "\n{}  {}\n{}\n  {}\n",
+                style::paint_with(crate::style::EMBER, &[crate::style::BOLD], "  DINO"),
+                style::paint(crate::style::FAINT, env!("CARGO_PKG_VERSION")),
+                style::paint(crate::style::FAINT, "  ────────"),
+                style::paint(crate::style::TEXT, &format!("{} · {workspace}", self.model)),
+            )
+        };
         format!(
-            "\n{}  {}\n{}\n  {}\n  {}\n  {}\n",
-            style::paint_with(crate::style::RUST, &[crate::style::BOLD], "  DINO"),
-            style::paint(crate::style::FAINT, env!("CARGO_PKG_VERSION")),
-            rule,
-            style::paint(crate::style::TEXT, &format!("{} · {workspace}", self.model)),
+            "{hello}  {}\n  {}\n",
             style::paint(
                 crate::style::MUTED,
                 &format!(
@@ -951,7 +961,7 @@ fn help() -> String {
             "/init",
             "survey the repository and write or improve AGENTS.md",
         ),
-        ("/cost", "requests and tokens so far"),
+        ("/cost", "requests, tokens and list price so far"),
         (
             "/compact",
             "summarise, then carry on in a fresh conversation",
@@ -964,7 +974,7 @@ fn help() -> String {
         let _ = writeln!(
             &mut block,
             "  {}  {}",
-            style::paint(SLATE, &format!("{command:<8}")),
+            style::paint(PURPLE, &format!("{command:<8}")),
             style::paint(MUTED, description)
         );
     }

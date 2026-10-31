@@ -3,8 +3,8 @@
 //! The renderer is an [`EventSink`] and holds no agent state, so the session in
 //! RFC-0007 is the same renderer driven repeatedly rather than a second one.
 //!
-//! Colour follows the house rule: if a shell printed it, it is slate; if a
-//! person wrote it, it is terracotta.
+//! Colour follows the house rule: if a shell printed it, it is purple; if a
+//! person wrote it, it is ember.
 //!
 //! On a terminal a call's line is committed as it starts and redrawn in place
 //! when it finishes, or when the next look joins it, for as long as nothing has
@@ -36,12 +36,12 @@ use serde_json::Value;
 use crate::calls;
 use crate::calls::Mark;
 use crate::style;
+use crate::style::EMBER;
 use crate::style::FAINT;
 use crate::style::ITALIC;
 use crate::style::MUTED;
 use crate::style::OK;
-use crate::style::RUST;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 use crate::style::WARN;
 
 const MAX_SUMMARY_BYTES: usize = 120;
@@ -98,7 +98,7 @@ impl Last {
         format!(
             "  {} {}",
             paint_mark(mark),
-            style::paint(SLATE, &format!("→ {}", calls::explored(&looks, room)))
+            style::paint(PURPLE, &format!("→ {}", calls::explored(&looks, room)))
         )
     }
 }
@@ -125,7 +125,10 @@ fn call_line(
     let mut line = format!(
         "  {} {}",
         paint_mark(mark),
-        style::paint(SLATE, &format!("{} {description}", calls::icon(&call.name)))
+        style::paint(
+            PURPLE,
+            &format!("{} {description}", calls::icon(&call.name))
+        )
     );
     if !gist.is_empty() {
         line.push_str(&style::paint(colour, &format!(" · {gist}")));
@@ -135,10 +138,10 @@ fn call_line(
 
 fn paint_mark(mark: Mark) -> String {
     let colour = match mark {
-        Mark::Running => SLATE,
+        Mark::Running => PURPLE,
         Mark::Done => MUTED,
         Mark::Failed => WARN,
-        Mark::Refused => RUST,
+        Mark::Refused => EMBER,
     };
     style::paint(colour, &mark.glyph().to_string())
 }
@@ -149,7 +152,7 @@ fn refused_line(tool: &str, description: &str, reason: &str) -> String {
     let (mark, colour, tag, said) = match reason.strip_prefix("the operator refused this action") {
         Some(said) => (
             Mark::Refused,
-            RUST,
+            EMBER,
             "refused by you".to_owned(),
             said.strip_prefix(": ").map(str::trim),
         ),
@@ -164,7 +167,7 @@ fn refused_line(tool: &str, description: &str, reason: &str) -> String {
     let mut line = format!(
         "  {} {}{}\n",
         paint_mark(mark),
-        style::paint(SLATE, &format!("{} {description}", calls::icon(tool))),
+        style::paint(PURPLE, &format!("{} {description}", calls::icon(tool))),
         style::paint(colour, &format!(" · {tag}"))
     );
     if let Some(said) = said.filter(|said| !said.is_empty()) {
@@ -359,6 +362,7 @@ impl Renderer {
                 if let Ok(mut status) = self.status.lock() {
                     status.context = usage.input_tokens;
                     status.input += usage.input_tokens;
+                    status.cached += usage.cached_input_tokens;
                     status.output += usage.output_tokens;
                 }
                 Ok(())
@@ -402,7 +406,7 @@ impl Renderer {
             // A person decided this, so a person's colour carries it.
             ApprovalDecision::Denied { reason } => {
                 self.break_stream()?;
-                write_out(&style::paint(RUST, &format!("  refused  {subject}\n")))?;
+                write_out(&style::paint(EMBER, &format!("  refused  {subject}\n")))?;
                 write_out(&style::paint(FAINT, &format!("           {reason}\n")))
             }
             // A person answering the prompt has already seen it, and an
@@ -478,6 +482,7 @@ impl Renderer {
         self.asked.clear();
         if let Ok(mut status) = self.status.lock() {
             status.input = 0;
+            status.cached = 0;
             status.output = 0;
         }
         submitted(text)
@@ -579,6 +584,12 @@ impl EventSink for Renderer {
                     ),
                 ))
             }
+            AgentEvent::Reviewed {
+                objections, error, ..
+            } => {
+                self.break_stream()?;
+                write_out(&reviewed(objections, error.as_deref()))
+            }
             AgentEvent::ToolFinished { result, .. } => self.tool_finished(result),
         }
     }
@@ -591,6 +602,15 @@ impl EventSink for Renderer {
             .usage
             .lock()
             .map_or_else(|_| TokenUsage::default(), |total| *total);
+        let cost = self
+            .status
+            .lock()
+            .ok()
+            .and_then(|status| status.meter.as_ref().map(|meter| meter.spent()))
+            .filter(|spent| spent.usd > 0.0)
+            .map_or_else(String::new, |spent| {
+                format!(" · {} list", crate::spend::usd(spent.usd))
+            });
         let elapsed = self.started.take().map(|started| started.elapsed());
         let ending = match (&outcome.error, outcome.stop_reason) {
             (Some(error), _) if error.starts_with("model-turn limit reached") => {
@@ -616,7 +636,7 @@ impl EventSink for Renderer {
         let tail = style::paint(
             FAINT,
             &format!(
-                "{time} · {} {turns} · {}\n",
+                "{time} · {} {turns} · {}{cost}\n",
                 outcome.model_turns,
                 describe_usage(usage)
             ),
@@ -834,7 +854,7 @@ fn argument_number(arguments: &Value, key: &str) -> Option<u64> {
 /// and pastes can run to pages; the log keeps them whole.
 /// A message typed during the run, as it goes to the model.
 fn steered(text: &str) -> Result<(), SinkError> {
-    write_out(&style::paint(RUST, &format!("› {text}\n")))?;
+    write_out(&style::paint(EMBER, &format!("› {text}\n")))?;
     write_out(&style::paint(FAINT, "  sent with the latest results\n"))
 }
 
@@ -842,13 +862,28 @@ fn submitted(text: &str) -> Result<(), SinkError> {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or_default();
     let more = lines.count();
-    write_out(&style::paint(RUST, &format!("\n› {first}\n")))?;
+    write_out(&style::paint(EMBER, &format!("\n› {first}\n")))?;
     if more > 0 {
         write_out(&style::paint(FAINT, &format!("  (+{more} more lines)\n")))?;
     }
     Ok(())
 }
 
+fn reviewed(objections: &[String], error: Option<&str>) -> String {
+    let line = match (objections.first(), error) {
+        (Some(first), _) => format!(
+            "  the reviewer objected ({}): {}\n",
+            objections.len(),
+            cap(first_line(first), MAX_SUMMARY_BYTES)
+        ),
+        (None, Some(error)) => format!(
+            "  the review failed: {}\n",
+            cap(first_line(error), MAX_SUMMARY_BYTES)
+        ),
+        (None, None) => "  reviewed: no objections\n".to_owned(),
+    };
+    style::paint(if objections.is_empty() { FAINT } else { WARN }, &line)
+}
 fn elided(results: usize, calls: usize, bytes: usize) -> Result<(), SinkError> {
     write_out(&style::paint(
         FAINT,
@@ -894,7 +929,7 @@ fn context_line(
 
 fn handed_over(session: u32, reason: &str, pending: usize) -> Result<(), SinkError> {
     write_out(&style::paint(
-        SLATE,
+        PURPLE,
         &format!("\n  ── session {session}: {reason}; {pending} item(s) pending ──\n"),
     ))
 }
@@ -912,7 +947,7 @@ fn todo_started(call: &dino_protocol::ToolCall) -> Result<(), SinkError> {
     });
     let marker = if style::enabled() { "#" } else { "›" };
     write_out(&style::paint(
-        SLATE,
+        PURPLE,
         &format!("  {marker} todo\n{indented}"),
     ))
 }
@@ -923,7 +958,7 @@ impl Renderer {
         if !style::enabled() {
             // The machine is about to do something, so the machine's colour.
             // The line stays open for the result to finish it.
-            let line = style::paint(SLATE, &format!("  › {}", describe_call(call)));
+            let line = style::paint(PURPLE, &format!("  › {}", describe_call(call)));
             write_out(&line)?;
             self.open_call = Some(call.clone());
             return Ok(());
@@ -1047,7 +1082,7 @@ impl Renderer {
     }
 }
 
-/// The changed lines of a patch, beneath its call: removed in terracotta,
+/// The changed lines of a patch, beneath its call: removed in ember,
 /// added in green, behind a faint gutter.
 fn patch_preview(call: &ToolCall) -> String {
     use crate::diff::Row;
@@ -1060,7 +1095,7 @@ fn patch_preview(call: &ToolCall) -> String {
         .unwrap_or_default()
         .iter()
         .filter_map(|row| match row {
-            Row::Removed { parts, .. } => Some(style::paint(RUST, &format!("- {}", text(parts)))),
+            Row::Removed { parts, .. } => Some(style::paint(EMBER, &format!("- {}", text(parts)))),
             Row::Added { parts, .. } => Some(style::paint(OK, &format!("+ {}", text(parts)))),
             Row::Same { .. } | Row::Gap => None,
         })

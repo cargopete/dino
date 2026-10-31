@@ -81,7 +81,8 @@ fn parse(arguments: &Value) -> Result<(String, Scope), ToolError> {
 }
 
 /// Today's date as `YYYY-MM-DD`, in UTC.
-fn today() -> String {
+#[must_use]
+pub fn today() -> String {
     let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() / 86_400);

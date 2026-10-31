@@ -11,7 +11,7 @@ use dino_eval::Case;
 use dino_eval::EarlyStop;
 use dino_eval::Outcome;
 use dino_eval::RunRate;
-use dino_eval::run_case;
+use dino_eval::run_case_reviewed;
 use dino_eval::total_cost;
 use dino_eval::wilson;
 use dino_eval::wilson_interval;
@@ -25,7 +25,7 @@ use crate::style;
 use crate::style::FAINT;
 use crate::style::MUTED;
 use crate::style::OK;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 use crate::style::WARN;
 
 // Command-line flags are booleans by nature.
@@ -58,6 +58,10 @@ pub struct EvalArgs {
     /// Qwen defaults to 4096.
     #[arg(long)]
     pub thinking_budget: Option<u32>,
+    /// Reasoning effort for a model that offers a choice, recorded with each
+    /// run. Leaves the provider's default when absent; no config file sets it.
+    #[arg(long)]
+    pub effort: Option<dino_protocol::ReasoningEffort>,
     /// Emit the whole record, metrics included, as JSON.
     #[arg(long)]
     pub json: bool,
@@ -97,6 +101,10 @@ pub struct EvalArgs {
     /// GPU hire, in USD per hour of wall time.
     #[arg(long)]
     pub dollars_per_hour: Option<f64>,
+    /// Stop the corpus once its runs have cost this much at the model's list
+    /// price, cancelling those in flight. The config budgets never apply here.
+    #[arg(long)]
+    pub max_usd: Option<f64>,
     /// Score each case's untouched workspace and its reference solution, with
     /// no model, and fail unless every floor is under 10 and every ceiling 95
     /// or more. RFC-0019 section 5.
@@ -110,6 +118,16 @@ pub struct EvalArgs {
     /// same way. `--model` is then that harness's model name, passed through.
     #[arg(long, value_enum)]
     pub harness: Option<ExternalHarness>,
+    /// Point the harness at this provider's API instead of its own, so harnesses
+    /// can be compared on one model. Codex, Claude Code and Pi; `--model` is the
+    /// provider's model name. The person's own configuration is left untouched.
+    #[arg(long, value_enum, requires = "harness")]
+    pub harness_provider: Option<HarnessProvider>,
+    /// Before a run ends, have this model review the change with none of the
+    /// conversation: the task, the diff and the latest checks, in one call.
+    /// At low effort where the model offers it.
+    #[arg(long, value_name = "KEY", conflicts_with = "harness")]
+    pub review_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -118,6 +136,7 @@ pub enum ExternalHarness {
     Codex,
     Kimi,
     Grok,
+    Pi,
 }
 
 impl From<ExternalHarness> for dino_eval::external::Harness {
@@ -127,6 +146,20 @@ impl From<ExternalHarness> for dino_eval::external::Harness {
             ExternalHarness::Codex => Self::Codex,
             ExternalHarness::Kimi => Self::Kimi,
             ExternalHarness::Grok => Self::Grok,
+            ExternalHarness::Pi => Self::Pi,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum HarnessProvider {
+    Moonshot,
+}
+
+impl From<HarnessProvider> for dino_eval::external::Provider {
+    fn from(provider: HarnessProvider) -> Self {
+        match provider {
+            HarnessProvider::Moonshot => Self::Moonshot,
         }
     }
 }
@@ -182,16 +215,31 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     }
     let profile = match args.harness {
         None => Some(config::resolve_profile(args.model.as_deref())?),
+        Some(_) if args.effort.is_some() => {
+            bail!("--effort sets dino's own models, not a harness's")
+        }
         Some(_) => None,
     };
+    if let (Some(profile), Some(effort)) = (&profile, args.effort) {
+        config::check_effort(profile, effort)?;
+    }
     let label = match (&profile, args.harness, &args.model) {
         (Some(profile), _, _) => profile.key.clone(),
-        (None, Some(harness), Some(model)) => format!("{model} ({harness:?})"),
+        (None, Some(harness), Some(model)) => match args.harness_provider {
+            Some(provider) => format!("{model} ({harness:?} on {provider:?})"),
+            None => format!("{model} ({harness:?})"),
+        },
         (None, _, _) => bail!("--harness needs --model, the harness's own model name"),
     };
+    let review = args
+        .review_model
+        .as_deref()
+        .map(|key| config::resolve_profile(Some(key)))
+        .transpose()?;
     let mut cases = select(&args)?;
     apply_wall(&mut cases, args.max_wall_secs)?;
     let rate = run_rate(&args)?;
+    let ceiling = ceiling(&args, profile.as_ref())?;
     let scratch = match &args.scratch {
         Some(path) => path.clone(),
         None => std::env::temp_dir().join(format!("dino-evals-{}", std::process::id())),
@@ -199,23 +247,14 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     std::fs::create_dir_all(&scratch)?;
 
     if !args.json {
+        let model = profile
+            .as_ref()
+            .map_or(&label, |profile| &profile.display_name);
         eprintln!(
             "{}",
             style::paint(
                 FAINT,
-                &format!(
-                    "{} · {} case(s){} · scratch {}",
-                    profile
-                        .as_ref()
-                        .map_or(&label, |profile| &profile.display_name),
-                    cases.len(),
-                    if args.without.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · without {}", args.without.join(", "))
-                    },
-                    scratch.display()
-                )
+                &header(&args, model, review.as_ref(), cases.len(), &scratch)
             )
         );
     }
@@ -223,21 +262,76 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     let trials = args.trials.max(1);
     let runs = (1..=trials)
         .flat_map(|trial| cases.iter().map(move |case| (trial, case)))
-        .map(|(trial, case)| run_one(&args, profile.as_ref(), &scratch, trials, trial, case));
+        .map(|(trial, case)| {
+            run_one(
+                &args,
+                profile.as_ref(),
+                review.as_ref(),
+                &scratch,
+                (trials, trial),
+                case,
+            )
+        });
     let mut outcomes = Vec::with_capacity(cases.len());
     let mut finished = std::pin::pin!(scheduled(runs, args.jobs));
+    let mut spent = 0.0;
+    let mut cut_short = false;
     while let Some(outcome) = finished.next().await {
-        outcomes.push(record(outcome?, rate.as_ref(), args.json));
+        let outcome = record(outcome?, rate.as_ref(), args.json);
+        if let Some((limit, price)) = ceiling {
+            spent += price.cost(&outcome.metrics.tokens);
+            cut_short = spent >= limit;
+        }
+        outcomes.push(outcome);
+        if cut_short {
+            eprintln!(
+                "{}",
+                style::paint(
+                    WARN,
+                    &format!(
+                        "  stopped after {} run(s): {} spent at list price, past --max-usd",
+                        outcomes.len(),
+                        crate::spend::usd(spent)
+                    )
+                )
+            );
+            break;
+        }
     }
 
     report(&args, &label, trials, &cases, &outcomes)?;
 
     let failed = outcomes.iter().filter(|outcome| !outcome.passed).count();
-    Ok(if failed == 0 {
+    Ok(if failed == 0 && !cut_short {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// The line a corpus run opens with.
+fn header(
+    args: &EvalArgs,
+    model: &str,
+    review: Option<&dino_protocol::ModelProfile>,
+    cases: usize,
+    scratch: &Path,
+) -> String {
+    format!(
+        "{model}{}{} · {cases} case(s){} · scratch {}",
+        args.effort
+            .map(|effort| format!(" · {effort} effort"))
+            .unwrap_or_default(),
+        review
+            .map(|review| format!(" · reviewed by {}", review.display_name))
+            .unwrap_or_default(),
+        if args.without.is_empty() {
+            String::new()
+        } else {
+            format!(" · without {}", args.without.join(", "))
+        },
+        scratch.display()
+    )
 }
 
 /// Runs up to `jobs` of `runs` at once, yielding each result in the order given.
@@ -252,9 +346,9 @@ fn scheduled<F: Future>(
 async fn run_one(
     args: &EvalArgs,
     profile: Option<&dino_protocol::ModelProfile>,
+    review: Option<&dino_protocol::ModelProfile>,
     scratch: &Path,
-    trials: u32,
-    trial: u32,
+    (trials, trial): (u32, u32),
     case: &Case,
 ) -> Result<Outcome> {
     let scratch = if trials > 1 {
@@ -276,6 +370,7 @@ async fn run_one(
             Arc::clone(&sandbox),
             harness.into(),
             model,
+            args.harness_provider.map(Into::into),
         )
         .await?);
     }
@@ -289,13 +384,37 @@ async fn run_one(
             .map(|session| session as Box<dyn ModelSession>)
     };
 
+    let review = review
+        .map(|review| review_sessions(&settings, review))
+        .transpose()?;
+
     let variant = dino_eval::Variant {
         without: args.without.clone(),
         max_diagnostics: args.max_diagnostics,
         thinking_budget: args.thinking_budget,
+        reasoning_effort: args.effort,
         score: args.score,
+        review_model: args.review_model.clone(),
     };
-    Ok(run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?)
+    Ok(run_case_reviewed(
+        case,
+        &scratch,
+        Arc::clone(&sandbox),
+        &variant,
+        &build,
+        review,
+    )
+    .await?)
+}
+
+fn review_sessions(
+    settings: &RunSettings,
+    review: &dino_protocol::ModelProfile,
+) -> Result<dino_core::review::OpenSession> {
+    let settings = config::review_settings(settings, review)?;
+    Ok(Box::new(move |system| {
+        config::build_session(&settings, system, Vec::new()).map_err(|error| error.to_string())
+    }))
 }
 
 /// Prints the runs, and the score when there is one, as a table or as JSON.
@@ -329,6 +448,23 @@ fn report(
         }
     }
     Ok(())
+}
+
+/// The `--max-usd` ceiling and the price it is counted at.
+fn ceiling(
+    args: &EvalArgs,
+    profile: Option<&dino_protocol::ModelProfile>,
+) -> Result<Option<(f64, dino_protocol::Pricing)>> {
+    let Some(limit) = args.max_usd else {
+        return Ok(None);
+    };
+    if !(limit.is_finite() && limit > 0.0) {
+        bail!("--max-usd must be a number of dollars above zero");
+    }
+    match profile.and_then(|profile| profile.price) {
+        Some(price) => Ok(Some((limit, price))),
+        None => bail!("--max-usd needs a dino model with a list price in its profile"),
+    }
 }
 
 fn run_rate(args: &EvalArgs) -> Result<Option<RunRate>> {
@@ -416,8 +552,12 @@ fn eval_settings(
         }),
         disable_thinking: args.no_thinking,
         enable_thinking: None,
+        reasoning_effort: args.effort,
         plain: args.plain,
+        greeting: false,
         fallback: Vec::new(),
+        budget: None,
+        review: None,
     }
 }
 
@@ -483,7 +623,7 @@ async fn calibrate(args: &EvalArgs) -> Result<ExitCode> {
             println!(
                 "  {}  {}",
                 style::paint(FAINT, "skip"),
-                style::paint(SLATE, &format!("{:<28} no reference/", case.name))
+                style::paint(PURPLE, &format!("{:<28} no reference/", case.name))
             );
             continue;
         }
@@ -498,7 +638,7 @@ async fn calibrate(args: &EvalArgs) -> Result<ExitCode> {
                 if holds { OK } else { WARN },
                 if holds { "ok  " } else { "FAIL" }
             ),
-            style::paint(SLATE, &format!("{:<28}", case.name)),
+            style::paint(PURPLE, &format!("{:<28}", case.name)),
             style::paint(
                 FAINT,
                 &format!(
@@ -548,7 +688,7 @@ fn summarise(cases: &[dino_eval::Case], outcomes: &[Outcome]) -> dino_eval::scor
 fn print_score(model: &str, summary: &dino_eval::score::Summary) {
     println!(
         "\n  {}  {}",
-        style::paint(SLATE, &format!("{model}: {} / 100", summary.score)),
+        style::paint(PURPLE, &format!("{model}: {} / 100", summary.score)),
         style::paint(
             FAINT,
             &format!(
@@ -581,7 +721,7 @@ fn print_case(outcome: &Outcome) {
     println!(
         "  {}  {}  {}",
         style::paint(colour, mark),
-        style::paint(SLATE, &format!("{:<20}", outcome.case)),
+        style::paint(PURPLE, &format!("{:<20}", outcome.case)),
         style::paint(
             FAINT,
             &format!(
@@ -599,6 +739,9 @@ fn print_case(outcome: &Outcome) {
     );
     for failure in &outcome.failures {
         println!("        {}", style::paint(WARN, failure));
+    }
+    if let Some(review) = &outcome.metrics.review {
+        println!("        {}", style::paint(MUTED, &review_line(review)));
     }
     if let Some(score) = &outcome.score {
         println!(
@@ -620,6 +763,57 @@ fn print_case(outcome: &Outcome) {
         for note in &score.notes {
             println!("        {}", style::paint(FAINT, note));
         }
+    }
+}
+
+/// How many runs were reviewed, objected to, and changed after an objection,
+/// when any run was asked to be.
+fn review_summary(outcomes: &[Outcome]) -> Option<String> {
+    let asked = outcomes
+        .iter()
+        .filter(|outcome| outcome.review_model.is_some())
+        .count();
+    if asked == 0 {
+        return None;
+    }
+    let reviews: Vec<&dino_eval::Review> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.metrics.review.as_ref())
+        .collect();
+    let objected: Vec<&&dino_eval::Review> = reviews
+        .iter()
+        .filter(|review| !review.objections.is_empty())
+        .collect();
+    let changed = objected
+        .iter()
+        .filter(|review| review.changed_after == Some(true))
+        .count();
+    let failed = reviews
+        .iter()
+        .filter(|review| review.error.is_some())
+        .count();
+    Some(format!(
+        "reviewed {} of {asked} run(s): {} objected to, {changed} of those changed after, \
+         {failed} review(s) failed",
+        reviews.len(),
+        objected.len()
+    ))
+}
+
+fn review_line(review: &dino_eval::Review) -> String {
+    let after = match review.changed_after {
+        Some(true) => ", changed after",
+        Some(false) => ", unchanged after",
+        None => "",
+    };
+    match (&review.error, review.objections.as_slice()) {
+        (Some(error), _) => format!("review failed: {error}"),
+        (None, []) => "reviewed: no objections".to_owned(),
+        (None, objections) => format!(
+            "reviewed: {} objection(s){after}: {}",
+            objections.len(),
+            objections.join(" | ")
+        ),
     }
 }
 
@@ -693,6 +887,9 @@ fn print_summary(outcomes: &[Outcome]) {
             &format!("{input} input token(s), {output} output token(s) across the corpus{priced}")
         )
     );
+    if let Some(reviews) = review_summary(outcomes) {
+        println!("  {}", style::paint(MUTED, &reviews));
+    }
     let rows = case_counts(outcomes);
     if rows.iter().any(|(_, _, total)| *total > 1) {
         for (name, successes, total) in rows {
@@ -779,6 +976,31 @@ mod tests {
         });
         let order = scheduled(runs, jobs).collect().await;
         (order, peak.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn the_spending_ceiling_needs_dollars_and_a_listed_price() {
+        #[derive(clap::Parser)]
+        struct Line {
+            #[command(flatten)]
+            args: super::EvalArgs,
+        }
+        let ceiling = |flags: &[&str], model: &str| {
+            let line = <Line as clap::Parser>::try_parse_from(
+                std::iter::once("eval").chain(flags.iter().copied()),
+            )
+            .unwrap();
+            let profile = dino_model::builtin_profile(model).unwrap();
+            super::ceiling(&line.args, Some(&profile)).map(|found| found.map(|(limit, _)| limit))
+        };
+
+        assert_eq!(ceiling(&[], "kimi-k3.1-pro").unwrap(), None);
+        assert_eq!(
+            ceiling(&["--max-usd", "5"], "kimi-k3.1-pro").unwrap(),
+            Some(5.0)
+        );
+        assert!(ceiling(&["--max-usd", "0"], "kimi-k3.1-pro").is_err());
+        assert!(ceiling(&["--max-usd", "5"], "qwen3-8b").is_err());
     }
 
     #[tokio::test]

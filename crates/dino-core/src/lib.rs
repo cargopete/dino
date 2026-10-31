@@ -13,6 +13,7 @@ pub mod memory;
 pub mod progress;
 pub mod prompt;
 pub mod resume;
+pub mod review;
 pub mod session;
 pub mod skills;
 pub mod text;
@@ -426,6 +427,9 @@ pub struct Agent<S, T> {
     sink: Box<dyn EventSink>,
     config: AgentConfig,
     finish_check: Option<Box<dyn FinishCheck>>,
+    reviewer: Option<std::sync::Arc<review::Reviewer>>,
+    /// Whether this run's work has been reviewed, so it is reviewed once.
+    reviewed: bool,
     // Kept outside `drive` so a run that ends in an error still reports what it
     // spent.
     turns_started: u32,
@@ -461,6 +465,8 @@ where
             sink: Box::new(NullSink),
             config,
             finish_check: None,
+            reviewer: None,
+            reviewed: false,
             turns_started: 0,
             sent_back: false,
             pending_images: Vec::new(),
@@ -475,6 +481,14 @@ where
     #[must_use]
     pub fn with_finish_check(mut self, check: impl FinishCheck + 'static) -> Self {
         self.finish_check = Some(Box::new(check));
+        self
+    }
+
+    /// Has `reviewer` look over the work once per run that changed anything,
+    /// when the model ends its turn with nothing else unfinished.
+    #[must_use]
+    pub fn with_reviewer(mut self, reviewer: std::sync::Arc<review::Reviewer>) -> Self {
+        self.reviewer = Some(reviewer);
         self
     }
 
@@ -621,8 +635,7 @@ where
         self.session.discover_limits().await?;
         let budget = budget_window(documented, self.session.profile().context_window_tokens);
         let mut warned = false;
-        self.sent_back = false;
-        self.loops.reset();
+        self.begin_run();
 
         for model_turn in 1..=self.config.max_model_turns.get() {
             if cancel.is_cancelled() {
@@ -709,6 +722,17 @@ where
         Err(AgentError::ModelTurnLimit(
             self.config.max_model_turns.get(),
         ))
+    }
+
+    /// Forgets what the last run was told, and takes the state this one's
+    /// review starts from.
+    fn begin_run(&mut self) {
+        self.sent_back = false;
+        self.reviewed = false;
+        if let Some(reviewer) = &self.reviewer {
+            reviewer.begin();
+        }
+        self.loops.reset();
     }
 
     /// Settles every call of a turn in order, noticing a reported blocker.
@@ -826,15 +850,19 @@ where
     }
 
     /// What to tell a model that ended its turn with work unfinished, if this
-    /// run checks and has not already sent it back.
+    /// run checks and has not already sent it back, or what a reviewer
+    /// objects to in work that is otherwise finished.
     async fn send_back(
         &mut self,
         model_turn: u32,
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, AgentError> {
-        if self.sent_back || model_turn >= self.config.max_model_turns.get() {
+        if model_turn >= self.config.max_model_turns.get() {
             return Ok(None);
+        }
+        if self.sent_back {
+            return self.review(model_turn, events, cancel).await;
         }
         let checked = match self.finish_check.as_ref() {
             Some(check) => cancel.run_until_cancelled(check.unfinished()).await,
@@ -847,7 +875,7 @@ where
             .or_else(|| unfinished_checklist(events))
             .or_else(|| verify::untested_edits(events))
         else {
-            return Ok(None);
+            return self.review(model_turn, events, cancel).await;
         };
         self.sent_back = true;
         let note = sent_back_note(&reason);
@@ -859,6 +887,40 @@ where
             events,
         )?;
         Ok(Some(note))
+    }
+
+    /// The reviewer's objections, framed for the model, the first time this
+    /// run's work is reviewed.
+    async fn review(
+        &mut self,
+        model_turn: u32,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, AgentError> {
+        let Some(reviewer) = self.reviewer.clone().filter(|_| !self.reviewed) else {
+            return Ok(None);
+        };
+        self.reviewed = true;
+        let task = review::task(events);
+        let checks = review::latest_checks(events);
+        let Some(Some(verdict)) = cancel
+            .run_until_cancelled(reviewer.review(&task, &checks))
+            .await
+        else {
+            return Ok(None);
+        };
+        let note =
+            (!verdict.objections.is_empty()).then(|| review::objections_note(&verdict.objections));
+        self.emit(
+            AgentEvent::Reviewed {
+                model_turn,
+                objections: verdict.objections,
+                error: verdict.error,
+                usage: verdict.usage,
+            },
+            events,
+        )?;
+        Ok(note)
     }
 
     /// Hands the model, with its tool results, anything the person has typed

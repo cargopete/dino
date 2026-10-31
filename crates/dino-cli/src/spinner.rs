@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::style;
 use crate::style::FAINT;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK: Duration = Duration::from_millis(50);
@@ -36,7 +36,11 @@ pub struct Status {
     pub context: u64,
     /// This submission's tokens so far.
     pub input: u64,
+    /// Of `input`, what the provider read from its cache.
+    pub cached: u64,
     pub output: u64,
+    /// The session's spending, for its running cost.
+    pub meter: Option<std::sync::Arc<crate::spend::Meter>>,
     /// What the person is typing during the run, not yet entered.
     pub typed: String,
     /// Messages entered during the run and not yet delivered.
@@ -144,7 +148,7 @@ fn tick(state: &Mutex<Option<Ticking>>, status: &Mutex<Status>) {
         let room = crate::markdown::terminal_width().saturating_sub(5);
         let line = format!(
             "  {} {}",
-            style::paint(SLATE, frame),
+            style::paint(PURPLE, frame),
             style::paint(FAINT, &row(ticking.label, elapsed, &figures, room))
         );
         let mut out = std::io::stdout().lock();
@@ -156,7 +160,8 @@ fn tick(state: &Mutex<Option<Ticking>>, status: &Mutex<Status>) {
 
 /// The row after its spinner, as many of its parts as fit in `room` columns.
 /// The parts go in the order a person reads them and are dropped in the order
-/// they matter least: the tokens, the model, the context and then the key.
+/// they matter least: the tokens, the model, the cost, the context and then
+/// the key.
 fn row(label: &str, elapsed: Duration, status: &Status, room: usize) -> String {
     let mut parts: Vec<(u8, String)> = vec![(
         u8::MAX,
@@ -167,25 +172,35 @@ fn row(label: &str, elapsed: Duration, status: &Status, room: usize) -> String {
     }
     if let Some(window) = status.window.filter(|_| status.context > 0) {
         let percent = status.context * 100 / u64::from(window).max(1);
-        parts.push((2, format!("{percent}% context")));
+        parts.push((3, format!("{percent}% context")));
     }
     if status.input + status.output > 0 {
+        let cached = if status.cached == 0 {
+            String::new()
+        } else {
+            format!(" ({} cached)", crate::render::compact(status.cached))
+        };
         parts.push((
             0,
             format!(
-                "{} in · {} out",
+                "{} in{cached} · {} out",
                 crate::render::compact(status.input),
                 crate::render::compact(status.output)
             ),
         ));
     }
+    if let Some(spent) = status.meter.as_ref().map(|meter| meter.spent())
+        && spent.usd > 0.0
+    {
+        parts.push((2, format!("{} session", crate::spend::usd(spent.usd))));
+    }
     if status.queued > 0 {
-        parts.push((4, format!("{} queued", status.queued)));
+        parts.push((5, format!("{} queued", status.queued)));
     }
     if !status.typed.is_empty() {
-        parts.push((5, format!("› {}", status.typed)));
+        parts.push((6, format!("› {}", status.typed)));
     }
-    parts.push((3, crate::listen::INTERRUPT_HINT.to_owned()));
+    parts.push((4, crate::listen::INTERRUPT_HINT.to_owned()));
     loop {
         let line = parts
             .iter()
@@ -239,6 +254,36 @@ mod tests {
         assert_eq!(row(50), "running 1m 12s · 25% context · esc to interrupt");
         assert_eq!(row(36), "running 1m 12s · esc to interrupt");
         assert_eq!(row(10), "running 1…");
+    }
+
+    #[test]
+    fn the_row_carries_the_cached_share_and_the_session_cost() {
+        let meter = std::sync::Arc::new(crate::spend::Meter::new(None));
+        meter.record(
+            "kimi-k3.1-pro",
+            Some(dino_protocol::Pricing::new(2.0, 0.2, 10.0)),
+            &dino_protocol::TokenUsage {
+                input_tokens: 18_200,
+                cached_input_tokens: 16_000,
+                output_tokens: 1_100,
+                ..dino_protocol::TokenUsage::default()
+            },
+        );
+        let status = Status {
+            cached: 16_000,
+            meter: Some(meter),
+            ..status()
+        };
+        let row = |room| row("thinking", Duration::from_secs(4), &status, room);
+        assert_eq!(
+            row(200),
+            "thinking 4s · Qwen3.7-Max · 25% context · 18.2k in (16.0k cached) · 1.1k out · \
+             $0.0186 session · esc to interrupt"
+        );
+        assert_eq!(
+            row(70),
+            "thinking 4s · 25% context · $0.0186 session · esc to interrupt"
+        );
     }
 
     #[test]

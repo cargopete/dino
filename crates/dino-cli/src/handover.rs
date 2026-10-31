@@ -17,7 +17,6 @@ use dino_sandbox::Sandbox;
 use tokio_util::sync::CancellationToken;
 
 use crate::Prepared;
-use crate::config;
 
 /// Sessions a chain may run, the first included.
 const MAX_SESSIONS: u32 = 4;
@@ -137,11 +136,7 @@ pub async fn run(
             reason: reason.clone(),
             pending: record.pending(),
         })?;
-        let fresh = config::build_session(
-            &prepared.settings,
-            prepared.system_prompt.clone(),
-            prepared.definitions.clone(),
-        )?;
+        let fresh = prepared.build_session(&prepared.settings)?;
         prepared.agent.replace_session(fresh);
         asked = false;
         message = seed(

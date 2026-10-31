@@ -101,7 +101,8 @@ CI and evals.
   a run of reads, lists and searches folded into one `explored` line. The line
   is redrawn in place only while it is still the last one written. Beneath it,
   while a turn runs, one status row gives the model, the context used, the
-  submission's tokens, the elapsed time and the interrupt key, and is cleared
+  submission's tokens with the cached share, the session's cost at list price,
+  the elapsed time and the interrupt key, and is cleared
   before anything else is written. Under `--plain` every line is written once,
   in order, as before. Paste arrives as one message; alt-enter or a
   trailing backslash starts a new line without sending. While a turn runs, Esc
@@ -143,6 +144,14 @@ CI and evals.
   your own. Dino takes the diff itself and runs the model read-only, so a review
   cannot change anything; findings come back as `path:line` with the input that
   shows each one.
+- **A second look before finishing.** With `review_model` set in the user file,
+  a run that changed the workspace and passed its finish checks is reviewed
+  before it ends by that model, at low effort where it offers one, seeing only
+  the task, the diff since the run began (64 KiB at most) and the latest test
+  and check results: one call, no tools, none of the conversation. Its
+  objections, five at most, go back to the model once, to fix or answer. Off
+  unless set; `dino eval --review-model <key>` measures it, recording the
+  objections and whether the work changed after.
 - **Handover for long tasks.** `dino run --handover` has the model keep a plan in
   a `progress` tool and hands the task to a fresh session when one reaches
   `--session-turns` (16) or stops with items pending, at most four sessions and
@@ -167,6 +176,12 @@ CI and evals.
   a turn, through vLLM's `thinking_token_budget`. Measured on the four slowest
   hard cases, it gave the same pass rate in 15% less time (RFC-0017 §8.7).
   `thinking_budget` in a config file changes it.
+- **A reasoning effort, where a model offers one.** `reasoning_effort` in a
+  config file, or `--effort` on a session or `dino eval`, sets `none`, `low`,
+  `medium`, `high`, `xhigh` or `max` on Kimi, Claude and GPT. A level the model
+  does not list is an error naming those it does; a fallback without it keeps
+  its own default. Unset leaves each default as it was, and an eval records the
+  effort with every run.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `dino replay` renders a past session through the same renderer the live one
@@ -460,7 +475,16 @@ system prompt a run would send, so its cost can be read rather than guessed.
 Inside a session: `/help`, `/status`, `/log`, `/exit`; `/clear` for a new
 conversation, `/model <key>` to switch model (in a new conversation, since
 history does not move between models), `/resume [id]` to list or continue a
-saved one, `/diff` for the working tree and `/cost` for requests and tokens.
+saved one, `/diff` for the working tree and `/cost` for requests, tokens and
+cost. Prices are list prices kept in the model profiles (`dino models --json`),
+cached input and cache writes at their own rates. A session says what it cost
+when it ends, along with today's total in UTC, which every session appends to
+`$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).
+Evals do not. A `[budget]` table in the user file, with `session_usd`,
+`daily_usd` or both, warns once at `warn_at` of either (0.8 unless set) and,
+when one is spent, asks before the next request; yes carries on as far again,
+and with nobody at the terminal the run stops. Evals ignore it; `dino eval
+--max-usd` stops a corpus at a ceiling of its own.
 `/compact` asks the model for a structured summary, with changes gated off,
 starts a fresh conversation and puts the summary ahead of your next message;
 the old conversation stays resumable in full. `auto_compact = true` in a config
@@ -502,11 +526,14 @@ Ollama serves a context far smaller than the model's native window unless
 `num_ctx` is raised, and it truncates rather than complaining. RFC-0003 section
 3.1 records what has and has not been measured there.
 
-The interface uses a warm dark palette because that is what it was drawn for.
-Dino ships the ink and leaves the background to the terminal, since a
-line-based program does not own its ground. It asks the terminal for that ground
-once at startup (OSC 11, then `COLORFGBG`) and on a light one draws the same hues
-in darker inks.
+The interface uses the Bedrock palette: lavender for what the machine printed,
+ember orange for what a person wrote, sandstone and stone grey for chrome, every
+ink at WCAG AA on common dark and light grounds. Dino ships the ink and leaves
+the background to the terminal, since a line-based program does not own its
+ground. It asks the terminal for that ground once at startup (OSC 11, then
+`COLORFGBG`) and on a light one draws the same hues in darker inks. An
+interactive session in colour opens with a small dinosaur; `greeting = false`
+in a config file turns it off, and `dino palette` shows both in your terminal.
 
 **What lands on disk.** `.dino/` in the workspace holds the session log, the
 resumable state and the input history. The log records what you typed; the state

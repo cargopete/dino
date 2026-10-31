@@ -29,7 +29,7 @@ use crate::config::RunSettings;
 use crate::style;
 use crate::style::FAINT;
 use crate::style::OK;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 use crate::style::WARN;
 
 const HEAD: &str = "DINOPROBEHEAD";
@@ -691,7 +691,7 @@ fn failed(name: &'static str, evidence: impl Into<String>) -> Check {
 }
 
 fn print_human(report: &ProbeReport) {
-    println!("{}", style::paint(SLATE, &report.model));
+    println!("{}", style::paint(PURPLE, &report.model));
     for check in &report.checks {
         let (colour, mark) = if check.passed {
             (OK, "pass")
@@ -701,7 +701,7 @@ fn print_human(report: &ProbeReport) {
         println!(
             "  {}  {}  {}",
             style::paint(colour, mark),
-            style::paint(SLATE, &format!("{:<20}", check.name)),
+            style::paint(PURPLE, &format!("{:<20}", check.name)),
             style::paint(FAINT, &check.evidence)
         );
     }

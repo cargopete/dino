@@ -25,6 +25,8 @@ use dino_model::qwen::QwenConfig;
 use dino_model::qwen::QwenSession;
 use dino_protocol::ModelProfile;
 use dino_protocol::ProviderKind;
+use dino_protocol::ReasoningEffort;
+use dino_protocol::ReasoningSupport;
 use dino_protocol::ToolDefinition;
 use dino_sandbox::Sandbox;
 use dino_sandbox::Unconfined;
@@ -78,6 +80,8 @@ pub enum Compaction {
     Automatic,
 }
 
+// Each switch is a separate setting a person can name in a config file.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct RunSettings {
     pub profile: ModelProfile,
@@ -106,13 +110,23 @@ pub struct RunSettings {
     /// Forces thinking on or off. `None` leaves [`RunSettings::disable_thinking`]
     /// in charge, which is every run except a probe comparing the two.
     pub enable_thinking: Option<bool>,
+    /// Set on every model in the chain that offers it. `None` keeps each
+    /// adapter's own default.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Emit no terminal colour. Resolved like everything else, so a config file
     /// can ask for it.
     pub plain: bool,
+    /// Open an interactive session with the dinosaur, where it can be drawn.
+    pub greeting: bool,
     /// Where to continue, in order, when the provider refuses the account.
     /// Always empty for evals and probes, whose results would otherwise mix
     /// models.
     pub fallback: Vec<ModelProfile>,
+    /// Spending ceilings. Always `None` for evals, which are not metered.
+    pub budget: Option<crate::spend::Budget>,
+    /// The model that reviews a run's change before it ends, with none of the
+    /// conversation. Off unless set.
+    pub review: Option<ModelProfile>,
 }
 
 /// Resolves the model profile named by a flag or `DINO_MODEL`.
@@ -156,6 +170,28 @@ pub fn resolve_workspace(flag: Option<&Path>) -> Result<PathBuf> {
         bail!("workspace root is not a directory: {}", root.display());
     }
     Ok(root)
+}
+
+/// The settings a reviewer's sessions are opened with: `review` at low effort
+/// where it offers a choice, and none of the run's thinking settings.
+///
+/// # Errors
+///
+/// Fails here, rather than at the first review, when its credential is missing.
+pub fn review_settings(settings: &RunSettings, review: &ModelProfile) -> Result<RunSettings> {
+    let low = ReasoningEffort::Low;
+    let review = RunSettings {
+        profile: review.clone(),
+        reasoning_effort: check_effort(review, low).is_ok().then_some(low),
+        thinking_budget: None,
+        disable_thinking: false,
+        enable_thinking: None,
+        fallback: Vec::new(),
+        review: None,
+        ..settings.clone()
+    };
+    build_session(&review, String::new(), Vec::new())?;
+    Ok(review)
 }
 
 /// Builds a provider session, failing here rather than inside a stream when a
@@ -208,6 +244,7 @@ fn build_provider(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Box<dyn ModelSession>> {
     let is_fallback = settings.profile.key != profile.key;
+    let effort = effort_for(settings, profile, is_fallback)?;
     match profile.provider {
         ProviderKind::Anthropic => {
             let key = require_env(env, "ANTHROPIC_API_KEY", profile, is_fallback)?;
@@ -219,6 +256,9 @@ fn build_provider(
             }
             // A backstop is there so work does not stop, so it should not crawl.
             config.fast = is_fallback && FAST_MODELS.contains(&profile.provider_model.as_str());
+            if let Some(effort) = effort {
+                config.effort = effort;
+            }
             Ok(Box::new(AnthropicSession::new(config)?))
         }
         ProviderKind::OpenAi => {
@@ -227,6 +267,9 @@ fn build_provider(
             config.instructions = system_prompt;
             config.tools = tools;
             config.max_output_tokens = profile.max_output_tokens;
+            if let Some(effort) = effort {
+                config.reasoning_effort = effort;
+            }
             Ok(Box::new(OpenAiSession::new(config)?))
         }
         ProviderKind::Qwen => {
@@ -244,6 +287,7 @@ fn build_provider(
                 (None, true) => Some(false),
                 (None, false) => None,
             };
+            config.reasoning_effort = effort;
             config.api_key = match hosted {
                 Some(hosted) => Some(require_env(env, hosted.key_variable, profile, is_fallback)?),
                 None => env("QWEN_API_KEY").filter(|key| !key.is_empty()),
@@ -260,6 +304,40 @@ fn build_provider(
             // way of ignoring --no-thinking than one would like.
             Ok(Box::new(QwenSession::new(config)?))
         }
+    }
+}
+
+/// Refuses an effort the profile does not list, naming the ones it does.
+pub fn check_effort(profile: &ModelProfile, effort: ReasoningEffort) -> Result<()> {
+    match &profile.reasoning {
+        ReasoningSupport::Effort(offered) if offered.contains(&effort) => Ok(()),
+        ReasoningSupport::Effort(offered) => bail!(
+            "{} does not offer {effort} reasoning effort; it offers {}",
+            profile.key,
+            offered
+                .iter()
+                .map(|effort| effort.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => bail!("{} has no reasoning effort to set", profile.key),
+    }
+}
+
+/// The effort a model in the chain is built with: the primary must offer it,
+/// a fallback that does not keeps its default.
+fn effort_for(
+    settings: &RunSettings,
+    profile: &ModelProfile,
+    is_fallback: bool,
+) -> Result<Option<ReasoningEffort>> {
+    let Some(effort) = settings.reasoning_effort else {
+        return Ok(None);
+    };
+    match check_effort(profile, effort) {
+        Ok(()) => Ok(Some(effort)),
+        Err(_) if is_fallback => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -347,8 +425,12 @@ mod tests {
             api_base: None,
             disable_thinking: false,
             enable_thinking: None,
+            reasoning_effort: None,
             plain: true,
+            greeting: false,
             fallback: Vec::new(),
+            budget: None,
+            review: None,
         }
     }
 
@@ -450,6 +532,51 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("gpt-9-imaginary"), "{message}");
         assert!(message.contains("known models:"), "{message}");
+    }
+
+    #[test]
+    fn an_effort_reaches_every_provider_that_offers_it() {
+        let set = |key: &str, effort: &str| {
+            let mut settings = settings(builtin_profile(key).expect("built-in profile"));
+            settings.reasoning_effort = Some(effort.parse().expect("a known effort"));
+            build_session_from(&settings, String::new(), Vec::new(), &|name: &str| {
+                Some(format!("{name}-value"))
+            })
+            .map(|_| ())
+        };
+
+        for (key, effort) in [
+            ("kimi-k3.1-pro", "low"),
+            ("kimi-k3.1-pro", "medium"),
+            ("kimi-k3.1-pro", "none"),
+            ("claude-sonnet-5.5", "low"),
+            ("terra-6.1", "none"),
+        ] {
+            set(key, effort).unwrap_or_else(|error| panic!("{key} at {effort}: {error}"));
+        }
+
+        let refused = set("kimi-k3.1-pro", "max").unwrap_err().to_string();
+        assert!(
+            refused.contains("kimi-k3.1-pro does not offer max")
+                && refused.contains("none, low, medium, high"),
+            "{refused}"
+        );
+        let refused = set("claude-sonnet-5.5", "none").unwrap_err().to_string();
+        assert!(refused.contains("does not offer none"), "{refused}");
+        let refused = set("qwen3.7-max", "low").unwrap_err().to_string();
+        assert!(refused.contains("no reasoning effort to set"), "{refused}");
+    }
+
+    #[test]
+    fn a_fallback_without_the_effort_keeps_its_default() {
+        let mut settings = settings(builtin_profile("kimi-k3.1-pro").expect("built-in profile"));
+        settings.reasoning_effort = Some(ReasoningEffort::None);
+        settings.fallback = vec![builtin_profile("claude-sonnet-5.5").expect("built-in profile")];
+
+        build_session_from(&settings, String::new(), Vec::new(), &|name: &str| {
+            Some(format!("{name}-value"))
+        })
+        .expect("Sonnet has no none effort, so it keeps its own");
     }
 
     #[test]

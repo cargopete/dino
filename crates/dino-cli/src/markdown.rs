@@ -7,10 +7,10 @@
 
 use crate::style;
 use crate::style::BOLD;
+use crate::style::EMBER;
 use crate::style::FAINT;
 use crate::style::MUTED;
-use crate::style::RUST;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 use crate::style::TEXT;
 
 #[derive(Debug, Default)]
@@ -70,7 +70,7 @@ impl Markdown {
             return format!(
                 "{}{}",
                 style::paint(FAINT, "  │ "),
-                style::paint(SLATE, line)
+                style::paint(PURPLE, line)
             );
         }
         let indent = &line[..line.len() - line.trim_start().len()];
@@ -85,12 +85,16 @@ impl Markdown {
             .iter()
             .find_map(|marker| body.strip_prefix(marker))
         {
-            return format!("{indent}{} {}", style::paint(RUST, "•"), inline(rest, TEXT));
+            return format!(
+                "{indent}{} {}",
+                style::paint(EMBER, "•"),
+                inline(rest, TEXT)
+            );
         }
         if let Some((number, rest)) = numbered(body) {
             return format!(
                 "{indent}{} {}",
-                style::paint(RUST, number),
+                style::paint(EMBER, number),
                 inline(rest, TEXT)
             );
         }
@@ -278,7 +282,7 @@ fn inline(text: &str, base: style::Colour) -> String {
         out.push_str(&style::paint(base, &rest[..start]));
         let inner = &after[..end];
         out.push_str(&if marker == "`" {
-            style::paint(SLATE, inner)
+            style::paint(PURPLE, inner)
         } else {
             style::paint_with(base, &[BOLD], inner)
         });

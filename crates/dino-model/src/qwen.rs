@@ -141,7 +141,7 @@ impl QwenSession {
             };
             if !offered || config.profile.chat_server != ChatServer::Moonshot {
                 return Err(ModelError::Configuration(format!(
-                    "{} does not offer {effort:?} reasoning effort",
+                    "{} does not offer {effort} reasoning effort",
                     config.profile.display_name
                 )));
             }
@@ -378,10 +378,7 @@ impl QwenSession {
         if self.config.enable_thinking == Some(false) || effort == Some(ReasoningEffort::None) {
             body.insert("thinking".into(), json!({"type": "disabled"}));
         } else if let Some(effort) = effort {
-            body.insert(
-                "reasoning_effort".into(),
-                json!(crate::openai::reasoning_effort_name(effort)),
-            );
+            body.insert("reasoning_effort".into(), json!(effort.name()));
         }
     }
 }
@@ -992,6 +989,8 @@ struct ToolCallAccumulator {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use futures_util::TryStreamExt;
     use pretty_assertions::assert_eq;
     use tokio::io::AsyncReadExt;
@@ -1721,6 +1720,92 @@ mod tests {
             text: "hello".into()
         }));
         assert_eq!(server.await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_kimi_turn_of_several_calls_is_answered_call_by_call_in_order() {
+        let chunks = [
+            r#"{"id":"chat-k","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"functions.read:0","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}"#,
+            r#"{"id":"chat-k","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"functions.read:1","type":"function","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}"#,
+            r#"{"id":"chat-k","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"src/a.rs\"}"}}]},"finish_reason":null}]}"#,
+            r#"{"id":"chat-k","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"src/b.rs\"}"}},{"index":2,"id":"functions.todo:2","type":"function","function":{"name":"todo","arguments":"{\"items\":[]}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ];
+        let stream = chunks.iter().fold(String::new(), |mut stream, chunk| {
+            let _ = write!(stream, "data: {chunk}\n\n");
+            stream
+        });
+        let (base, _server) = serve_in_turn(vec![format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{stream}data: [DONE]\n\n"
+        )])
+        .await;
+        let profile = crate::builtin_profile("kimi-k3.1-pro").unwrap();
+        let mut config = QwenConfig::new(base, profile);
+        config.tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "read a file".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        let mut session = QwenSession::new(config).unwrap();
+
+        let events: Vec<_> = session
+            .next(TurnInput::User {
+                content: "read both".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let calls: Vec<(String, Value)> = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelEvent::ToolCallCompleted { call } => {
+                    Some((call.id.clone(), call.arguments.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("functions.read:0".to_owned(), json!({"path": "src/a.rs"})),
+                ("functions.read:1".to_owned(), json!({"path": "src/b.rs"})),
+                ("functions.todo:2".to_owned(), json!({"items": []})),
+            ]
+        );
+
+        let results = TurnInput::ToolResults {
+            results: calls
+                .iter()
+                .map(|(id, _)| dino_protocol::ToolResult {
+                    call_id: id.clone(),
+                    output: dino_protocol::ToolOutput::success(format!("for {id}")),
+                })
+                .collect(),
+        };
+        let body = session
+            .request_body(&QwenSession::pending_messages(results))
+            .unwrap();
+        assert_eq!(body["parallel_tool_calls"], true);
+        let messages = body["messages"].as_array().unwrap();
+        let [assistant, answers @ ..] = &messages[messages.len() - 4..] else {
+            unreachable!()
+        };
+        let asked: Vec<&Value> = assistant["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|call| &call["id"])
+            .collect();
+        assert_eq!(
+            asked,
+            ["functions.read:0", "functions.read:1", "functions.todo:2"]
+        );
+        for (answer, (id, _)) in answers.iter().zip(&calls) {
+            assert_eq!(answer["role"], "tool");
+            assert_eq!(answer["tool_call_id"], json!(id));
+            assert_eq!(answer["content"], json!(format!("for {id}")));
+        }
     }
 
     #[tokio::test]

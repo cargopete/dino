@@ -1,14 +1,15 @@
 //! The palette, and whether the terminal can take it.
 //!
-//! The colours are the house palette, unchanged. Its rule survives the move from
-//! a page to a terminal intact: if a shell printed it, it is slate; if a person
-//! wrote it, it is terracotta.
+//! Bedrock: lavender, ember, sandstone and stone grey. Its rule is the one the
+//! house palette had: if a shell printed it, it is purple; if a person wrote
+//! it, it is ember. Every ink reads at WCAG AA on common dark and light
+//! grounds, and a test holds it there.
 //!
-//! One token is deliberately absent. The house ground is `#171614`, and a
-//! line-based program does not own its background: the terminal does. Dino
-//! ships the ink and leaves the ground alone. It asks the terminal what the
-//! ground is once at startup, and on a light one draws each colour in a darker
-//! ink of the same hue, because the dark palette washes out on white.
+//! The ground itself is not in the palette. A line-based program does not own
+//! its background: the terminal does. Dino ships the ink and leaves the ground
+//! alone. It asks the terminal what the ground is once at startup, and on a
+//! light one draws each colour in a darker ink of the same hue, because the
+//! dark palette washes out on white.
 
 use std::sync::OnceLock;
 
@@ -44,18 +45,18 @@ pub struct Colour {
 }
 
 /// The machine's voice: tool invocations, chrome, anything a shell printed.
-pub const SLATE: Colour = Colour {
-    rgb: (0x8b, 0xb8, 0xdc),
-    indexed: 110,
-    light: (0x2f, 0x64, 0x8c),
-    light_indexed: 24,
+pub const PURPLE: Colour = Colour {
+    rgb: (0xb7, 0x9b, 0xe0),
+    indexed: 140,
+    light: (0x6a, 0x3f, 0xa8),
+    light_indexed: 91,
 };
 /// The person's voice: approval prompts, kickers, a refusal someone gave.
-pub const RUST: Colour = Colour {
-    rgb: (0xcd, 0x85, 0x60),
-    indexed: 173,
-    light: (0xa0, 0x4e, 0x2a),
-    light_indexed: 130,
+pub const EMBER: Colour = Colour {
+    rgb: (0xe8, 0x94, 0x4a),
+    indexed: 172,
+    light: (0xa3, 0x52, 0x1a),
+    light_indexed: 94,
 };
 /// Model prose. Never pure white; it glares on a warm dark ground.
 pub const TEXT: Colour = Colour {
@@ -64,33 +65,49 @@ pub const TEXT: Colour = Colour {
     light: (0x2a, 0x28, 0x24),
     light_indexed: 235,
 };
-/// Chrome that still carries meaning.
+/// Chrome that still carries meaning. Sandstone.
 pub const MUTED: Colour = Colour {
-    rgb: (0x9c, 0x97, 0x8c),
-    indexed: 246,
-    light: (0x5c, 0x58, 0x50),
-    light_indexed: 240,
+    rgb: (0xc4, 0xa8, 0x82),
+    indexed: 180,
+    light: (0x6e, 0x55, 0x34),
+    light_indexed: 95,
 };
 /// Labels a reader can lose without losing anything. Nothing load-bearing.
+/// Stone grey, still dark enough to read.
 pub const FAINT: Colour = Colour {
-    rgb: (0x6e, 0x6a, 0x61),
-    indexed: 242,
-    light: (0x86, 0x81, 0x76),
-    light_indexed: 244,
+    rgb: (0x9a, 0x95, 0x8d),
+    indexed: 246,
+    light: (0x6a, 0x65, 0x5e),
+    light_indexed: 241,
 };
 /// A thing that worked.
 pub const OK: Colour = Colour {
-    rgb: (0x86, 0xb5, 0x92),
+    rgb: (0x8f, 0xbf, 0x8a),
     indexed: 108,
-    light: (0x3a, 0x75, 0x4a),
-    light_indexed: 65,
+    light: (0x3c, 0x73, 0x43),
+    light_indexed: 22,
 };
 /// A thing that stopped early.
 pub const WARN: Colour = Colour {
-    rgb: (0xcd, 0xb0, 0x6a),
+    rgb: (0xd8, 0xb4, 0x5a),
     indexed: 179,
-    light: (0x8a, 0x66, 0x10),
-    light_indexed: 136,
+    light: (0x7d, 0x5c, 0x0c),
+    light_indexed: 58,
+};
+/// A near-black spot, drawn only on [`HIDE`]: on a dark terminal it would
+/// vanish into the ground, so it brings its own.
+pub const SPOT: Colour = Colour {
+    rgb: (0x1d, 0x17, 0x24),
+    indexed: 16,
+    light: (0x1d, 0x17, 0x24),
+    light_indexed: 16,
+};
+/// The purple behind a [`SPOT`], the same on either ground.
+pub const HIDE: Colour = Colour {
+    rgb: (0x9b, 0x6f, 0xd0),
+    indexed: 98,
+    light: (0x9b, 0x6f, 0xd0),
+    light_indexed: 98,
 };
 
 /// Behind a changed word in a diff, on a truecolor terminal only: removed then
@@ -325,6 +342,11 @@ impl Colour {
     }
 
     fn sequence_on(self, depth: Depth, ground: Ground) -> String {
+        self.layer_on(depth, ground, 38)
+    }
+
+    /// `layer` is 38 for the ink and 48 for the cell behind it.
+    fn layer_on(self, depth: Depth, ground: Ground, layer: u8) -> String {
         let (rgb, indexed) = match ground {
             Ground::Dark => (self.rgb, self.indexed),
             Ground::Light => (self.light, self.light_indexed),
@@ -332,12 +354,29 @@ impl Colour {
         match depth {
             Depth::True => {
                 let (red, green, blue) = rgb;
-                format!("\u{1b}[38;2;{red};{green};{blue}m")
+                format!("\u{1b}[{layer};2;{red};{green};{blue}m")
             }
-            Depth::Indexed => format!("\u{1b}[38;5;{indexed}m"),
+            Depth::Indexed => format!("\u{1b}[{layer};5;{indexed}m"),
             Depth::None => String::new(),
         }
     }
+}
+
+/// One colour on another, for a mark that has to bring its own ground.
+#[must_use]
+pub fn paint_on(ink: Colour, behind: Colour, value: &str) -> String {
+    paint_on_at(depth(), ground(), ink, behind, value)
+}
+
+fn paint_on_at(depth: Depth, ground: Ground, ink: Colour, behind: Colour, value: &str) -> String {
+    if depth == Depth::None {
+        return value.to_owned();
+    }
+    format!(
+        "{}{}{value}{RESET}",
+        behind.layer_on(depth, ground, 48),
+        ink.layer_on(depth, ground, 38)
+    )
 }
 
 /// Paints a value in one colour, with optional attributes.
@@ -389,10 +428,10 @@ pub fn paint_changed(colour: Colour, added: bool, value: &str) -> String {
 
 /// A mono instrument label: the stamped plate above a dial, in the house style.
 ///
-/// Terracotta, because a label is written by a person for a person.
+/// Ember, because a label is written by a person for a person.
 #[must_use]
 pub fn kicker(value: &str) -> String {
-    paint(RUST, &value.to_uppercase())
+    paint(EMBER, &value.to_uppercase())
 }
 
 #[cfg(test)]
@@ -409,44 +448,47 @@ mod tests {
     #[test]
     fn a_colour_renders_exactly_in_truecolor_and_approximately_otherwise() {
         assert_eq!(
-            SLATE.sequence_at(Depth::True),
-            "\u{1b}[38;2;139;184;220m",
+            PURPLE.sequence_at(Depth::True),
+            "\u{1b}[38;2;183;155;224m",
             "truecolor carries the mandated value exactly"
         );
-        assert_eq!(SLATE.sequence_at(Depth::Indexed), "\u{1b}[38;5;110m");
-        assert_eq!(RUST.sequence_at(Depth::True), "\u{1b}[38;2;205;133;96m");
-        assert_eq!(RUST.sequence_at(Depth::Indexed), "\u{1b}[38;5;173m");
+        assert_eq!(PURPLE.sequence_at(Depth::Indexed), "\u{1b}[38;5;140m");
+        assert_eq!(EMBER.sequence_at(Depth::True), "\u{1b}[38;2;232;148;74m");
+        assert_eq!(EMBER.sequence_at(Depth::Indexed), "\u{1b}[38;5;172m");
     }
 
     #[test]
     fn plain_emits_no_escape_sequences_at_all() {
         // Including the attributes. Colour removed with a stray bold left
         // behind is not plain, it is untidy.
-        assert_eq!(paint_at(Depth::None, SLATE, &[], "tool"), "tool");
-        assert_eq!(paint_at(Depth::None, RUST, &[BOLD], "approval"), "approval");
-        assert_eq!(SLATE.sequence_at(Depth::None), "");
+        assert_eq!(paint_at(Depth::None, PURPLE, &[], "tool"), "tool");
+        assert_eq!(
+            paint_at(Depth::None, EMBER, &[BOLD], "approval"),
+            "approval"
+        );
+        assert_eq!(PURPLE.sequence_at(Depth::None), "");
     }
 
     #[test]
     fn attributes_precede_the_colour_so_neither_cancels_the_other() {
-        let painted = paint_at(Depth::True, RUST, &[BOLD], "approval");
+        let painted = paint_at(Depth::True, EMBER, &[BOLD], "approval");
 
-        assert_eq!(painted, "\u{1b}[1m\u{1b}[38;2;205;133;96mapproval\u{1b}[0m");
+        assert_eq!(painted, "\u{1b}[1m\u{1b}[38;2;232;148;74mapproval\u{1b}[0m");
     }
 
     #[test]
     fn a_light_ground_gets_the_darker_ink() {
         assert_eq!(
-            SLATE.sequence_on(Depth::True, Ground::Light),
-            "\u{1b}[38;2;47;100;140m"
+            PURPLE.sequence_on(Depth::True, Ground::Light),
+            "\u{1b}[38;2;106;63;168m"
         );
         assert_eq!(
-            SLATE.sequence_on(Depth::Indexed, Ground::Light),
-            "\u{1b}[38;5;24m"
+            PURPLE.sequence_on(Depth::Indexed, Ground::Light),
+            "\u{1b}[38;5;91m"
         );
         assert_eq!(
-            SLATE.sequence_on(Depth::True, Ground::Dark),
-            "\u{1b}[38;2;139;184;220m"
+            PURPLE.sequence_on(Depth::True, Ground::Dark),
+            "\u{1b}[38;2;183;155;224m"
         );
     }
 
@@ -483,10 +525,82 @@ mod tests {
     #[test]
     fn the_two_accents_are_the_mandated_values() {
         // The palette is not this file's to redesign, so it is pinned here.
-        assert_eq!(SLATE.rgb, (0x8b, 0xb8, 0xdc));
-        assert_eq!(RUST.rgb, (0xcd, 0x85, 0x60));
+        assert_eq!(PURPLE.rgb, (0xb7, 0x9b, 0xe0));
+        assert_eq!(EMBER.rgb, (0xe8, 0x94, 0x4a));
         assert_eq!(TEXT.rgb, (0xec, 0xe9, 0xe3));
-        assert_eq!(OK.rgb, (0x86, 0xb5, 0x92));
-        assert_eq!(WARN.rgb, (0xcd, 0xb0, 0x6a));
+        assert_eq!(OK.rgb, (0x8f, 0xbf, 0x8a));
+        assert_eq!(WARN.rgb, (0xd8, 0xb4, 0x5a));
+    }
+
+    #[test]
+    fn a_spot_brings_its_own_ground() {
+        assert_eq!(
+            paint_on_at(Depth::True, Ground::Dark, SPOT, HIDE, "o"),
+            "\u{1b}[48;2;155;111;208m\u{1b}[38;2;29;23;36mo\u{1b}[0m"
+        );
+        assert_eq!(
+            paint_on_at(Depth::Indexed, Ground::Light, SPOT, HIDE, "o"),
+            "\u{1b}[48;5;98m\u{1b}[38;5;16mo\u{1b}[0m"
+        );
+        assert_eq!(paint_on_at(Depth::None, Ground::Dark, SPOT, HIDE, "o"), "o");
+    }
+
+    fn luminance((red, green, blue): (u8, u8, u8)) -> f64 {
+        let linear = |channel: u8| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    }
+
+    fn contrast(one: (u8, u8, u8), other: (u8, u8, u8)) -> f64 {
+        let (one, other) = (luminance(one), luminance(other));
+        (one.max(other) + 0.05) / (one.min(other) + 0.05)
+    }
+
+    /// What a stock xterm draws for an index from the 256.
+    fn xterm(index: u8) -> (u8, u8, u8) {
+        const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        if index >= 232 {
+            let grey = 8 + 10 * (index - 232);
+            return (grey, grey, grey);
+        }
+        let cube = usize::from(index - 16);
+        (CUBE[cube / 36], CUBE[cube / 6 % 6], CUBE[cube % 6])
+    }
+
+    #[test]
+    fn every_ink_reads_at_aa_on_common_grounds() {
+        const DARK: [(u8, u8, u8); 2] = [(0x1a, 0x1a, 0x1a), (0x28, 0x2c, 0x34)];
+        const LIGHT: [(u8, u8, u8); 2] = [(0xff, 0xff, 0xff), (0xfd, 0xf6, 0xe3)];
+        let inks = [
+            ("purple", PURPLE),
+            ("ember", EMBER),
+            ("text", TEXT),
+            ("muted", MUTED),
+            ("faint", FAINT),
+            ("ok", OK),
+            ("warn", WARN),
+        ];
+        for (name, ink) in inks {
+            for ground in DARK {
+                for (how, rgb) in [("exact", ink.rgb), ("indexed", xterm(ink.indexed))] {
+                    let ratio = contrast(rgb, ground);
+                    assert!(ratio >= 4.5, "{name} {how} on {ground:?}: {ratio:.2}");
+                }
+            }
+            for ground in LIGHT {
+                for (how, rgb) in [("exact", ink.light), ("indexed", xterm(ink.light_indexed))] {
+                    let ratio = contrast(rgb, ground);
+                    assert!(ratio >= 4.5, "{name} light {how} on {ground:?}: {ratio:.2}");
+                }
+            }
+        }
+        assert!(contrast(SPOT.rgb, HIDE.rgb) >= 4.5);
+        assert!(contrast(xterm(SPOT.indexed), xterm(HIDE.indexed)) >= 4.5);
     }
 }
