@@ -11,6 +11,7 @@ mod edit_check;
 mod finish;
 mod gate;
 pub mod outline;
+mod trim;
 
 pub use crate::cargo::CargoLimits;
 pub use crate::cargo::CargoTool;

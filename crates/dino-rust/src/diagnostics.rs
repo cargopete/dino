@@ -166,6 +166,30 @@ pub fn cap(
     (diagnostics, dropped)
 }
 
+/// Diagnostics whose rendering is kept by [`shorten`].
+const WHOLE: usize = 5;
+
+/// Drops the rendering of all but the first few diagnostics and the first of
+/// each warning, leaving their message and location, and says how many.
+pub fn shorten(diagnostics: &mut [Diagnostic]) -> usize {
+    let mut kinds = HashSet::new();
+    let mut whole = 0;
+    let mut shortened = 0;
+    for diagnostic in diagnostics {
+        let new_kind = kinds.insert((diagnostic.level.clone(), diagnostic.code.clone()));
+        if diagnostic.rendered.is_none() {
+            continue;
+        }
+        if whole < WHOLE && (diagnostic.level == "error" || new_kind) {
+            whole += 1;
+        } else {
+            diagnostic.rendered = None;
+            shortened += 1;
+        }
+    }
+    shortened
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +281,33 @@ mod tests {
                 warnings: 2
             }
         );
+    }
+
+    #[test]
+    fn a_repeated_warning_keeps_its_location_but_not_its_rendering() {
+        let diagnostic = |level: &str, code: &str, line: u64| Diagnostic {
+            level: level.to_owned(),
+            code: Some(code.to_owned()),
+            message: "m".to_owned(),
+            file: Some("src/lib.rs".to_owned()),
+            line: Some(line),
+            column: Some(1),
+            rendered: Some(format!("{level} at {line}")),
+        };
+        let mut diagnostics = vec![
+            diagnostic("error", "E0308", 1),
+            diagnostic("warning", "unused_variables", 2),
+            diagnostic("warning", "unused_variables", 3),
+            diagnostic("warning", "dead_code", 4),
+        ];
+
+        let shortened = shorten(&mut diagnostics);
+
+        assert_eq!(shortened, 1);
+        assert!(diagnostics[1].rendered.is_some());
+        assert!(diagnostics[2].rendered.is_none());
+        assert_eq!(diagnostics[2].line, Some(3));
+        assert!(diagnostics[3].rendered.is_some());
     }
 
     #[test]
