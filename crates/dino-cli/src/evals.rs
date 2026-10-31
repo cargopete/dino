@@ -11,7 +11,7 @@ use dino_eval::Case;
 use dino_eval::EarlyStop;
 use dino_eval::Outcome;
 use dino_eval::RunRate;
-use dino_eval::run_case;
+use dino_eval::run_case_reviewed;
 use dino_eval::total_cost;
 use dino_eval::wilson;
 use dino_eval::wilson_interval;
@@ -123,6 +123,11 @@ pub struct EvalArgs {
     /// provider's model name. The person's own configuration is left untouched.
     #[arg(long, value_enum, requires = "harness")]
     pub harness_provider: Option<HarnessProvider>,
+    /// Before a run ends, have this model review the change with none of the
+    /// conversation: the task, the diff and the latest checks, in one call.
+    /// At low effort where the model offers it.
+    #[arg(long, value_name = "KEY", conflicts_with = "harness")]
+    pub review_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -226,6 +231,11 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
         },
         (None, _, _) => bail!("--harness needs --model, the harness's own model name"),
     };
+    let review = args
+        .review_model
+        .as_deref()
+        .map(|key| config::resolve_profile(Some(key)))
+        .transpose()?;
     let mut cases = select(&args)?;
     apply_wall(&mut cases, args.max_wall_secs)?;
     let rate = run_rate(&args)?;
@@ -237,26 +247,14 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     std::fs::create_dir_all(&scratch)?;
 
     if !args.json {
+        let model = profile
+            .as_ref()
+            .map_or(&label, |profile| &profile.display_name);
         eprintln!(
             "{}",
             style::paint(
                 FAINT,
-                &format!(
-                    "{}{} · {} case(s){} · scratch {}",
-                    profile
-                        .as_ref()
-                        .map_or(&label, |profile| &profile.display_name),
-                    args.effort
-                        .map(|effort| format!(" · {effort} effort"))
-                        .unwrap_or_default(),
-                    cases.len(),
-                    if args.without.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · without {}", args.without.join(", "))
-                    },
-                    scratch.display()
-                )
+                &header(&args, model, review.as_ref(), cases.len(), &scratch)
             )
         );
     }
@@ -264,7 +262,16 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     let trials = args.trials.max(1);
     let runs = (1..=trials)
         .flat_map(|trial| cases.iter().map(move |case| (trial, case)))
-        .map(|(trial, case)| run_one(&args, profile.as_ref(), &scratch, trials, trial, case));
+        .map(|(trial, case)| {
+            run_one(
+                &args,
+                profile.as_ref(),
+                review.as_ref(),
+                &scratch,
+                (trials, trial),
+                case,
+            )
+        });
     let mut outcomes = Vec::with_capacity(cases.len());
     let mut finished = std::pin::pin!(scheduled(runs, args.jobs));
     let mut spent = 0.0;
@@ -302,6 +309,31 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     })
 }
 
+/// The line a corpus run opens with.
+fn header(
+    args: &EvalArgs,
+    model: &str,
+    review: Option<&dino_protocol::ModelProfile>,
+    cases: usize,
+    scratch: &Path,
+) -> String {
+    format!(
+        "{model}{}{} · {cases} case(s){} · scratch {}",
+        args.effort
+            .map(|effort| format!(" · {effort} effort"))
+            .unwrap_or_default(),
+        review
+            .map(|review| format!(" · reviewed by {}", review.display_name))
+            .unwrap_or_default(),
+        if args.without.is_empty() {
+            String::new()
+        } else {
+            format!(" · without {}", args.without.join(", "))
+        },
+        scratch.display()
+    )
+}
+
 /// Runs up to `jobs` of `runs` at once, yielding each result in the order given.
 fn scheduled<F: Future>(
     runs: impl IntoIterator<Item = F>,
@@ -314,9 +346,9 @@ fn scheduled<F: Future>(
 async fn run_one(
     args: &EvalArgs,
     profile: Option<&dino_protocol::ModelProfile>,
+    review: Option<&dino_protocol::ModelProfile>,
     scratch: &Path,
-    trials: u32,
-    trial: u32,
+    (trials, trial): (u32, u32),
     case: &Case,
 ) -> Result<Outcome> {
     let scratch = if trials > 1 {
@@ -352,14 +384,37 @@ async fn run_one(
             .map(|session| session as Box<dyn ModelSession>)
     };
 
+    let review = review
+        .map(|review| review_sessions(&settings, review))
+        .transpose()?;
+
     let variant = dino_eval::Variant {
         without: args.without.clone(),
         max_diagnostics: args.max_diagnostics,
         thinking_budget: args.thinking_budget,
         reasoning_effort: args.effort,
         score: args.score,
+        review_model: args.review_model.clone(),
     };
-    Ok(run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?)
+    Ok(run_case_reviewed(
+        case,
+        &scratch,
+        Arc::clone(&sandbox),
+        &variant,
+        &build,
+        review,
+    )
+    .await?)
+}
+
+fn review_sessions(
+    settings: &RunSettings,
+    review: &dino_protocol::ModelProfile,
+) -> Result<dino_core::review::OpenSession> {
+    let settings = config::review_settings(settings, review)?;
+    Ok(Box::new(move |system| {
+        config::build_session(&settings, system, Vec::new()).map_err(|error| error.to_string())
+    }))
 }
 
 /// Prints the runs, and the score when there is one, as a table or as JSON.
@@ -502,6 +557,7 @@ fn eval_settings(
         greeting: false,
         fallback: Vec::new(),
         budget: None,
+        review: None,
     }
 }
 
@@ -684,6 +740,9 @@ fn print_case(outcome: &Outcome) {
     for failure in &outcome.failures {
         println!("        {}", style::paint(WARN, failure));
     }
+    if let Some(review) = &outcome.metrics.review {
+        println!("        {}", style::paint(MUTED, &review_line(review)));
+    }
     if let Some(score) = &outcome.score {
         println!(
             "        {}",
@@ -704,6 +763,57 @@ fn print_case(outcome: &Outcome) {
         for note in &score.notes {
             println!("        {}", style::paint(FAINT, note));
         }
+    }
+}
+
+/// How many runs were reviewed, objected to, and changed after an objection,
+/// when any run was asked to be.
+fn review_summary(outcomes: &[Outcome]) -> Option<String> {
+    let asked = outcomes
+        .iter()
+        .filter(|outcome| outcome.review_model.is_some())
+        .count();
+    if asked == 0 {
+        return None;
+    }
+    let reviews: Vec<&dino_eval::Review> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.metrics.review.as_ref())
+        .collect();
+    let objected: Vec<&&dino_eval::Review> = reviews
+        .iter()
+        .filter(|review| !review.objections.is_empty())
+        .collect();
+    let changed = objected
+        .iter()
+        .filter(|review| review.changed_after == Some(true))
+        .count();
+    let failed = reviews
+        .iter()
+        .filter(|review| review.error.is_some())
+        .count();
+    Some(format!(
+        "reviewed {} of {asked} run(s): {} objected to, {changed} of those changed after, \
+         {failed} review(s) failed",
+        reviews.len(),
+        objected.len()
+    ))
+}
+
+fn review_line(review: &dino_eval::Review) -> String {
+    let after = match review.changed_after {
+        Some(true) => ", changed after",
+        Some(false) => ", unchanged after",
+        None => "",
+    };
+    match (&review.error, review.objections.as_slice()) {
+        (Some(error), _) => format!("review failed: {error}"),
+        (None, []) => "reviewed: no objections".to_owned(),
+        (None, objections) => format!(
+            "reviewed: {} objection(s){after}: {}",
+            objections.len(),
+            objections.join(" | ")
+        ),
     }
 }
 
@@ -777,6 +887,9 @@ fn print_summary(outcomes: &[Outcome]) {
             &format!("{input} input token(s), {output} output token(s) across the corpus{priced}")
         )
     );
+    if let Some(reviews) = review_summary(outcomes) {
+        println!("  {}", style::paint(MUTED, &reviews));
+    }
     let rows = case_counts(outcomes);
     if rows.iter().any(|(_, _, total)| *total > 1) {
         for (name, successes, total) in rows {

@@ -190,6 +190,76 @@ async fn a_case_that_fixes_the_fixture_passes() {
 }
 
 #[tokio::test]
+async fn a_reviewed_run_records_the_objections_and_whether_the_work_changed_after() {
+    let scratch = Scratch::new();
+    let case = Case::load(corpus().join("fix-type-errors")).unwrap();
+    let staged = case.materialise(&scratch.path).unwrap();
+    let first = sha_of(&staged, "src/lib.rs");
+    let fixed_once = fs::read_to_string(staged.join("src/lib.rs"))
+        .unwrap()
+        .replacen("\"one\"", "1", 1);
+    let second = digest(fixed_once.as_bytes());
+    let turns = vec![
+        tool_turn(
+            "c1",
+            "apply_patch",
+            patch("src/lib.rs", &first, "\"one\"", "1"),
+        ),
+        tool_turn(
+            "c2",
+            "apply_patch",
+            patch("src/lib.rs", &second, "\"two\"", "2"),
+        ),
+        text_turn("Both fixed."),
+        // Sent back once for the untested edit, then reviewed.
+        text_turn("Both fixed."),
+        text_turn("The tests were not run; the fix is two literals."),
+    ];
+    let build = |_prompt: String, _tools: Vec<dino_protocol::ToolDefinition>| {
+        Ok(Box::new(Scripted {
+            profile: dino_model::builtin_profiles().remove(0),
+            turns: VecDeque::from(turns.clone()),
+        }) as Box<dyn ModelSession>)
+    };
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let review: dino_core::review::OpenSession = Box::new(move |system| {
+        seen.lock().unwrap().push(system);
+        Ok(Box::new(Scripted {
+            profile: dino_model::builtin_profiles().remove(0),
+            turns: VecDeque::from([text_turn("- no test was run after the edit")]),
+        }) as Box<dyn ModelSession>)
+    });
+    let variant = dino_eval::Variant {
+        review_model: Some("claude-haiku-5.5".to_owned()),
+        ..dino_eval::Variant::default()
+    };
+
+    let outcome = dino_eval::run_case_reviewed(
+        &case,
+        &scratch.path,
+        Arc::new(Unconfined),
+        &variant,
+        &build,
+        Some(review),
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.passed, "failures: {:?}", outcome.failures);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(outcome.review_model.as_deref(), Some("claude-haiku-5.5"));
+    let review = outcome.metrics.review.clone().unwrap();
+    assert_eq!(review.model_turn, 4);
+    assert_eq!(review.objections, ["no test was run after the edit"]);
+    assert_eq!(review.changed_after, Some(false));
+    assert_eq!(review.tokens.input_tokens, 120);
+    assert_eq!(outcome.metrics.model_turns, 5);
+    let record = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(record["metrics"]["review"]["changed_after"], json!(false));
+}
+
+#[tokio::test]
 async fn a_run_that_changes_nothing_fails_even_when_the_code_compiles() {
     let scratch = Scratch::new();
     // This fixture already compiles, so only the harness's own rule can catch

@@ -67,6 +67,23 @@ pub struct Metrics {
     pub untested_at_end: bool,
     pub tokens: TokenUsage,
     pub stop_reason: Option<StopReason>,
+    /// The zero-context review before the run ended, when one ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
+}
+
+/// What the review said. Its tokens are the reviewer's, not in `tokens`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Review {
+    pub model_turn: u32,
+    pub objections: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub tokens: TokenUsage,
+    /// Whether the workspace changed after the review. Not in the log: the
+    /// runner compares the diff the reviewer saw with the final one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_after: Option<bool>,
 }
 
 /// Reads a session log and counts what happened.
@@ -171,6 +188,20 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, ToolCall>, event: &
         AgentEvent::TurnsRunningOut { .. } => metrics.told_turns_left = true,
         AgentEvent::TurnCutOff { .. } => metrics.turns_cut_off += 1,
         AgentEvent::SentBack { .. } => metrics.sent_back = true,
+        AgentEvent::Reviewed {
+            model_turn,
+            objections,
+            error,
+            usage,
+        } => {
+            metrics.review = Some(Review {
+                model_turn: *model_turn,
+                objections: objections.clone(),
+                error: error.clone(),
+                tokens: *usage,
+                changed_after: None,
+            });
+        }
         AgentEvent::HandedOver { .. } => metrics.handovers += 1,
         // Counted by nothing: a submission is the unit a metric is per, not a
         // metric itself.

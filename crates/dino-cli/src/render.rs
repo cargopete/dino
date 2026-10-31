@@ -584,6 +584,12 @@ impl EventSink for Renderer {
                     ),
                 ))
             }
+            AgentEvent::Reviewed {
+                objections, error, ..
+            } => {
+                self.break_stream()?;
+                write_out(&reviewed(objections, error.as_deref()))
+            }
             AgentEvent::ToolFinished { result, .. } => self.tool_finished(result),
         }
     }
@@ -863,6 +869,21 @@ fn submitted(text: &str) -> Result<(), SinkError> {
     Ok(())
 }
 
+fn reviewed(objections: &[String], error: Option<&str>) -> String {
+    let line = match (objections.first(), error) {
+        (Some(first), _) => format!(
+            "  the reviewer objected ({}): {}\n",
+            objections.len(),
+            cap(first_line(first), MAX_SUMMARY_BYTES)
+        ),
+        (None, Some(error)) => format!(
+            "  the review failed: {}\n",
+            cap(first_line(error), MAX_SUMMARY_BYTES)
+        ),
+        (None, None) => "  reviewed: no objections\n".to_owned(),
+    };
+    style::paint(if objections.is_empty() { FAINT } else { WARN }, &line)
+}
 fn elided(results: usize, calls: usize, bytes: usize) -> Result<(), SinkError> {
     write_out(&style::paint(
         FAINT,

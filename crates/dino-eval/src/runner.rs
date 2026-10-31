@@ -89,6 +89,10 @@ pub struct Outcome {
     /// What the run cost, when the invocation named a rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<crate::cost::RunCost>,
+    /// The model that reviewed the work before the run ended, when one was
+    /// asked to. Whether it did is `metrics.review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_model: Option<String>,
 }
 
 /// Why a run was stopped before its assertions were judged.
@@ -118,6 +122,9 @@ pub struct Variant {
     pub reasoning_effort: Option<dino_protocol::ReasoningEffort>,
     /// Ask for a `dino-report` and score the run. RFC-0019.
     pub score: bool,
+    /// The model key of the zero-context reviewer, recorded likewise; its
+    /// sessions are the caller's to open.
+    pub review_model: Option<String>,
 }
 
 /// What shapes the tools a session gets.
@@ -213,6 +220,23 @@ pub async fn run_case(
     variant: &Variant,
     build_session: BuildSession<'_>,
 ) -> Result<Outcome, EvalError> {
+    run_case_reviewed(case, scratch, sandbox, variant, build_session, None).await
+}
+
+/// [`run_case`], with the work reviewed before the run ends by a model
+/// opened through `review`. Issue #209.
+///
+/// # Errors
+///
+/// As [`run_case`].
+pub async fn run_case_reviewed(
+    case: &Case,
+    scratch: &Path,
+    sandbox: Arc<dyn Sandbox>,
+    variant: &Variant,
+    build_session: BuildSession<'_>,
+    review: Option<dino_core::review::OpenSession>,
+) -> Result<Outcome, EvalError> {
     let workspace = case.materialise(scratch)?;
     let before = fingerprint_tree(&workspace)?;
 
@@ -222,7 +246,12 @@ pub async fn run_case(
     let log = case_log(case, &log_path, &workspace, sandbox.as_ref())?;
 
     let finish = build_check(&workspace, Arc::clone(&sandbox))?;
+    let reviewer =
+        review.map(|open| Arc::new(dino_core::review::Reviewer::new(workspace.clone(), open)));
     let mut agent = eval_agent(case, session, tools, log, finish)?;
+    if let Some(reviewer) = &reviewer {
+        agent = agent.with_reviewer(Arc::clone(reviewer));
+    }
     let limit = case.wall_limit()?;
     let cancel = CancellationToken::new();
     let started = Instant::now();
@@ -237,10 +266,11 @@ pub async fn run_case(
     if stopped_by_the_wall(&ran, &cancel) {
         // A dropped run can leave a torn last line. The wall is the result
         // either way; an unreadable log is not a second failure.
-        let metrics = match &ran {
+        let mut metrics = match &ran {
             Ran::Dropped => metrics::from_log(&log_path).unwrap_or_default(),
             Ran::Finished(_) => metrics::from_log(&log_path)?,
         };
+        settle_review(&mut metrics, reviewer.as_deref());
         return wall_outcome(
             case,
             variant,
@@ -277,7 +307,8 @@ pub async fn run_case(
         _ => {}
     }
 
-    let metrics = metrics::from_log(&log_path)?;
+    let mut metrics = metrics::from_log(&log_path)?;
+    settle_review(&mut metrics, reviewer.as_deref());
     conclude(
         case,
         scratch,
@@ -294,6 +325,13 @@ pub async fn run_case(
         },
     )
     .await
+}
+
+/// Before the workspace is scored, since the hidden tests change it.
+fn settle_review(metrics: &mut Metrics, reviewer: Option<&dino_core::review::Reviewer>) {
+    if let (Some(review), Some(reviewer)) = (&mut metrics.review, reviewer) {
+        review.changed_after = reviewer.changed_since_review();
+    }
 }
 
 /// A run that has ended, by whichever harness, ready to be checked.
@@ -379,6 +417,7 @@ pub(crate) async fn conclude(
         measured,
         stopped: None,
         cost: None,
+        review_model: variant.review_model.clone(),
     })
 }
 
@@ -450,6 +489,7 @@ pub(crate) fn wall_outcome(
         measured: None,
         stopped: Some(EarlyStop::WallTime),
         cost: None,
+        review_model: variant.review_model.clone(),
     })
 }
 

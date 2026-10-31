@@ -552,6 +552,19 @@ pub enum AgentEvent {
         model_turn: u32,
         reason: String,
     },
+    /// The model ended its turn with the checks passing, and a model that saw
+    /// only the task, the change and the latest check results looked it over.
+    /// Any objections went to the model once, as its next message.
+    Reviewed {
+        model_turn: u32,
+        objections: Vec<String>,
+        /// Why the review said nothing, when it failed rather than approved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// The reviewer's own tokens, which are not the session's.
+        #[serde(default)]
+        usage: TokenUsage,
+    },
     /// The turn stopped for length because the prompt and its output filled
     /// the window, so history was reduced and the run went on.
     TurnCutOff {

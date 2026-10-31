@@ -554,6 +554,43 @@ fn metered(
     Ok(Box::new(spend::Metered::new(model, spending)))
 }
 
+/// `agent` with what must hold before it ends a run: the finish checks, and
+/// the review when one is configured.
+fn guarded(
+    agent: Agent<Box<dyn ModelSession>, ToolSet>,
+    settings: &RunSettings,
+    sandbox: &Arc<dyn Sandbox>,
+    unattended: bool,
+    spending: &spend::Spending,
+) -> Result<Agent<Box<dyn ModelSession>, ToolSet>> {
+    let checks = finish_checks(settings, sandbox, unattended)?;
+    let agent = if checks.is_empty() {
+        agent
+    } else {
+        agent.with_finish_check(dino_core::FirstUnfinished::new(checks))
+    };
+    Ok(match &settings.review {
+        Some(review) => agent.with_reviewer(Arc::new(dino_core::review::Reviewer::new(
+            settings.workspace.clone(),
+            review_sessions(settings, review, spending)?,
+        ))),
+        None => agent,
+    })
+}
+
+/// The reviewer's sessions, priced into the session's meter.
+fn review_sessions(
+    settings: &RunSettings,
+    review: &dino_protocol::ModelProfile,
+    spending: &spend::Spending,
+) -> Result<dino_core::review::OpenSession> {
+    let settings = config::review_settings(settings, review)?;
+    let spending = spending.clone();
+    Ok(Box::new(move |system| {
+        metered(&settings, system, Vec::new(), &spending).map_err(|error| error.to_string())
+    }))
+}
+
 /// `unattended` is for a one-shot run, which has no person to hand an unfinished
 /// build back to.
 fn warn_unprotected(settings: &RunSettings, sandbox: &dyn Sandbox) {
@@ -657,12 +694,7 @@ fn prepare(
         Arc::clone(&planning),
     ))
     .with_sink((renderer, log));
-    let checks = finish_checks(&settings, &sandbox, unattended)?;
-    let agent = if checks.is_empty() {
-        agent
-    } else {
-        agent.with_finish_check(dino_core::FirstUnfinished::new(checks))
-    };
+    let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
 
     Ok(Prepared {
         agent,
@@ -950,6 +982,7 @@ struct Resolved {
     reasoning_effort: (Option<dino_protocol::ReasoningEffort>, Source),
     auto_compact: bool,
     fallback: Vec<String>,
+    review_model: Option<String>,
     budget: Option<spend::Budget>,
     hooks: (Vec<dino_exec::Hook>, Source),
     end_turn_hooks: Vec<dino_exec::Hook>,
@@ -1060,6 +1093,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
             .pick_user_only(|file| file.fallback.clone())
             .map(|(fallback, _)| fallback.keys())
             .unwrap_or_default(),
+        review_model: layers
+            .pick_user_only(|file| file.review_model.clone())
+            .map(|(key, _)| key),
         budget: layers.budget()?,
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
@@ -1219,6 +1255,13 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         ("plain", switch(resolved.plain)),
         ("greeting", switch(resolved.greeting)),
         ("fallback", fallback),
+        (
+            "review model",
+            resolved
+                .review_model
+                .clone()
+                .map_or_else(|| "off".to_owned(), |key| format!("{key}  (user file)")),
+        ),
         ("budget", budget_row(resolved.budget)),
         (
             "project file",
@@ -1242,6 +1285,11 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
     let resolved = resolve(args, &workspace)?;
     let profile = config::resolve_profile(resolved.model.0.as_deref())?;
     let fallback = config::resolve_fallback(&resolved.fallback, &profile)?;
+    let review = resolved
+        .review_model
+        .as_deref()
+        .map(|key| config::resolve_profile(Some(key)))
+        .transpose()?;
     let mode = resolved.approvals.0;
     let log_path = match &args.log {
         Some(path) => path.clone(),
@@ -1275,6 +1323,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         greeting: resolved.greeting.0,
         fallback,
         budget: resolved.budget,
+        review,
     })
 }
 

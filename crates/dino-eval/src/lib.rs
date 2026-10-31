@@ -26,6 +26,7 @@ pub use crate::cost::cost_of;
 pub use crate::cost::parse_rate;
 pub use crate::cost::total_cost;
 pub use crate::metrics::Metrics;
+pub use crate::metrics::Review;
 pub use crate::rate::wilson;
 pub use crate::rate::wilson_interval;
 pub use crate::runner::Calibration;
@@ -37,6 +38,7 @@ pub use crate::runner::build_check;
 pub use crate::runner::calibrate;
 pub use crate::runner::rescore;
 pub use crate::runner::run_case;
+pub use crate::runner::run_case_reviewed;
 pub use crate::runner::session_tools;
 pub use crate::runner::session_tools_with;
 

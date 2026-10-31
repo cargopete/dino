@@ -144,6 +144,14 @@ CI and evals.
   your own. Dino takes the diff itself and runs the model read-only, so a review
   cannot change anything; findings come back as `path:line` with the input that
   shows each one.
+- **A second look before finishing.** With `review_model` set in the user file,
+  a run that changed the workspace and passed its finish checks is reviewed
+  before it ends by that model, at low effort where it offers one, seeing only
+  the task, the diff since the run began (64 KiB at most) and the latest test
+  and check results: one call, no tools, none of the conversation. Its
+  objections, five at most, go back to the model once, to fix or answer. Off
+  unless set; `dino eval --review-model <key>` measures it, recording the
+  objections and whether the work changed after.
 - **Handover for long tasks.** `dino run --handover` has the model keep a plan in
   a `progress` tool and hands the task to a fresh session when one reaches
   `--session-turns` (16) or stops with items pending, at most four sessions and

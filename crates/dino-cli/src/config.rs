@@ -124,6 +124,9 @@ pub struct RunSettings {
     pub fallback: Vec<ModelProfile>,
     /// Spending ceilings. Always `None` for evals, which are not metered.
     pub budget: Option<crate::spend::Budget>,
+    /// The model that reviews a run's change before it ends, with none of the
+    /// conversation. Off unless set.
+    pub review: Option<ModelProfile>,
 }
 
 /// Resolves the model profile named by a flag or `DINO_MODEL`.
@@ -167,6 +170,28 @@ pub fn resolve_workspace(flag: Option<&Path>) -> Result<PathBuf> {
         bail!("workspace root is not a directory: {}", root.display());
     }
     Ok(root)
+}
+
+/// The settings a reviewer's sessions are opened with: `review` at low effort
+/// where it offers a choice, and none of the run's thinking settings.
+///
+/// # Errors
+///
+/// Fails here, rather than at the first review, when its credential is missing.
+pub fn review_settings(settings: &RunSettings, review: &ModelProfile) -> Result<RunSettings> {
+    let low = ReasoningEffort::Low;
+    let review = RunSettings {
+        profile: review.clone(),
+        reasoning_effort: check_effort(review, low).is_ok().then_some(low),
+        thinking_budget: None,
+        disable_thinking: false,
+        enable_thinking: None,
+        fallback: Vec::new(),
+        review: None,
+        ..settings.clone()
+    };
+    build_session(&review, String::new(), Vec::new())?;
+    Ok(review)
 }
 
 /// Builds a provider session, failing here rather than inside a stream when a
@@ -405,6 +430,7 @@ mod tests {
             greeting: false,
             fallback: Vec::new(),
             budget: None,
+            review: None,
         }
     }
 

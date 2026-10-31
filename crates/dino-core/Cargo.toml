@@ -10,8 +10,10 @@ rust-version.workspace = true
 futures-util.workspace = true
 dino-model.workspace = true
 dino-protocol.workspace = true
+ignore.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
 
