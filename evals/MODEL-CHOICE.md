@@ -117,6 +117,27 @@ Five of six models finished; Grok was stopped (see the log). From
   score is slightly understated.
 - Terra is cheap and well behaved but well short.
 
+### Rescored, 2026-10-31
+
+The scorer fault in #165 was not the scorer's rule: hidden test files copied
+over a workspace kept their old modification times, so Cargo reran the model's
+own stale test binary instead of the hidden tests. Fixed in #178, which also
+added `dino eval --rescore`; the records were rescored without calling any
+model, as `<model>.rescored.json` beside the originals.
+
+| Model | Score (90%) | Passed | Cost per pass |
+|---|---|---|---|
+| Opus 5.5 (ceiling) | 100 (99-100) | 130/130 | $0.287 |
+| Sonnet 5.5 | 99 (99-99) | 128/130 | $0.120 |
+| Kimi K3.1 Pro | 95 (94-96) | 113/130 | $0.243 |
+| Qwen3.7-Max | 90 (87-92) | 109/130 | $0.337 |
+| GPT-6.1 Terra | 74 (68-80) | 96/130 | $0.056 |
+
+Sonnet and Kimi are no longer level: Sonnet's interval is clear of Kimi's, and
+Sonnet is the only candidate level with the best. Kimi's one fewer pass is the
+ledger acceptance test's port race flipping a trial on the rerun, not a change
+in its work. Kimi still clearly beats Qwen.
+
 ### Decision
 
 Kimi K3.1 Pro replaces qwen3.7-max as the default (#167), with Qwen on the
