@@ -109,9 +109,10 @@ pub struct RunSettings {
     /// Emit no terminal colour. Resolved like everything else, so a config file
     /// can ask for it.
     pub plain: bool,
-    /// Where to continue when the provider refuses the account. Never set for
-    /// evals, whose results would otherwise mix two models.
-    pub fallback: Option<ModelProfile>,
+    /// Where to continue, in order, when the provider refuses the account.
+    /// Always empty for evals and probes, whose results would otherwise mix
+    /// models.
+    pub fallback: Vec<ModelProfile>,
 }
 
 /// Resolves the model profile named by a flag or `DINO_MODEL`.
@@ -121,6 +122,18 @@ pub fn resolve_profile(flag: Option<&str>) -> Result<ModelProfile> {
         None => std::env::var("DINO_MODEL").unwrap_or_else(|_| DEFAULT_PROFILE.to_owned()),
     };
     builtin_profile(&key).with_context(|| format!("unknown model {key:?} ({})", known_keys()))
+}
+
+/// The fallback profiles in order, without the model already in use or a
+/// model named twice.
+pub fn resolve_fallback(keys: &[String], profile: &ModelProfile) -> Result<Vec<ModelProfile>> {
+    let mut chain: Vec<ModelProfile> = Vec::new();
+    for key in keys {
+        if key != &profile.key && chain.iter().all(|kept| &kept.key != key) {
+            chain.push(resolve_profile(Some(key))?);
+        }
+    }
+    Ok(chain)
 }
 
 fn known_keys() -> String {
@@ -165,6 +178,9 @@ fn build_session_from(
     tools: Vec<ToolDefinition>,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Box<dyn ModelSession>> {
+    if settings.fallback.is_empty() {
+        return build_provider(settings, &settings.profile, system_prompt, tools, env);
+    }
     let primary = build_provider(
         settings,
         &settings.profile,
@@ -172,13 +188,14 @@ fn build_session_from(
         tools.clone(),
         env,
     )?;
-    let Some(backup) = &settings.fallback else {
-        return Ok(primary);
-    };
-    let backup = build_provider(settings, backup, system_prompt, tools, env)?;
+    let fallbacks = settings
+        .fallback
+        .iter()
+        .map(|profile| build_provider(settings, profile, system_prompt.clone(), tools.clone(), env))
+        .collect::<Result<Vec<_>>>()?;
     Ok(Box::new(FallbackSession::new(
         primary,
-        backup,
+        fallbacks,
         Box::new(|message| eprintln!("dino: {message}")),
     )))
 }
@@ -193,7 +210,7 @@ fn build_provider(
     let is_fallback = settings.profile.key != profile.key;
     match profile.provider {
         ProviderKind::Anthropic => {
-            let key = require_env(env, "ANTHROPIC_API_KEY", profile)?;
+            let key = require_env(env, "ANTHROPIC_API_KEY", profile, is_fallback)?;
             let mut config = AnthropicConfig::new(key, profile.clone());
             config.system_prompt = system_prompt;
             config.tools = tools;
@@ -205,7 +222,7 @@ fn build_provider(
             Ok(Box::new(AnthropicSession::new(config)?))
         }
         ProviderKind::OpenAi => {
-            let key = require_env(env, "OPENAI_API_KEY", profile)?;
+            let key = require_env(env, "OPENAI_API_KEY", profile, is_fallback)?;
             let mut config = OpenAiConfig::new(key, profile.clone());
             config.instructions = system_prompt;
             config.tools = tools;
@@ -213,9 +230,13 @@ fn build_provider(
             Ok(Box::new(OpenAiSession::new(config)?))
         }
         ProviderKind::Qwen => {
-            let api_base = match &settings.api_base {
-                Some(api_base) => api_base.clone(),
-                None => require_env(env, "QWEN_API_BASE", profile)?,
+            // A model with an endpoint of its own never takes the Qwen one,
+            // so its key cannot be sent to another provider.
+            let hosted = dino_model::hosted_endpoint(&profile.key);
+            let api_base = match (hosted, &settings.api_base) {
+                (Some(hosted), _) => hosted.api_base.to_owned(),
+                (None, Some(api_base)) => api_base.clone(),
+                (None, None) => require_env(env, "QWEN_API_BASE", profile, is_fallback)?,
             };
             let mut config = QwenConfig::new(api_base, profile.clone());
             config.enable_thinking = match (settings.enable_thinking, settings.disable_thinking) {
@@ -223,7 +244,10 @@ fn build_provider(
                 (None, true) => Some(false),
                 (None, false) => None,
             };
-            config.api_key = env("QWEN_API_KEY").filter(|key| !key.is_empty());
+            config.api_key = match hosted {
+                Some(hosted) => Some(require_env(env, hosted.key_variable, profile, is_fallback)?),
+                None => env("QWEN_API_KEY").filter(|key| !key.is_empty()),
+            };
             config.thinking_budget = Some(thinking_budget(settings.thinking_budget));
             // Experimental until measured on the Token Plan: #135.
             config.explicit_cache = env("DINO_EXPLICIT_CACHE").is_some_and(|value| value == "1");
@@ -243,9 +267,15 @@ fn require_env(
     env: &dyn Fn(&str) -> Option<String>,
     name: &str,
     profile: &ModelProfile,
+    is_fallback: bool,
 ) -> Result<String> {
     match env(name) {
         Some(value) if !value.is_empty() => Ok(value),
+        _ if is_fallback => bail!(
+            "fallback model {key} needs {name}, which is not set in the environment; set \
+             it, or take {key} out of fallback in your config",
+            key = profile.key
+        ),
         _ => bail!(
             "model {} needs {name}, which is not set in the environment",
             profile.key
@@ -318,7 +348,7 @@ mod tests {
             disable_thinking: false,
             enable_thinking: None,
             plain: true,
-            fallback: None,
+            fallback: Vec::new(),
         }
     }
 
@@ -344,14 +374,44 @@ mod tests {
     }
 
     #[test]
-    fn the_default_model_needs_an_endpoint() {
+    fn the_default_model_needs_its_own_key() {
         let settings = settings(builtin_profile(DEFAULT_PROFILE).expect("default profile"));
 
         let Err(error) = build_session_from(&settings, String::new(), Vec::new(), &empty_env)
         else {
-            panic!("the default has no endpoint of its own");
+            panic!("the default needs a Moonshot key");
         };
-        assert!(error.to_string().contains("QWEN_API_BASE"), "{error}");
+        assert!(error.to_string().contains("MOONSHOT_API_KEY"), "{error}");
+    }
+
+    #[test]
+    fn each_model_in_the_chain_takes_its_own_endpoint_and_key() {
+        let mut settings = settings(builtin_profile("kimi-k3.1-pro").expect("built-in profile"));
+        settings.api_base = Some("https://token-plan.example/v1".into());
+        settings.fallback = ["qwen3.7-max", "claude-opus-5.5"]
+            .map(|key| builtin_profile(key).expect("built-in profile"))
+            .to_vec();
+        let keys = |missing: &'static str| {
+            move |name: &str| (name != missing).then(|| format!("{name}-value"))
+        };
+
+        let session = build_session_from(&settings, String::new(), Vec::new(), &keys("none"))
+            .expect("every key is set");
+        assert_eq!(session.profile().key, "kimi-k3.1-pro");
+
+        let Err(error) = build_session_from(
+            &settings,
+            String::new(),
+            Vec::new(),
+            &keys("ANTHROPIC_API_KEY"),
+        ) else {
+            panic!("a fallback without its key must not be built");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("fallback model claude-opus-5.5 needs ANTHROPIC_API_KEY"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -363,6 +423,24 @@ mod tests {
             .expect("an explicit endpoint needs no environment variable");
 
         assert_eq!(session.profile().provider_model, "qwen3:8b");
+    }
+
+    #[test]
+    fn the_fallback_chain_skips_the_model_in_use_and_repeats() {
+        let kimi = builtin_profile("kimi-k3.1-pro").expect("built-in profile");
+        let keys = [
+            "kimi-k3.1-pro",
+            "qwen3.7-max",
+            "qwen3.7-max",
+            "claude-opus-5.5",
+        ]
+        .map(String::from);
+
+        let chain = resolve_fallback(&keys, &kimi).unwrap();
+
+        let chain: Vec<&str> = chain.iter().map(|profile| profile.key.as_str()).collect();
+        assert_eq!(chain, ["qwen3.7-max", "claude-opus-5.5"]);
+        assert!(resolve_fallback(&["gpt-9-imaginary".into()], &kimi).is_err());
     }
 
     #[test]

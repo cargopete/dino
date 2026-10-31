@@ -1,14 +1,16 @@
 # Dino
 
 Dino is an open-source terminal coding agent written in Rust and designed
-for Rust work. It is built around open-weight models: by default Qwen3.8 27B,
-whose Apache-2.0 weights you serve yourself, on your own GPU or one rented by
-the hour. Hosted Claude models are kept as the baseline the open model is
-measured against. The catalogue is deliberately
+for Rust work. By default it runs Kimi K3.1 Pro on Moonshot's API, which beat
+Qwen3.7-Max on the 2026-10-30 run of the whole corpus, 95 to 90 with no
+overlap (`evals/MODEL-CHOICE.md`). It is built to work with open-weight models
+too, such as Qwen3.8 27B, whose Apache-2.0 weights you serve yourself, on your
+own GPU or one rented by the hour. Hosted Claude models are kept as the
+baseline the others are measured against. The catalogue is deliberately
 bounded, rather than assuming that every model behaves like one API wearing a
 false moustache.
 
-**The default has passed the corpus once.** On 2026-10-19, Qwen3.8 27B on vLLM,
+**The open-weight model has passed the corpus once.** On 2026-10-19, Qwen3.8 27B on vLLM,
 on one rented A100, passed nine of nine cases in 50 turns and about ten minutes,
 for roughly $0.31 of GPU time. That is one run, on a corpus that Claude also
 passes in full, so it shows that the open model can do this work through this
@@ -341,7 +343,9 @@ substring. An adapter may expose less than a model can do and never more.
 
 | Key | Provider | Model | Status |
 |---|---|---|---|
-| `qwen3.8-27b` | Qwen Chat Completions | `qwen3.8-27b` | **default**, development |
+| `kimi-k3.1-pro` | Qwen Chat Completions (Moonshot) | `kimi-k3.1-pro` | **default**, development, hosted |
+| `qwen3.8-27b` | Qwen Chat Completions | `qwen3.8-27b` | development |
+| `qwen3.7-max` | Qwen Chat Completions (DashScope) | `qwen3.7-max` | development, hosted |
 | `terra` | OpenAI Responses | `gpt-5.6-terra` | development |
 | `claude-opus` | Anthropic Messages | `claude-opus-5` | supported |
 | `claude-sonnet` | Anthropic Messages | `claude-sonnet-5` | supported |
@@ -357,8 +361,14 @@ substring. An adapter may expose less than a model can do and never more.
 true of the two Claude profiles and nothing else. The rest have passed the wire
 conformance suite and no live run; RFC-0017 says what promotes them.
 
-`qwen3.8-27b` is the default because its weights are open: anyone can serve
-exactly the model the corpus measured. It has no endpoint of its own. Give it
+`kimi-k3.1-pro` is the default by the decision in `evals/MODEL-CHOICE.md`,
+which also says when Sonnet 5.5 is the better choice. It has an endpoint of its own,
+`https://api.moonshot.ai/v1`, and its key in `MOONSHOT_API_KEY`; `grok-4.7`
+likewise has `https://api.x.ai/v1` and `XAI_API_KEY`. `api_base` and
+`QWEN_API_KEY` never apply to them, so neither key can reach another provider.
+
+`qwen3.8-27b` is the open-weight choice: anyone can serve exactly the model
+the corpus measured. It has no endpoint of its own. Give it
 one with `--api-base`, `QWEN_API_BASE` or `api_base` in the user config file,
 and serve the weights under the name `qwen3.8-27b`. Its reasoning is budgeted
 at 4,096 tokens a turn, as measured; its sampling is left to the server until
@@ -395,7 +405,7 @@ dino models
 dino prompt --model claude-sonnet
 ```
 
-The default needs a server for Qwen3.8 27B. This is the configuration that has
+Qwen3.8 27B needs a server of your own. This is the configuration that has
 actually run, on 2026-10-19: vLLM 0.32.0 (the CUDA 13 image; the `-cu129` image
 fails to start on a missing `libnvrtc.so.13`) on one 80 GB A100 rented from
 Runpod at $1.81 an hour. The weights take 51 GiB, and a 64K context leaves room
@@ -424,9 +434,19 @@ dino
 A rented server is public, which is what `--api-key` is for. This is one
 tested configuration, not yet the per-tier quickstart RFC-0017 owes.
 
-The other profiles need their provider's credential: `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, or `QWEN_API_BASE` for the Qwen profiles without a hosted
-endpoint. A missing one fails before any request is sent, naming the variable.
+The other profiles need their provider's credential: `MOONSHOT_API_KEY` for
+the default, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `QWEN_API_BASE` for the
+Qwen profiles without a hosted endpoint. A missing one fails before any request
+is sent, naming the variable.
+
+`fallback` in the user file names the models to continue on, in order, when a
+provider refuses the account: a spent balance or quota, a lapsed plan. A
+dropped connection or a rate limit is retried instead. Behind the default,
+`fallback = ["qwen3.7-max", "claude-opus-5.5"]` hands an empty Moonshot
+balance to the flat-rate Token Plan first and to Opus last; a single name is a
+list of one. Every model in it needs its credential when the session starts,
+so a missing key fails then rather than at the moment of need. `dino eval` and
+`dino probe` never fall back.
 
 ```console
 export ANTHROPIC_API_KEY=...

@@ -50,9 +50,25 @@ pub struct FileConfig {
     pub thinking_budget: Option<u32>,
     /// Compact on its own once the context window passes the warning mark.
     pub auto_compact: Option<bool>,
-    /// A model to continue on when the provider refuses the account. User
-    /// file only.
-    pub fallback: Option<String>,
+    /// Models to continue on, in order, when the provider refuses the account.
+    /// One name is a list of one. User file only.
+    pub fallback: Option<Fallback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Fallback {
+    One(String),
+    Chain(Vec<String>),
+}
+
+impl Fallback {
+    pub fn keys(&self) -> Vec<String> {
+        match self {
+            Self::One(key) => vec![key.clone()],
+            Self::Chain(keys) => keys.clone(),
+        }
+    }
 }
 
 /// One `[mcp.<name>]` table.
@@ -329,6 +345,22 @@ mod tests {
 
         assert_eq!(parsed.model.as_deref(), Some("claude-sonnet"));
         assert_eq!(parsed.max_turns.map(std::num::NonZeroU32::get), Some(8));
+    }
+
+    #[test]
+    fn a_fallback_is_one_model_or_a_list() {
+        let one = parse(Path::new("x"), "fallback = \"claude-opus-5.5\"\n").unwrap();
+        let chain = parse(
+            Path::new("x"),
+            "fallback = [\"qwen3.7-max\", \"claude-opus-5.5\"]\n",
+        )
+        .unwrap();
+
+        assert_eq!(one.fallback.unwrap().keys(), ["claude-opus-5.5"]);
+        assert_eq!(
+            chain.fallback.unwrap().keys(),
+            ["qwen3.7-max", "claude-opus-5.5"]
+        );
     }
 
     #[test]

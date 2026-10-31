@@ -350,7 +350,7 @@ fn eval_settings(
         disable_thinking: args.no_thinking,
         enable_thinking: None,
         plain: args.plain,
-        fallback: None,
+        fallback: Vec::new(),
     }
 }
 

@@ -868,7 +868,7 @@ struct Resolved {
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
     auto_compact: bool,
-    fallback: Option<String>,
+    fallback: Vec<String>,
     hooks: (Vec<dino_exec::Hook>, Source),
     end_turn_hooks: Vec<dino_exec::Hook>,
     start_hooks: Vec<dino_exec::Hook>,
@@ -973,7 +973,8 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
             .is_some_and(|(on, _)| on),
         fallback: layers
             .pick_user_only(|file| file.fallback.clone())
-            .map(|(key, _)| key),
+            .map(|(fallback, _)| fallback.keys())
+            .unwrap_or_default(),
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
@@ -1013,6 +1014,13 @@ fn listed(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
+fn in_order(keys: &[String]) -> String {
+    if keys.is_empty() {
+        return "none".to_owned();
+    }
+    keys.join(", then ")
+}
+
 fn print_config(args: &PromptArgs) -> Result<()> {
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let common = CommonArgs {
@@ -1022,7 +1030,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
     let resolved = resolve(&common, &workspace)?;
 
     let show = |value: String, source: Source| format!("{value}  ({})", source.label());
-    let fallback = resolved.fallback.as_deref().unwrap_or("none").to_owned();
+    let fallback = in_order(&resolved.fallback);
     let rows = vec![
         (
             "model",
@@ -1120,6 +1128,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let resolved = resolve(args, &workspace)?;
     let profile = config::resolve_profile(resolved.model.0.as_deref())?;
+    let fallback = config::resolve_fallback(&resolved.fallback, &profile)?;
     let mode = resolved.approvals.0;
     let log_path = match &args.log {
         Some(path) => path.clone(),
@@ -1149,11 +1158,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         disable_thinking: resolved.no_thinking.0,
         enable_thinking: None,
         plain: resolved.plain.0,
-        fallback: resolved
-            .fallback
-            .as_deref()
-            .map(|key| config::resolve_profile(Some(key)))
-            .transpose()?,
+        fallback,
     })
 }
 
