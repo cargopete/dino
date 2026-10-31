@@ -10,6 +10,7 @@ use dino_protocol::ChatServer;
 use dino_protocol::ModelEvent;
 use dino_protocol::ModelProfile;
 use dino_protocol::ProviderKind;
+use dino_protocol::ReasoningEffort;
 use dino_protocol::ReasoningSupport;
 use dino_protocol::SamplingDefaults;
 use dino_protocol::StopReason;
@@ -51,6 +52,9 @@ pub struct QwenConfig {
     pub max_output_tokens: Option<u32>,
     pub sampling: Option<SamplingDefaults>,
     pub enable_thinking: Option<bool>,
+    /// For a profile with [`ReasoningSupport::Effort`]. Absent leaves the
+    /// server's default.
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub preserve_thinking: bool,
     pub retry: RetryPolicy,
     /// Most reasoning tokens per turn: vLLM's `thinking_token_budget`, or
@@ -96,6 +100,7 @@ impl QwenConfig {
             max_output_tokens: None,
             sampling: None,
             enable_thinking: None,
+            reasoning_effort: None,
             preserve_thinking: true,
             retry: RetryPolicy::default(),
             thinking_budget: None,
@@ -118,13 +123,28 @@ impl QwenSession {
     /// # Errors
     ///
     /// Returns [`ModelError::Configuration`] when the selected profile is not
-    /// a Qwen profile or the API base is not a valid URL.
+    /// a Qwen profile, does not offer the requested effort, or the API base is
+    /// not a valid URL.
     pub fn new(config: QwenConfig) -> Result<Self, ModelError> {
         if config.profile.provider != ProviderKind::Qwen {
             return Err(ModelError::Configuration(format!(
                 "profile {} is not a Qwen profile",
                 config.profile.key
             )));
+        }
+        // Moonshot takes any effort string without complaint, so nothing the
+        // profile does not list is sent.
+        if let Some(effort) = config.reasoning_effort {
+            let offered = match &config.profile.reasoning {
+                ReasoningSupport::Effort(efforts) => efforts.contains(&effort),
+                _ => false,
+            };
+            if !offered || config.profile.chat_server != ChatServer::Moonshot {
+                return Err(ModelError::Configuration(format!(
+                    "{} does not offer {effort:?} reasoning effort",
+                    config.profile.display_name
+                )));
+            }
         }
 
         let endpoint = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
@@ -264,6 +284,7 @@ impl QwenSession {
         match self.config.profile.chat_server {
             ChatServer::Vllm => self.insert_vllm_controls(&mut body),
             ChatServer::DashScope => self.insert_dashscope_controls(&mut body),
+            ChatServer::Moonshot => self.insert_moonshot_controls(&mut body),
         }
         if !self.config.tools.is_empty() {
             let tools = self
@@ -349,6 +370,18 @@ impl QwenSession {
         }
         if let Some(enable_thinking) = self.config.enable_thinking {
             body.insert("enable_thinking".into(), json!(enable_thinking));
+        }
+    }
+
+    fn insert_moonshot_controls(&self, body: &mut serde_json::Map<String, Value>) {
+        let effort = self.config.reasoning_effort;
+        if self.config.enable_thinking == Some(false) || effort == Some(ReasoningEffort::None) {
+            body.insert("thinking".into(), json!({"type": "disabled"}));
+        } else if let Some(effort) = effort {
+            body.insert(
+                "reasoning_effort".into(),
+                json!(crate::openai::reasoning_effort_name(effort)),
+            );
         }
     }
 }
@@ -519,11 +552,13 @@ fn commit_history(
 /// Model Studio's codes for an unpaid balance, a spent allocation and an
 /// unbought plan; `Throttling.RateQuota` is a rate limit and is not here.
 fn refuses_account(status: u16, body: &str) -> bool {
-    const MARKERS: [&str; 6] = [
+    const MARKERS: [&str; 8] = [
         "arrearage",
         "allocationquota",
         "insufficient_quota",
         "exceeded your current quota",
+        "exceeded_current_quota",
+        "insufficient balance",
         "unpurchased",
         "freetieronly",
     ];
@@ -690,12 +725,12 @@ impl QwenStreamParser {
         }
 
         if let Some(usage) = chunk.usage {
+            let prompt = usage.prompt_tokens_details.unwrap_or_default();
             events.push(ModelEvent::Usage {
                 usage: TokenUsage {
                     input_tokens: usage.prompt_tokens,
-                    cached_input_tokens: usage
-                        .prompt_tokens_details
-                        .map_or(0, |details| details.cached_tokens),
+                    cached_input_tokens: prompt.cached_tokens,
+                    cache_write_input_tokens: prompt.cache_write_tokens,
                     output_tokens: usage.completion_tokens,
                     reasoning_tokens: usage
                         .completion_tokens_details
@@ -932,10 +967,13 @@ struct Usage {
     completion_tokens_details: Option<CompletionTokenDetails>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct PromptTokenDetails {
     #[serde(default)]
     cached_tokens: u64,
+    /// Moonshot's. Part of `prompt_tokens`, as the cached reads are.
+    #[serde(default)]
+    cache_write_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -973,6 +1011,10 @@ mod tests {
             r#"{"code":"Arrearage","message":"Access denied"}"#
         ));
         assert!(refuses_account(401, "invalid api key"));
+        assert!(refuses_account(
+            429,
+            r#"{"error":{"message":"Your account org-0123 <ak-0123> is suspended due to insufficient balance, please recharge your account or check your plan and billing details","type":"exceeded_current_quota_error"}}"#
+        ));
         assert!(!refuses_account(
             429,
             r#"{"error":{"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"}}"#
@@ -1186,6 +1228,27 @@ mod tests {
     }
 
     #[test]
+    fn moonshot_cache_writes_are_recorded_inside_the_input() {
+        let mut parser = QwenStreamParser::default();
+        let events = parser
+            .consume(r#"{"id":"chat-1","choices":[],"usage":{"prompt_tokens":5232,"completion_tokens":8,"total_tokens":5240,"prompt_tokens_details":{"cache_write_tokens":5120}}}"#)
+            .unwrap();
+
+        assert_eq!(
+            events.last(),
+            Some(&ModelEvent::Usage {
+                usage: TokenUsage {
+                    input_tokens: 5232,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 5120,
+                    output_tokens: 8,
+                    reasoning_tokens: 0,
+                }
+            })
+        );
+    }
+
+    #[test]
     fn parser_accumulates_reasoning_text_tools_and_usage() {
         let mut parser = QwenStreamParser::default();
         let chunks = [
@@ -1386,6 +1449,51 @@ mod tests {
         let assistant = &body["messages"][0];
         assert_eq!(assistant["role"], "assistant");
         assert!(assistant.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn moonshot_takes_reasoning_effort_and_none_of_the_dashscope_controls() {
+        let body = |effort: Option<ReasoningEffort>, enable_thinking: Option<bool>| {
+            let profile = crate::builtin_profile("kimi-k3.1-pro").unwrap();
+            let mut config = QwenConfig::new("https://api.moonshot.ai/v1", profile);
+            config.reasoning_effort = effort;
+            config.enable_thinking = enable_thinking;
+            config.thinking_budget = Some(4_096);
+            QwenSession::new(config).unwrap().request_body(&[]).unwrap()
+        };
+
+        let low = body(Some(ReasoningEffort::Low), None);
+        assert_eq!(low["reasoning_effort"], "low");
+        for other in ["thinking", "thinking_budget", "enable_thinking"] {
+            assert!(!low.contains_key(other), "sent {other}");
+        }
+        let disabled = json!({"type": "disabled"});
+        assert_eq!(
+            body(Some(ReasoningEffort::None), None)["thinking"],
+            disabled
+        );
+        let off = body(Some(ReasoningEffort::High), Some(false));
+        assert_eq!(off["thinking"], disabled);
+        assert!(!off.contains_key("reasoning_effort"));
+        let default = body(None, None);
+        assert!(!default.contains_key("reasoning_effort") && !default.contains_key("thinking"));
+    }
+
+    #[test]
+    fn an_effort_the_profile_does_not_list_is_refused() {
+        let refused = |key: &str, effort: ReasoningEffort| {
+            let profile = crate::builtin_profile(key).unwrap();
+            let mut config = QwenConfig::new("https://api.moonshot.ai/v1", profile);
+            config.reasoning_effort = Some(effort);
+            matches!(
+                QwenSession::new(config),
+                Err(ModelError::Configuration(message)) if message.contains("does not offer")
+            )
+        };
+
+        assert!(refused("kimi-k3.1-pro", ReasoningEffort::Max));
+        assert!(refused("qwen3.7-plus", ReasoningEffort::Low));
+        assert!(!refused("kimi-k3.1-pro", ReasoningEffort::Low));
     }
 
     #[test]

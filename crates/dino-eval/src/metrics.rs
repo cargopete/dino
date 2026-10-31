@@ -127,6 +127,7 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, ToolCall>, event: &
         } => {
             metrics.tokens.input_tokens += usage.input_tokens;
             metrics.tokens.cached_input_tokens += usage.cached_input_tokens;
+            metrics.tokens.cache_write_input_tokens += usage.cache_write_input_tokens;
             metrics.tokens.output_tokens += usage.output_tokens;
             metrics.tokens.reasoning_tokens += usage.reasoning_tokens;
         }

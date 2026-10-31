@@ -601,6 +601,15 @@ fn deepseek_v4_pro() -> ModelProfile {
 fn kimi_k3_1_pro() -> ModelProfile {
     ModelProfile {
         display_name: "Kimi K3.1 Pro (Moonshot)".into(),
+        // Low measured 2026-10-31 at 156 reasoning tokens against the default's
+        // 558-844, in half the time.
+        reasoning: ReasoningSupport::Effort(vec![
+            ReasoningEffort::None,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ]),
+        chat_server: ChatServer::Moonshot,
         ..dashscope("kimi-k3.1-pro", "", 1_048_576, true)
     }
 }

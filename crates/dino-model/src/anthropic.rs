@@ -911,6 +911,7 @@ impl AnthropicUsage {
         TokenUsage {
             input_tokens: self.input + self.cache_creation_input + self.cache_read_input,
             cached_input_tokens: self.cache_read_input,
+            cache_write_input_tokens: self.cache_creation_input,
             output_tokens: self.output,
             reasoning_tokens: 0,
         }
@@ -1250,7 +1251,9 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             ModelEvent::Usage { usage }
-                if usage.input_tokens == 28 && usage.cached_input_tokens == 5
+                if usage.input_tokens == 28
+                    && usage.cached_input_tokens == 5
+                    && usage.cache_write_input_tokens == 3
         )));
         assert_eq!(
             events.last(),

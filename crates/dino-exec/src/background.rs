@@ -394,8 +394,8 @@ impl ToolRuntime for BackgroundTool {
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": ["start", "output", "stop", "list"]},
-                    "command": {"type": "string", "description": "For start: the command line."},
-                    "directory": {"type": "string", "description": "For start: relative to the workspace root."},
+                    "command": {"type": "string", "minLength": 1, "description": "For start: the command line."},
+                    "directory": {"type": "string", "minLength": 1, "description": "For start: relative to the workspace root."},
                     "id": {"type": "integer", "minimum": 1, "description": "For output and stop."}
                 },
                 "required": ["op"],

@@ -303,7 +303,7 @@ fn set_response_id(state: &Mutex<Option<String>>, response_id: String) -> Result
     Ok(())
 }
 
-const fn reasoning_effort_name(effort: ReasoningEffort) -> &'static str {
+pub(crate) const fn reasoning_effort_name(effort: ReasoningEffort) -> &'static str {
     match effort {
         ReasoningEffort::None => "none",
         ReasoningEffort::Low => "low",
@@ -586,6 +586,7 @@ impl From<ResponseUsage> for TokenUsage {
             cached_input_tokens: usage
                 .input_tokens_details
                 .map_or(0, |details| details.cached_tokens),
+            cache_write_input_tokens: 0,
             output_tokens: usage.output_tokens,
             reasoning_tokens: usage
                 .output_tokens_details

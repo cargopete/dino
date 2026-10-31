@@ -281,6 +281,7 @@ pub fn usage_turn(input_tokens: u64, text: &str) -> Turn {
             usage: dino_protocol::TokenUsage {
                 input_tokens,
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: 4,
                 reasoning_tokens: 0,
             },

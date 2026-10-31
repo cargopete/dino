@@ -20,6 +20,7 @@ pub(crate) fn properties() -> Value {
         },
         "justification": {
             "type": "string",
+            "minLength": 1,
             "description": "Why this command needs to run unconfined, shown to the person."
         }
     })

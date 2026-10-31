@@ -20,6 +20,7 @@ pub mod todo;
 pub mod verify;
 pub mod workspace;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -42,6 +43,7 @@ use dino_protocol::ToolResult;
 use dino_protocol::TurnInput;
 use dino_protocol::WindowSource;
 use futures_util::StreamExt;
+use serde_json::Value;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -130,6 +132,8 @@ pub struct ToolSet {
     runtimes: Vec<Box<dyn ToolRuntime>>,
     /// Tool name to the index of the runtime that owns it.
     owners: HashMap<String, usize>,
+    /// Tool name to the optional arguments no empty string can satisfy.
+    blank_is_absent: HashMap<String, Vec<String>>,
 }
 
 impl ToolSet {
@@ -142,8 +146,13 @@ impl ToolSet {
     /// different tool from the one that ran.
     pub fn new(runtimes: Vec<Box<dyn ToolRuntime>>) -> Result<Self, ToolError> {
         let mut owners = HashMap::new();
+        let mut blank_is_absent = HashMap::new();
         for (index, runtime) in runtimes.iter().enumerate() {
             for definition in runtime.definitions() {
+                let blank = blank_means_absent(&definition.input_schema);
+                if !blank.is_empty() {
+                    blank_is_absent.insert(definition.name.clone(), blank);
+                }
                 if owners.insert(definition.name.clone(), index).is_some() {
                     return Err(ToolError::new(format!(
                         "two tool runtimes both offer {:?}",
@@ -152,7 +161,32 @@ impl ToolSet {
                 }
             }
         }
-        Ok(Self { runtimes, owners })
+        Ok(Self {
+            runtimes,
+            owners,
+            blank_is_absent,
+        })
+    }
+
+    /// Drops the empty strings sent for optional arguments that cannot be
+    /// empty. Kimi fills every optional field, with `""` for those it omits.
+    fn normalise<'a>(&self, call: &'a ToolCall) -> Cow<'a, ToolCall> {
+        let Some(names) = self.blank_is_absent.get(&call.name) else {
+            return Cow::Borrowed(call);
+        };
+        let is_blank = |name: &String, value: &Value| value == "" && names.contains(name);
+        let has_blank = call
+            .arguments
+            .as_object()
+            .is_some_and(|arguments| arguments.iter().any(|(name, value)| is_blank(name, value)));
+        if !has_blank {
+            return Cow::Borrowed(call);
+        }
+        let mut call = call.clone();
+        if let Some(arguments) = call.arguments.as_object_mut() {
+            arguments.retain(|name, value| !is_blank(name, value));
+        }
+        Cow::Owned(call)
     }
 
     fn owner(&self, call: &ToolCall) -> Result<&dyn ToolRuntime, ToolError> {
@@ -190,12 +224,12 @@ impl ToolRuntime for ToolSet {
                 unparsed["raw"].as_str().unwrap_or_default(),
             )));
         }
-        self.owner(call)?.classify(call)
+        self.owner(call)?.classify(&self.normalise(call))
     }
 
     fn execute(&self, call: &ToolCall) -> ToolFuture<'_> {
         match self.owner(call) {
-            Ok(runtime) => runtime.execute(call),
+            Ok(runtime) => runtime.execute(&self.normalise(call)),
             Err(error) => Box::pin(async move { Err(error) }),
         }
     }
@@ -211,6 +245,33 @@ impl ToolRuntime for ToolSet {
             runtime.begin_turn(calls);
         }
     }
+}
+
+/// The optional properties of a tool schema that no empty string satisfies:
+/// not string-typed, a `minLength` of one or more, or an enum without `""`.
+fn blank_means_absent(schema: &Value) -> Vec<String> {
+    let required = schema["required"].as_array();
+    let is_required =
+        |name: &str| required.is_some_and(|names| names.iter().any(|known| known == name));
+    let admits_empty = |property: &Value| {
+        let string_typed = match &property["type"] {
+            Value::String(kind) => kind == "string",
+            Value::Array(kinds) => kinds.iter().any(|kind| kind == "string"),
+            _ => true,
+        };
+        string_typed
+            && property["minLength"].as_u64().unwrap_or(0) == 0
+            && property["enum"]
+                .as_array()
+                .is_none_or(|values| values.iter().any(|value| value == ""))
+    };
+    schema["properties"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, property)| !is_required(name) && !admits_empty(property))
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 #[derive(Debug, Error)]
