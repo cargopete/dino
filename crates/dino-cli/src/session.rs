@@ -284,6 +284,7 @@ pub struct Session<S> {
     pub agent: Agent<S, ToolSet>,
     pub usage: Arc<Mutex<TokenUsage>>,
     pub requests: Arc<std::sync::atomic::AtomicU64>,
+    pub meter: Arc<crate::spend::Meter>,
     pub factory: SessionFactory<S>,
     pub model_key: String,
     pub workspace_root: std::path::PathBuf,
@@ -836,6 +837,7 @@ where
         status_block(&[
             ("requests", requests.to_string()),
             ("tokens", describe_usage(usage)),
+            ("cost", self.meter.closing()),
         ])
     }
 
@@ -951,7 +953,7 @@ fn help() -> String {
             "/init",
             "survey the repository and write or improve AGENTS.md",
         ),
-        ("/cost", "requests and tokens so far"),
+        ("/cost", "requests, tokens and list price so far"),
         (
             "/compact",
             "summarise, then carry on in a fresh conversation",

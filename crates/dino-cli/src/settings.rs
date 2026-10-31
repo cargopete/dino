@@ -203,6 +203,19 @@ pub fn user_instructions_path() -> Option<PathBuf> {
     user_dir().map(|dir| dir.join("instructions.md"))
 }
 
+/// Where Dino keeps what it records about the person's use, apart from settings.
+pub fn state_dir() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_STATE_HOME") {
+        return Some(PathBuf::from(base).join("dino"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("dino")
+    })
+}
+
 pub fn user_dir() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(base).join("dino"));

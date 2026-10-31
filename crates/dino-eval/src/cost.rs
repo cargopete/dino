@@ -1,8 +1,8 @@
 //! What a run cost, once somebody names the rate.
 //!
-//! The catalogue does not carry a price. A hosted model is list price per
-//! million tokens, a rented GPU is dollars an hour, and a machine on a desk is
-//! watts. The figure is reported beside the result. It never decides pass or fail.
+//! The catalogue's list prices are for sessions; an eval is priced only at the
+//! rate its invocation names. A hosted model is list price per million tokens,
+//! a rented GPU is dollars an hour, and a machine on a desk is watts. The figure is reported beside the result. It never decides pass or fail.
 
 use dino_protocol::TokenUsage;
 use serde::Deserialize;

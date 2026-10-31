@@ -101,7 +101,8 @@ CI and evals.
   a run of reads, lists and searches folded into one `explored` line. The line
   is redrawn in place only while it is still the last one written. Beneath it,
   while a turn runs, one status row gives the model, the context used, the
-  submission's tokens, the elapsed time and the interrupt key, and is cleared
+  submission's tokens with the cached share, the session's cost at list price,
+  the elapsed time and the interrupt key, and is cleared
   before anything else is written. Under `--plain` every line is written once,
   in order, as before. Paste arrives as one message; alt-enter or a
   trailing backslash starts a new line without sending. While a turn runs, Esc
@@ -466,7 +467,12 @@ system prompt a run would send, so its cost can be read rather than guessed.
 Inside a session: `/help`, `/status`, `/log`, `/exit`; `/clear` for a new
 conversation, `/model <key>` to switch model (in a new conversation, since
 history does not move between models), `/resume [id]` to list or continue a
-saved one, `/diff` for the working tree and `/cost` for requests and tokens.
+saved one, `/diff` for the working tree and `/cost` for requests, tokens and
+cost. Prices are list prices kept in the model profiles (`dino models --json`),
+cached input and cache writes at their own rates. A session says what it cost
+when it ends, along with today's total in UTC, which every session appends to
+`$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).
+Evals do not.
 `/compact` asks the model for a structured summary, with changes gated off,
 starts a fresh conversation and puts the summary ahead of your next message;
 the old conversation stays resumable in full. `auto_compact = true` in a config

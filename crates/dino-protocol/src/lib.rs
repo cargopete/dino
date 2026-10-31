@@ -142,6 +142,59 @@ pub struct ModelProfile {
     pub sampling: Option<SamplingDefaults>,
     #[serde(default)]
     pub chat_server: ChatServer,
+    /// List price, where one has been checked. Absent for a model served on
+    /// hardware someone pays for by the hour or not at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<Pricing>,
+}
+
+/// USD per million tokens, at the provider's list price.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Pricing {
+    pub input: f64,
+    pub cached_input: f64,
+    /// Absent where the provider publishes no separate rate, and cache writes
+    /// are then priced as input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+    pub output: f64,
+    /// The provider reports reasoning beside its output count rather than
+    /// inside it, and bills it as output.
+    #[serde(default)]
+    pub reasoning_beside_output: bool,
+}
+
+impl Pricing {
+    #[must_use]
+    pub const fn new(input: f64, cached_input: f64, output: f64) -> Self {
+        Self {
+            input,
+            cached_input,
+            cache_write: None,
+            output,
+            reasoning_beside_output: false,
+        }
+    }
+
+    /// What `usage` costs in USD.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn cost(&self, usage: &TokenUsage) -> f64 {
+        let plain = usage
+            .input_tokens
+            .saturating_sub(usage.cached_input_tokens)
+            .saturating_sub(usage.cache_write_input_tokens);
+        let output = if self.reasoning_beside_output {
+            usage.output_tokens + usage.reasoning_tokens
+        } else {
+            usage.output_tokens
+        };
+        (plain as f64 * self.input
+            + usage.cached_input_tokens as f64 * self.cached_input
+            + usage.cache_write_input_tokens as f64 * self.cache_write.unwrap_or(self.input)
+            + output as f64 * self.output)
+            / 1_000_000.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -512,7 +565,9 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::AgentEvent;
+    use super::Pricing;
     use super::ReasoningEffort;
+    use super::TokenUsage;
 
     #[test]
     fn an_effort_reads_as_it_is_written_and_nothing_else() {
@@ -525,6 +580,32 @@ mod tests {
         }
         let error = "hihg".parse::<ReasoningEffort>().unwrap_err();
         assert!(error.contains("hihg") && error.contains("xhigh"), "{error}");
+    }
+
+    #[test]
+    fn each_kind_of_token_is_priced_at_its_own_rate() {
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            cached_input_tokens: 600_000,
+            cache_write_input_tokens: 100_000,
+            output_tokens: 200_000,
+            reasoning_tokens: 50_000,
+        };
+        let price = Pricing::new(2.0, 0.2, 10.0);
+        // 300k plain and 100k written at 2.00, 600k cached at 0.20, 200k out at 10.00.
+        assert!((price.cost(&usage) - 2.92).abs() < 1e-9);
+
+        let written = Pricing {
+            cache_write: Some(4.0),
+            ..price
+        };
+        assert!((written.cost(&usage) - 3.12).abs() < 1e-9);
+
+        let beside = Pricing {
+            reasoning_beside_output: true,
+            ..price
+        };
+        assert!((beside.cost(&usage) - 3.42).abs() < 1e-9);
     }
 
     #[test]

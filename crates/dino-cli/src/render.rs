@@ -359,6 +359,7 @@ impl Renderer {
                 if let Ok(mut status) = self.status.lock() {
                     status.context = usage.input_tokens;
                     status.input += usage.input_tokens;
+                    status.cached += usage.cached_input_tokens;
                     status.output += usage.output_tokens;
                 }
                 Ok(())
@@ -478,6 +479,7 @@ impl Renderer {
         self.asked.clear();
         if let Ok(mut status) = self.status.lock() {
             status.input = 0;
+            status.cached = 0;
             status.output = 0;
         }
         submitted(text)
@@ -591,6 +593,15 @@ impl EventSink for Renderer {
             .usage
             .lock()
             .map_or_else(|_| TokenUsage::default(), |total| *total);
+        let cost = self
+            .status
+            .lock()
+            .ok()
+            .and_then(|status| status.meter.as_ref().map(|meter| meter.spent()))
+            .filter(|spent| spent.usd > 0.0)
+            .map_or_else(String::new, |spent| {
+                format!(" · {} list", crate::spend::usd(spent.usd))
+            });
         let elapsed = self.started.take().map(|started| started.elapsed());
         let ending = match (&outcome.error, outcome.stop_reason) {
             (Some(error), _) if error.starts_with("model-turn limit reached") => {
@@ -616,7 +627,7 @@ impl EventSink for Renderer {
         let tail = style::paint(
             FAINT,
             &format!(
-                "{time} · {} {turns} · {}\n",
+                "{time} · {} {turns} · {}{cost}\n",
                 outcome.model_turns,
                 describe_usage(usage)
             ),
