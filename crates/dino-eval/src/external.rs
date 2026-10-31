@@ -2,7 +2,10 @@
 //! by the same hidden tests and scorer as a dino run.
 //!
 //! The harness runs as installed and logged in, without the person's own
-//! settings, and with its own permissions and sandbox, not dino's. What is comparable is the outcome and the
+//! settings. Codex keeps its own sandbox; the others, which approve their own
+//! calls unattended, run inside dino's: writes only to the case, the harness's
+//! own state and the Cargo and temporary directories, network only to HTTPS
+//! and DNS. What is comparable is the outcome and the
 //! claims; turns and tool errors are read from each harness's event stream and
 //! are close to, not identical with, dino's.
 
@@ -38,6 +41,52 @@ pub enum Harness {
 }
 
 impl Harness {
+    /// Home-relative paths the harness writes besides the case: its own state
+    /// and logins. `None` for Codex, whose own sandbox cannot run inside another.
+    fn state(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Codex => None,
+            Self::ClaudeCode => Some(&[
+                ".claude",
+                ".claude.json",
+                "Library/Caches/claude-cli-nodejs",
+            ]),
+            Self::Kimi => Some(&[".kimi-code", ".kimi"]),
+            Self::Grok => Some(&[".grok"]),
+        }
+    }
+
+    /// The command wrapped in a sandbox for this workspace, where one applies.
+    fn contained(
+        self,
+        program: String,
+        arguments: Vec<String>,
+        workspace: &Path,
+        confine: bool,
+    ) -> Result<(String, Vec<String>), EvalError> {
+        let Some(state) = self.state().filter(|_| confine) else {
+            return Ok((program, arguments));
+        };
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let mut writable: Vec<std::path::PathBuf> = state
+            .iter()
+            .chain(&[".cargo", ".rustup"])
+            .map(|path| home.join(path))
+            .collect();
+        writable.push(std::env::temp_dir());
+        writable.retain(|path| path.exists());
+        let sandbox = dino_sandbox::detect(workspace)
+            .map_err(|error| EvalError::Setup(error.to_string()))?
+            .for_fetching(&writable)
+            .ok_or_else(|| EvalError::Setup("this sandbox cannot allow HTTPS".into()))?;
+        let wrapped = sandbox
+            .wrap(&program, &arguments)
+            .map_err(|error| EvalError::Setup(error.to_string()))?;
+        Ok((wrapped.program, wrapped.arguments))
+    }
+
     fn command(self, model: &str, prompt: &str, workspace: &Path) -> (String, Vec<String>) {
         let owned = |parts: &[&str]| parts.iter().map(|part| (*part).to_owned()).collect();
         match self {
@@ -84,7 +133,7 @@ impl Harness {
                 .chain([workspace.display().to_string(), prompt.to_owned()])
                 .collect(),
             ),
-            // Kimi Code runs every call unasked in prompt mode; it has no sandbox to pick.
+            // Kimi Code runs every call unasked in prompt mode, so dino contains it.
             Self::Kimi => (
                 "kimi".to_owned(),
                 owned(&["-p", prompt, "-m", model, "--output-format", "stream-json"]),
@@ -306,6 +355,8 @@ pub async fn run_external(
     let before = fingerprint_tree(&workspace)?;
     let prompt = prompt_for(case, true);
     let (program, arguments) = harness.command(model, &prompt, &workspace);
+    let (program, arguments) =
+        harness.contained(program, arguments, &workspace, sandbox.confines_writes())?;
     // Model names such as `kimi-code/k3.1-pro` would otherwise name a directory.
     let log_path = scratch.join(format!("{}.{}.jsonl", case.name, model.replace('/', "_")));
 
@@ -391,6 +442,28 @@ pub async fn run_external(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn harnesses_that_approve_their_own_calls_run_contained() {
+        let workspace = std::env::temp_dir();
+        for harness in [Harness::Kimi, Harness::ClaudeCode, Harness::Grok] {
+            let (program, arguments) = harness
+                .contained("tool".into(), vec!["-p".into()], &workspace, true)
+                .unwrap();
+            assert_eq!(program, "/usr/bin/sandbox-exec", "{harness:?}");
+            assert!(arguments[1].contains("remote tcp \"*:443\""), "{harness:?}");
+            assert_eq!(arguments[2], "tool");
+        }
+        let (program, _) = Harness::Codex
+            .contained("codex".into(), Vec::new(), &workspace, true)
+            .unwrap();
+        assert_eq!(program, "codex", "Codex keeps its own sandbox");
+        let (program, _) = Harness::Kimi
+            .contained("kimi".into(), Vec::new(), &workspace, false)
+            .unwrap();
+        assert_eq!(program, "kimi", "--sandbox none is respected");
+    }
 
     #[test]
     fn claude_code_streams_give_turns_tokens_errors_and_the_answer() {
