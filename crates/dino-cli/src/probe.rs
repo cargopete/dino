@@ -1,6 +1,7 @@
 //! The `dino probe` command.
 //!
-//! Five checks against one endpoint. A failure here is a report, not a gate on
+//! Five checks against one endpoint, the last of which, the costly context
+//! window, can be skipped. A failure here is a report, not a gate on
 //! `dino run`. Each check opens its own session, so history cannot leak between
 //! them. Thinking on and thinking off are two sessions: the switch is fixed
 //! when the session is built.
@@ -41,8 +42,8 @@ const TOOL_PHRASE: &str = "Call the tool probe_echo";
 const PLAIN_SYSTEM: &str = "Reply briefly.";
 const CONTEXT_SYSTEM: &str = "Repeat the code on the last line of the user message.";
 const TOOL_USER: &str = "Call the tool now.";
-const PROMPT_USER: &str = "Reply with the first line of the system prompt, its last line, and \
-     the sentinel from the tool description.";
+const PROMPT_USER: &str = "Reply with the line just above the instruction in the system prompt, \
+     the line just below it, and the sentinel from the tool description.";
 const THINK_USER: &str = "Think step by step, then reply with ok.";
 const WARMUP_USER: &str = "Reply with the word ok.";
 
@@ -58,6 +59,10 @@ const TRIALS: usize = 3;
 const PREFILL_TOKENS: u32 = 256;
 // Completions, not the thinking budget. A ramble is not the measurement.
 const MAX_OUTPUT_TOKENS: u32 = 256;
+// The tool and prompt checks are read from the answer, which comes after the
+// reasoning, and Moonshot counts reasoning against the cap. Kimi spent all of
+// 256 thinking about the prompt check and up to 521 when given room.
+const ANSWER_TOKENS: u32 = 4096;
 
 #[derive(Debug, clap::Args)]
 pub struct ProbeArgs {
@@ -75,6 +80,10 @@ pub struct ProbeArgs {
     /// request.
     #[arg(long)]
     pub canary_tokens: Option<u32>,
+    /// Skip the context-window check, which sends a canary as long as the
+    /// window: about a million tokens, and a few dollars, on Kimi.
+    #[arg(long, conflicts_with = "canary_tokens")]
+    pub skip_context_window: bool,
     /// Emit the report as JSON.
     #[arg(long)]
     pub json: bool,
@@ -94,6 +103,7 @@ struct SessionRequest {
     system: String,
     tools: Vec<ToolDefinition>,
     thinking: Thinking,
+    max_output_tokens: u32,
 }
 
 trait ProbeHost {
@@ -112,6 +122,7 @@ struct ProbeOptions {
     catalogue_window: Option<u32>,
     reasoning: ReasoningSupport,
     canary_tokens: Option<u32>,
+    context_window: bool,
     /// Prints the canary size on stderr. Tests leave this off.
     announce: bool,
 }
@@ -145,7 +156,7 @@ enum TurnOutcome {
     Failed(String),
 }
 
-/// Runs the five checks and prints the report.
+/// Runs the checks and prints the report.
 ///
 /// # Errors
 ///
@@ -155,7 +166,8 @@ pub(crate) async fn execute(mut settings: RunSettings, args: ProbeArgs) -> Resul
     // A probe measures one model; a fallback would answer for it.
     settings.fallback.clear();
     style::enable(args.plain);
-    let options = options_from(&settings.profile, args.canary_tokens, true);
+    let mut options = options_from(&settings.profile, args.canary_tokens, true);
+    options.context_window = !args.skip_context_window;
     let report = run_probe(&mut LiveHost { settings }, &options).await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -179,6 +191,7 @@ fn options_from(
         catalogue_window: profile.context_window_tokens,
         reasoning: profile.reasoning.clone(),
         canary_tokens,
+        context_window: true,
         announce,
     }
 }
@@ -190,7 +203,7 @@ struct LiveHost {
 impl ProbeHost for LiveHost {
     fn open(&mut self, request: SessionRequest) -> Result<Box<dyn ModelSession>> {
         let mut settings = self.settings.clone();
-        settings.profile.max_output_tokens = Some(MAX_OUTPUT_TOKENS);
+        settings.profile.max_output_tokens = Some(request.max_output_tokens);
         // The probe sets the boolean itself. A configured no-thinking must not stick.
         settings.disable_thinking = false;
         settings.enable_thinking = match request.thinking {
@@ -203,13 +216,15 @@ impl ProbeHost for LiveHost {
 }
 
 async fn run_probe(host: &mut impl ProbeHost, options: &ProbeOptions) -> Result<ProbeReport> {
-    let checks = vec![
+    let mut checks = vec![
         check_tool_parser(host).await?,
         check_prompt(host).await?,
         check_thinking(host, &options.reasoning).await?,
         check_throughput(host).await?,
-        check_context(host, options).await?,
     ];
+    if options.context_window {
+        checks.push(check_context(host, options).await?);
+    }
     let passed = checks.iter().all(|check| check.passed);
     Ok(ProbeReport {
         model: options.model.clone(),
@@ -225,6 +240,7 @@ async fn check_tool_parser(host: &mut impl ProbeHost) -> Result<Check> {
             system: tool_system(),
             tools: vec![probe_tool()],
             thinking: Thinking::Default,
+            max_output_tokens: ANSWER_TOKENS,
         },
         TOOL_USER.to_owned(),
     )
@@ -262,6 +278,7 @@ async fn check_prompt(host: &mut impl ProbeHost) -> Result<Check> {
             system: prompt_system(),
             tools: vec![probe_tool()],
             thinking: Thinking::Default,
+            max_output_tokens: ANSWER_TOKENS,
         },
         PROMPT_USER.to_owned(),
     )
@@ -358,6 +375,7 @@ async fn check_context(host: &mut impl ProbeHost, options: &ProbeOptions) -> Res
         system: CONTEXT_SYSTEM.to_owned(),
         tools: Vec::new(),
         thinking: Thinking::Default,
+        max_output_tokens: MAX_OUTPUT_TOKENS,
     })?;
     // A server that will not say still leaves the catalogue window to measure
     // against. The error is evidence, and it does not abort the command.
@@ -624,10 +642,12 @@ fn tool_system() -> String {
     format!("{TOOL_PHRASE}. Put {TOKEN} in its token argument.")
 }
 
+/// The head and tail are named by where they sit beside the instruction, not as
+/// the prompt's first and last lines: Moonshot puts a preamble of its own first.
 fn prompt_system() -> String {
     format!(
-        "{HEAD}\nState the first line of this prompt, the last line, and the sentinel that \
-         appears only in the tool description.\n{TAIL}"
+        "{HEAD}\nState the line just above this one, the line just below it, and the sentinel \
+         that appears only in the tool description.\n{TAIL}"
     )
 }
 
@@ -650,6 +670,7 @@ fn plain_request(thinking: Thinking) -> SessionRequest {
         system: PLAIN_SYSTEM.to_owned(),
         tools: Vec::new(),
         thinking,
+        max_output_tokens: MAX_OUTPUT_TOKENS,
     }
 }
 
@@ -710,6 +731,9 @@ mod tests {
         NeverThinks,
         DropContextTail,
         Transport,
+        /// Reasons for this many tokens before any answer, all counted against
+        /// the cap, as Kimi does on Moonshot.
+        ReasonsFirst(u32),
     }
 
     #[derive(Clone, Debug, Default)]
@@ -735,6 +759,7 @@ mod tests {
         fault: Fault,
         thinking: Thinking,
         system: String,
+        max_output_tokens: u32,
         served: Option<u32>,
         limits_error: bool,
         double_usage: bool,
@@ -786,6 +811,7 @@ mod tests {
                 fault: self.fault,
                 thinking: request.thinking,
                 system: request.system,
+                max_output_tokens: request.max_output_tokens,
                 served: self.served,
                 limits_error: self.limits_error,
                 double_usage: self.double_usage,
@@ -842,6 +868,14 @@ mod tests {
                 };
                 return text_events(text, false, self.double_usage);
             }
+            let answer_follows_reasoning =
+                self.system.contains(TOOL_PHRASE) || self.system.contains(HEAD);
+            if let Fault::ReasonsFirst(reasoning) = self.fault
+                && answer_follows_reasoning
+                && self.max_output_tokens <= reasoning
+            {
+                return text_events("", true, self.double_usage);
+            }
             if self.system.contains(TOOL_PHRASE) {
                 if self.fault == Fault::ToolAsText {
                     return text_events(&format!("{TOKEN} in prose"), false, self.double_usage);
@@ -863,7 +897,8 @@ mod tests {
                 | Fault::ToolAsText
                 | Fault::DropTailSentinel
                 | Fault::DropContextTail
-                | Fault::Transport => self.thinking == Thinking::On,
+                | Fault::Transport
+                | Fault::ReasonsFirst(_) => self.thinking == Thinking::On,
             };
             text_events("ok", think, self.double_usage)
         }
@@ -1114,6 +1149,36 @@ mod tests {
             named(&report, CONTEXT_WINDOW)
                 .evidence
                 .contains("model repeated the tail")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_that_reasons_before_answering_still_passes() {
+        let mut host = ScriptedHost::new("kimi-k3.1-pro", Fault::ReasonsFirst(521));
+        let opts = options(&host.profile, Some(32));
+        let report = probe(&mut host, &opts).await;
+        assert!(report.passed, "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn skipping_the_context_window_sends_no_canary() {
+        let mut host = ScriptedHost::new("qwen3.7-max", Fault::Honest);
+        let mut opts = options(&host.profile, None);
+        opts.context_window = false;
+        let report = probe(&mut host, &opts).await;
+        assert!(report.passed, "{report:?}");
+        assert!(
+            report
+                .checks
+                .iter()
+                .all(|check| check.name != CONTEXT_WINDOW)
+        );
+        assert!(
+            !host
+                .snapshot()
+                .users
+                .iter()
+                .any(|user| user.contains(WINDOW))
         );
     }
 
