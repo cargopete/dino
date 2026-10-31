@@ -76,6 +76,11 @@ impl Harness {
             .map(|path| home.join(path))
             .collect();
         writable.push(std::env::temp_dir());
+        // Claude Code's shell keeps its state in /tmp/claude-<uid>; without it
+        // no command runs at all, and the model works blind.
+        if self == Self::ClaudeCode {
+            writable.push("/private/tmp".into());
+        }
         writable.retain(|path| path.exists());
         let sandbox = dino_sandbox::detect(workspace)
             .map_err(|error| EvalError::Setup(error.to_string()))?
