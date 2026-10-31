@@ -133,7 +133,7 @@ impl WorkspaceTools {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
+                        "path": {"type": "string", "minLength": 1},
                         "start_line": {"type": "integer", "minimum": 1},
                         "end_line": {"type": "integer", "minimum": 1},
                         "again": {
@@ -156,11 +156,11 @@ impl WorkspaceTools {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "minLength": 1},
-                        "path": {"type": "string"},
+                        "path": {"type": "string", "minLength": 1},
                         "max_results": {"type": "integer", "minimum": 1},
                         "regex": {"type": "boolean", "description": "Read query as a Rust regular expression."},
                         "ignore_case": {"type": "boolean"},
-                        "glob": {"type": "string", "description": "Only files whose workspace path matches."}
+                        "glob": {"type": "string", "minLength": 1, "description": "Only files whose workspace path matches."}
                     },
                     "required": ["query"],
                     "additionalProperties": false
@@ -175,10 +175,11 @@ impl WorkspaceTools {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
+                        "path": {"type": "string", "minLength": 1},
                         "depth": {"type": "integer", "minimum": 1},
                         "pattern": {
                             "type": "string",
+                            "minLength": 1,
                             "description": "Only files whose workspace path matches this glob, at any depth, such as **/*_test.go."
                         },
                         "all": {
@@ -199,9 +200,10 @@ impl WorkspaceTools {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
+                        "path": {"type": "string", "minLength": 1},
                         "expected_sha256": {
                             "type": "string",
+                            "minLength": 8,
                             "pattern": "^[0-9a-f]{8,64}$",
                             "description": "The sha256 from reading the file. May be left out \
                                             when the file has not changed since you last read \
@@ -238,9 +240,9 @@ impl WorkspaceTools {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
+                        "path": {"type": "string", "minLength": 1},
                         "content": {"type": "string"},
-                        "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                        "expected_sha256": {"type": "string", "minLength": 64, "pattern": "^[0-9a-f]{64}$"}
                     },
                     "required": ["path", "content"],
                     "additionalProperties": false
@@ -1299,6 +1301,20 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("remain inside the workspace"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_list_path_through_a_tool_set_lists_the_workspace_root() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\n");
+        let tools = dino_core::ToolSet::new(vec![Box::new(workspace.tools())]).unwrap();
+
+        let output = tools
+            .execute(&call("list", json!({"path": "", "pattern": ""})))
+            .await
+            .unwrap();
+
+        assert_eq!(output_json(&output)["path"], ".");
     }
 
     #[test]

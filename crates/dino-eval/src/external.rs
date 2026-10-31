@@ -155,6 +155,8 @@ pub fn parse_claude_code(stream: &str) -> Parsed {
                 let usage = &event["usage"];
                 let count = |field: &str| usage[field].as_u64().unwrap_or(0);
                 parsed.metrics.tokens.cached_input_tokens = count("cache_read_input_tokens");
+                parsed.metrics.tokens.cache_write_input_tokens =
+                    count("cache_creation_input_tokens");
                 parsed.metrics.tokens.input_tokens = count("input_tokens")
                     + count("cache_creation_input_tokens")
                     + count("cache_read_input_tokens");
@@ -273,6 +275,8 @@ pub fn parse_grok(stream: &str) -> Parsed {
                 let usage = &event["usage"];
                 let count = |field: &str| usage[field].as_u64().unwrap_or(0);
                 parsed.metrics.tokens.cached_input_tokens = count("cache_read_input_tokens");
+                parsed.metrics.tokens.cache_write_input_tokens =
+                    count("cache_creation_input_tokens");
                 parsed.metrics.tokens.input_tokens = count("input_tokens")
                     + count("cache_creation_input_tokens")
                     + count("cache_read_input_tokens");
@@ -411,6 +415,7 @@ mod tests {
         );
         assert_eq!(parsed.metrics.tokens.input_tokens, 1_004);
         assert_eq!(parsed.metrics.tokens.cached_input_tokens, 900);
+        assert_eq!(parsed.metrics.tokens.cache_write_input_tokens, 100);
     }
 
     #[test]

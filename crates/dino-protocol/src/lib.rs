@@ -71,6 +71,8 @@ pub enum ChatServer {
     Vllm,
     /// Alibaba Model Studio, including its Coding Plan.
     DashScope,
+    /// Moonshot's Kimi platform: `reasoning_effort`, and `thinking` to turn it off.
+    Moonshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +192,10 @@ pub enum StopReason {
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    /// Input written to the provider's cache, inside `input_tokens` like the
+    /// cached reads, and priced above plain input by those that charge for it.
+    #[serde(default)]
+    pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
 }

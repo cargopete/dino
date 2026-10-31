@@ -474,10 +474,12 @@ impl ToolRuntime for CargoTool {
                     },
                     "package": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "One workspace member. Defaults to the whole workspace."
                     },
                     "filter": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Only for test: run tests whose name contains this."
                     }
                 },

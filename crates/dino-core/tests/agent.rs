@@ -1373,6 +1373,60 @@ async fn several_checks_report_the_first_that_finds_work_unfinished() {
     assert_eq!(checks.unfinished().await.as_deref(), Some("lint failed"));
 }
 
+/// Returns the arguments it was called with.
+struct ArgumentsTool;
+
+impl ToolRuntime for ArgumentsTool {
+    fn definitions(&self) -> Vec<dino_protocol::ToolDefinition> {
+        vec![dino_protocol::ToolDefinition {
+            name: "shape".into(),
+            description: "echoes its arguments".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1},
+                    "required_path": {"type": "string", "minLength": 1},
+                    "new_text": {"type": "string"},
+                    "depth": {"type": "integer"},
+                    "mode": {"type": "string", "enum": ["fast", "slow"]}
+                },
+                "required": ["required_path"]
+            }),
+        }]
+    }
+
+    fn classify(
+        &self,
+        _call: &dino_protocol::ToolCall,
+    ) -> Result<dino_protocol::ToolAction, dino_core::ToolError> {
+        Ok(dino_protocol::ToolAction::read_only())
+    }
+
+    fn execute(&self, call: &dino_protocol::ToolCall) -> dino_core::ToolFuture<'_> {
+        let arguments = call.arguments.to_string();
+        Box::pin(async move { Ok(ToolOutput::success(arguments)) })
+    }
+}
+
+#[tokio::test]
+async fn an_empty_string_counts_as_absent_only_where_the_schema_cannot_take_one() {
+    let tools = ToolSet::new(vec![Box::new(ArgumentsTool)]).unwrap();
+    let call = dino_protocol::ToolCall {
+        id: "call-1".into(),
+        name: "shape".into(),
+        arguments: json!({
+            "path": "", "required_path": "", "new_text": "", "depth": "", "mode": ""
+        }),
+    };
+
+    let output = tools.execute(&call).await.unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.content).unwrap(),
+        json!({"required_path": "", "new_text": ""})
+    );
+}
+
 #[test]
 fn a_call_with_unparsed_arguments_is_refused_with_what_was_sent() {
     let tools = ToolSet::new(vec![Box::new(dino_core::todo::TodoTool)]).unwrap();

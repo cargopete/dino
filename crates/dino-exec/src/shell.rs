@@ -170,6 +170,7 @@ impl ToolRuntime for ShellTool {
                     },
                     "directory": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Working directory relative to the workspace root."
                     }
                 },

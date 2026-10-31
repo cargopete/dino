@@ -305,6 +305,27 @@ fn a_filter_outside_the_test_command_is_rejected() {
 }
 
 #[test]
+fn an_empty_filter_through_a_tool_set_runs_every_test() {
+    let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
+    let tools = dino_core::ToolSet::new(vec![Box::new(fixture.tool())]).unwrap();
+
+    let action = tools
+        .classify(&call(
+            json!({"command": "test", "filter": "", "package": ""}),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        action.subject,
+        fixture
+            .tool()
+            .classify(&call(json!({"command": "test"})))
+            .unwrap()
+            .subject
+    );
+}
+
+#[test]
 fn an_unknown_field_is_rejected_rather_than_ignored() {
     let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
 

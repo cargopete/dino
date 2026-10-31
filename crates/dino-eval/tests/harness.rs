@@ -92,6 +92,7 @@ fn text_turn(text: &str) -> Vec<ModelEvent> {
             usage: dino_protocol::TokenUsage {
                 input_tokens: 120,
                 cached_input_tokens: 20,
+                cache_write_input_tokens: 0,
                 output_tokens: 8,
                 reasoning_tokens: 0,
             },

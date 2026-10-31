@@ -305,8 +305,8 @@ impl ToolRuntime for Progress {
                     "op": {"type": "string", "enum": ["plan", "done", "blocked", "note"]},
                     "items": {"type": "array", "items": {"type": "string"}},
                     "item": {"type": "integer", "minimum": 1},
-                    "note": {"type": "string"},
-                    "text": {"type": "string"}
+                    "note": {"type": "string", "minLength": 1},
+                    "text": {"type": "string", "minLength": 1}
                 },
                 "required": ["op"],
                 "additionalProperties": false

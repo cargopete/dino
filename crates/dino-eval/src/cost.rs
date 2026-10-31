@@ -171,6 +171,7 @@ mod tests {
         TokenUsage {
             input_tokens: input,
             cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
             output_tokens: output,
             reasoning_tokens: 0,
         }
