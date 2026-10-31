@@ -518,11 +518,14 @@ Ollama serves a context far smaller than the model's native window unless
 `num_ctx` is raised, and it truncates rather than complaining. RFC-0003 section
 3.1 records what has and has not been measured there.
 
-The interface uses a warm dark palette because that is what it was drawn for.
-Dino ships the ink and leaves the background to the terminal, since a
-line-based program does not own its ground. It asks the terminal for that ground
-once at startup (OSC 11, then `COLORFGBG`) and on a light one draws the same hues
-in darker inks.
+The interface uses the Bedrock palette: lavender for what the machine printed,
+ember orange for what a person wrote, sandstone and stone grey for chrome, every
+ink at WCAG AA on common dark and light grounds. Dino ships the ink and leaves
+the background to the terminal, since a line-based program does not own its
+ground. It asks the terminal for that ground once at startup (OSC 11, then
+`COLORFGBG`) and on a light one draws the same hues in darker inks. An
+interactive session in colour opens with a small dinosaur; `greeting = false`
+in a config file turns it off, and `dino palette` shows both in your terminal.
 
 **What lands on disk.** `.dino/` in the workspace holds the session log, the
 resumable state and the input history. The log records what you typed; the state

@@ -30,8 +30,8 @@ use dino_protocol::ToolClass;
 use crate::render::describe_call;
 use crate::style;
 use crate::style::BOLD;
+use crate::style::EMBER;
 use crate::style::FAINT;
-use crate::style::RUST;
 
 #[derive(Debug, Clone)]
 pub struct TerminalApprover {
@@ -178,7 +178,7 @@ fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str
     crate::render::others_wrote();
     let mut err = stderr().lock();
     // The one moment a person is directly addressed.
-    let header = style::paint_with(RUST, &[BOLD], "  approval");
+    let header = style::paint_with(EMBER, &[BOLD], "  approval");
     let detail = style::paint(
         FAINT,
         &format!("      rule scope: {} on {}", asking.tool, asking.subject),
@@ -344,7 +344,7 @@ impl crate::spend::Purse for TerminalPurse {
         crate::render::others_wrote();
         eprintln!(
             "\n{}  {message}",
-            style::paint_with(RUST, &[BOLD], "  budget")
+            style::paint_with(EMBER, &[BOLD], "  budget")
         );
         let choices = [
             Choice {
@@ -385,7 +385,7 @@ fn draw_choices(choices: &[Choice], current: usize, redraw: bool) {
     for (index, choice) in choices.iter().enumerate() {
         let line = format!("[{}] {}", choice.key, choice.label);
         let line = if index == current {
-            style::paint_with(RUST, &[BOLD], &format!("    › {line}"))
+            style::paint_with(EMBER, &[BOLD], &format!("    › {line}"))
         } else {
             style::paint(FAINT, &format!("      {line}"))
         };

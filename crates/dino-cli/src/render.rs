@@ -3,8 +3,8 @@
 //! The renderer is an [`EventSink`] and holds no agent state, so the session in
 //! RFC-0007 is the same renderer driven repeatedly rather than a second one.
 //!
-//! Colour follows the house rule: if a shell printed it, it is slate; if a
-//! person wrote it, it is terracotta.
+//! Colour follows the house rule: if a shell printed it, it is purple; if a
+//! person wrote it, it is ember.
 //!
 //! On a terminal a call's line is committed as it starts and redrawn in place
 //! when it finishes, or when the next look joins it, for as long as nothing has
@@ -36,12 +36,12 @@ use serde_json::Value;
 use crate::calls;
 use crate::calls::Mark;
 use crate::style;
+use crate::style::EMBER;
 use crate::style::FAINT;
 use crate::style::ITALIC;
 use crate::style::MUTED;
 use crate::style::OK;
-use crate::style::RUST;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 use crate::style::WARN;
 
 const MAX_SUMMARY_BYTES: usize = 120;
@@ -98,7 +98,7 @@ impl Last {
         format!(
             "  {} {}",
             paint_mark(mark),
-            style::paint(SLATE, &format!("→ {}", calls::explored(&looks, room)))
+            style::paint(PURPLE, &format!("→ {}", calls::explored(&looks, room)))
         )
     }
 }
@@ -125,7 +125,10 @@ fn call_line(
     let mut line = format!(
         "  {} {}",
         paint_mark(mark),
-        style::paint(SLATE, &format!("{} {description}", calls::icon(&call.name)))
+        style::paint(
+            PURPLE,
+            &format!("{} {description}", calls::icon(&call.name))
+        )
     );
     if !gist.is_empty() {
         line.push_str(&style::paint(colour, &format!(" · {gist}")));
@@ -135,10 +138,10 @@ fn call_line(
 
 fn paint_mark(mark: Mark) -> String {
     let colour = match mark {
-        Mark::Running => SLATE,
+        Mark::Running => PURPLE,
         Mark::Done => MUTED,
         Mark::Failed => WARN,
-        Mark::Refused => RUST,
+        Mark::Refused => EMBER,
     };
     style::paint(colour, &mark.glyph().to_string())
 }
@@ -149,7 +152,7 @@ fn refused_line(tool: &str, description: &str, reason: &str) -> String {
     let (mark, colour, tag, said) = match reason.strip_prefix("the operator refused this action") {
         Some(said) => (
             Mark::Refused,
-            RUST,
+            EMBER,
             "refused by you".to_owned(),
             said.strip_prefix(": ").map(str::trim),
         ),
@@ -164,7 +167,7 @@ fn refused_line(tool: &str, description: &str, reason: &str) -> String {
     let mut line = format!(
         "  {} {}{}\n",
         paint_mark(mark),
-        style::paint(SLATE, &format!("{} {description}", calls::icon(tool))),
+        style::paint(PURPLE, &format!("{} {description}", calls::icon(tool))),
         style::paint(colour, &format!(" · {tag}"))
     );
     if let Some(said) = said.filter(|said| !said.is_empty()) {
@@ -403,7 +406,7 @@ impl Renderer {
             // A person decided this, so a person's colour carries it.
             ApprovalDecision::Denied { reason } => {
                 self.break_stream()?;
-                write_out(&style::paint(RUST, &format!("  refused  {subject}\n")))?;
+                write_out(&style::paint(EMBER, &format!("  refused  {subject}\n")))?;
                 write_out(&style::paint(FAINT, &format!("           {reason}\n")))
             }
             // A person answering the prompt has already seen it, and an
@@ -845,7 +848,7 @@ fn argument_number(arguments: &Value, key: &str) -> Option<u64> {
 /// and pastes can run to pages; the log keeps them whole.
 /// A message typed during the run, as it goes to the model.
 fn steered(text: &str) -> Result<(), SinkError> {
-    write_out(&style::paint(RUST, &format!("› {text}\n")))?;
+    write_out(&style::paint(EMBER, &format!("› {text}\n")))?;
     write_out(&style::paint(FAINT, "  sent with the latest results\n"))
 }
 
@@ -853,7 +856,7 @@ fn submitted(text: &str) -> Result<(), SinkError> {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or_default();
     let more = lines.count();
-    write_out(&style::paint(RUST, &format!("\n› {first}\n")))?;
+    write_out(&style::paint(EMBER, &format!("\n› {first}\n")))?;
     if more > 0 {
         write_out(&style::paint(FAINT, &format!("  (+{more} more lines)\n")))?;
     }
@@ -905,7 +908,7 @@ fn context_line(
 
 fn handed_over(session: u32, reason: &str, pending: usize) -> Result<(), SinkError> {
     write_out(&style::paint(
-        SLATE,
+        PURPLE,
         &format!("\n  ── session {session}: {reason}; {pending} item(s) pending ──\n"),
     ))
 }
@@ -923,7 +926,7 @@ fn todo_started(call: &dino_protocol::ToolCall) -> Result<(), SinkError> {
     });
     let marker = if style::enabled() { "#" } else { "›" };
     write_out(&style::paint(
-        SLATE,
+        PURPLE,
         &format!("  {marker} todo\n{indented}"),
     ))
 }
@@ -934,7 +937,7 @@ impl Renderer {
         if !style::enabled() {
             // The machine is about to do something, so the machine's colour.
             // The line stays open for the result to finish it.
-            let line = style::paint(SLATE, &format!("  › {}", describe_call(call)));
+            let line = style::paint(PURPLE, &format!("  › {}", describe_call(call)));
             write_out(&line)?;
             self.open_call = Some(call.clone());
             return Ok(());
@@ -1058,7 +1061,7 @@ impl Renderer {
     }
 }
 
-/// The changed lines of a patch, beneath its call: removed in terracotta,
+/// The changed lines of a patch, beneath its call: removed in ember,
 /// added in green, behind a faint gutter.
 fn patch_preview(call: &ToolCall) -> String {
     use crate::diff::Row;
@@ -1071,7 +1074,7 @@ fn patch_preview(call: &ToolCall) -> String {
         .unwrap_or_default()
         .iter()
         .filter_map(|row| match row {
-            Row::Removed { parts, .. } => Some(style::paint(RUST, &format!("- {}", text(parts)))),
+            Row::Removed { parts, .. } => Some(style::paint(EMBER, &format!("- {}", text(parts)))),
             Row::Added { parts, .. } => Some(style::paint(OK, &format!("+ {}", text(parts)))),
             Row::Same { .. } | Row::Gap => None,
         })

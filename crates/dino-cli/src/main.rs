@@ -5,6 +5,7 @@ mod calls;
 mod config;
 mod diff;
 mod evals;
+mod greeting;
 mod handover;
 mod listen;
 mod markdown;
@@ -101,6 +102,8 @@ enum Command {
     Config(PromptArgs),
     /// Print a past session from its log.
     Replay(crate::replay::ReplayArgs),
+    /// Show the palette and the opening drawing as this terminal draws them.
+    Palette,
 }
 
 // These are switches rather than a state machine because each one means one
@@ -233,6 +236,11 @@ fn dispatch() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Replay(args)) => replay::run(&args),
+        Some(Command::Palette) => {
+            style::enable(false);
+            print!("{}", greeting::palette());
+            Ok(ExitCode::SUCCESS)
+        }
         None => on_runtime(session(cli.common)),
     }
 }
@@ -718,6 +726,11 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         log_path: prepared.settings.log_path.display().to_string(),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
         state_path: prepared.state_path,
+        greeting: greeting::shows(
+            prepared.settings.greeting,
+            style::enabled(),
+            stdin().is_terminal(),
+        ),
     };
     session.run().await?;
     eprintln!(
@@ -930,6 +943,7 @@ struct Resolved {
     show_reasoning: (bool, Source),
     no_thinking: (bool, Source),
     plain: (bool, Source),
+    greeting: (bool, Source),
     protected: (Vec<PathBuf>, Source),
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
@@ -1030,6 +1044,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         show_reasoning: switch(args.show_reasoning, |file| file.show_reasoning),
         no_thinking: switch(args.no_thinking, |file| file.no_thinking),
         plain: switch(args.plain, |file| file.plain),
+        greeting: layers
+            .pick(|file| file.greeting)
+            .unwrap_or((true, Source::Default)),
         protected: layers
             .pick(|file| file.protected.clone())
             .unwrap_or((Vec::new(), Source::Default)),
@@ -1054,23 +1071,28 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         ),
         end_turn_hooks: hooks_for(&layers, settings::HookEvent::BeforeEndTurn),
         start_hooks: hooks_for(&layers, settings::HookEvent::SessionStart),
-        mcp: layers
-            .pick_user_only(|file| file.mcp.clone())
-            .map(|(servers, _)| {
-                servers
-                    .into_iter()
-                    .map(|(name, server)| dino_exec::McpServer {
-                        name,
-                        command: server.command,
-                        pass_env: server.pass_env,
-                        read_only_tools: server.read_only_tools,
-                        sandboxed: server.sandbox,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        mcp: mcp_servers(&layers),
         layers,
     })
+}
+
+/// The user file's MCP servers. A project file cannot set any.
+fn mcp_servers(layers: &Layers) -> Vec<dino_exec::McpServer> {
+    layers
+        .pick_user_only(|file| file.mcp.clone())
+        .map(|(servers, _)| {
+            servers
+                .into_iter()
+                .map(|(name, server)| dino_exec::McpServer {
+                    name,
+                    command: server.command,
+                    pass_env: server.pass_env,
+                    read_only_tools: server.read_only_tools,
+                    sandboxed: server.sandbox,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn reasoning_effort(
@@ -1131,6 +1153,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
     let resolved = resolve(&common, &workspace)?;
 
     let show = |value: String, source: Source| format!("{value}  ({})", source.label());
+    let switch = |(on, source): (bool, Source)| show(on.to_string(), source);
     let fallback = in_order(&resolved.fallback);
     let rows = vec![
         (
@@ -1181,17 +1204,8 @@ fn print_config(args: &PromptArgs) -> Result<()> {
                 resolved.api_base.1,
             ),
         ),
-        (
-            "reasoning",
-            show(
-                resolved.show_reasoning.0.to_string(),
-                resolved.show_reasoning.1,
-            ),
-        ),
-        (
-            "thinking off",
-            show(resolved.no_thinking.0.to_string(), resolved.no_thinking.1),
-        ),
+        ("reasoning", switch(resolved.show_reasoning)),
+        ("thinking off", switch(resolved.no_thinking)),
         (
             "reasoning effort",
             show(
@@ -1202,10 +1216,8 @@ fn print_config(args: &PromptArgs) -> Result<()> {
                 resolved.reasoning_effort.1,
             ),
         ),
-        (
-            "plain",
-            show(resolved.plain.0.to_string(), resolved.plain.1),
-        ),
+        ("plain", switch(resolved.plain)),
+        ("greeting", switch(resolved.greeting)),
         ("fallback", fallback),
         ("budget", budget_row(resolved.budget)),
         (
@@ -1260,6 +1272,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         enable_thinking: None,
         reasoning_effort: resolved.reasoning_effort.0,
         plain: resolved.plain.0,
+        greeting: resolved.greeting.0,
         fallback,
         budget: resolved.budget,
     })
