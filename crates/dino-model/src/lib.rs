@@ -294,6 +294,7 @@ pub fn supported_profiles() -> Vec<ModelProfile> {
 pub fn builtin_profiles() -> Vec<ModelProfile> {
     vec![
         terra(),
+        terra_6_1(),
         claude_opus(),
         claude_opus_5_5(),
         claude_sonnet(),
@@ -310,6 +311,8 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         qwen_3_7_max(),
         deepseek_v4_pro(),
         glm_5_3(),
+        kimi_k3_1_pro(),
+        grok_4_7(),
         qwen3_8b(),
     ]
 }
@@ -344,6 +347,16 @@ fn terra() -> ModelProfile {
         reasoning_parser: None,
         sampling: None,
         chat_server: ChatServer::Vllm,
+    }
+}
+
+/// Released 2026-10-27 at half `gpt-5.6-terra`'s price; window and efforts assumed unchanged.
+fn terra_6_1() -> ModelProfile {
+    ModelProfile {
+        key: "terra-6.1".into(),
+        provider_model: "gpt-6.1-terra".into(),
+        display_name: "GPT-6.1 Terra".into(),
+        ..terra()
     }
 }
 
@@ -583,6 +596,22 @@ fn deepseek_v4_pro() -> ModelProfile {
     dashscope("deepseek-v4-pro", "DeepSeek V4 Pro", 131_072, false)
 }
 
+/// OpenAI-compatible chat endpoints, served through the Qwen adapter with
+/// `--api-base` and the provider's key in `QWEN_API_KEY`.
+fn kimi_k3_1_pro() -> ModelProfile {
+    ModelProfile {
+        display_name: "Kimi K3.1 Pro (Moonshot)".into(),
+        ..dashscope("kimi-k3.1-pro", "", 1_048_576, true)
+    }
+}
+
+fn grok_4_7() -> ModelProfile {
+    ModelProfile {
+        display_name: "Grok 4.7 (xAI)".into(),
+        ..dashscope("grok-4.7", "", 500_000, false)
+    }
+}
+
 fn glm_5_3() -> ModelProfile {
     dashscope("glm-5.3", "GLM-5.3", 131_072, false)
 }
@@ -694,7 +723,7 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-        assert_eq!(all.len(), 18);
+        assert_eq!(all.len(), 21);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 

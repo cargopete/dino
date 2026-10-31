@@ -1,0 +1,10 @@
+name: grok-4.7
+started: 2026-10-30T15:39:57Z
+commit: 2e054e278e6af21b93e436a1e4cff10511887312 (dirty)
+dino: /Users/pepe/dino-bench-results/bin-decisive/dino sha256 9ccd292afc7344d6
+trials: 5
+args: --model grok-4.7 --api-base https://api.x.ai/v1
+codex: codex-cli 0.165.0
+grok: grok 1.0.70 (f50904eaee6c) [stable]
+claude: 2.1.314 (Claude Code)
+host: Darwin arm64, 18 cpus

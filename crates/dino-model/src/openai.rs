@@ -144,7 +144,8 @@ impl OpenAiSession {
                     "name": tool.name,
                     "description": tool.description,
                     "parameters": tool.input_schema,
-                    "strict": true,
+                    // Strict mode needs every property required, and the tools have optional ones.
+                    "strict": false,
                 })
             })
             .collect::<Vec<_>>();

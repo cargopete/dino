@@ -1,0 +1,317 @@
+diff --git a/crates/dino-cli/src/evals.rs b/crates/dino-cli/src/evals.rs
+index 53eb975..f6a749e 100644
+--- a/crates/dino-cli/src/evals.rs
++++ b/crates/dino-cli/src/evals.rs
+@@ -107,6 +107,8 @@ pub struct EvalArgs {
+ pub enum ExternalHarness {
+     ClaudeCode,
+     Codex,
++    Kimi,
++    Grok,
+ }
+ 
+ impl From<ExternalHarness> for dino_eval::external::Harness {
+@@ -114,6 +116,8 @@ impl From<ExternalHarness> for dino_eval::external::Harness {
+         match harness {
+             ExternalHarness::ClaudeCode => Self::ClaudeCode,
+             ExternalHarness::Codex => Self::Codex,
++            ExternalHarness::Kimi => Self::Kimi,
++            ExternalHarness::Grok => Self::Grok,
+         }
+     }
+ }
+diff --git a/crates/dino-eval/src/external.rs b/crates/dino-eval/src/external.rs
+index a9f15b1..23a8421 100644
+--- a/crates/dino-eval/src/external.rs
++++ b/crates/dino-eval/src/external.rs
+@@ -33,6 +33,8 @@ use crate::runner::wall_outcome;
+ pub enum Harness {
+     ClaudeCode,
+     Codex,
++    Kimi,
++    Grok,
+ }
+ 
+ impl Harness {
+@@ -82,6 +84,27 @@ impl Harness {
+                 .chain([workspace.display().to_string(), prompt.to_owned()])
+                 .collect(),
+             ),
++            // Kimi Code runs every call unasked in prompt mode; it has no sandbox to pick.
++            Self::Kimi => (
++                "kimi".to_owned(),
++                owned(&["-p", prompt, "-m", model, "--output-format", "stream-json"]),
++            ),
++            // Shell is held to cargo: approving everything unattended was refused here.
++            Self::Grok => (
++                "grok".to_owned(),
++                owned(&[
++                    "-p",
++                    prompt,
++                    "-m",
++                    model,
++                    "--output-format",
++                    "streaming-json",
++                    "--permission-mode",
++                    "acceptEdits",
++                    "--allow",
++                    "Bash(cargo:*)",
++                ]),
++            ),
+         }
+     }
+ }
+@@ -195,6 +218,73 @@ pub fn parse_codex(stream: &str) -> Parsed {
+     parsed
+ }
+ 
++/// Reads Kimi Code's `stream-json` output: one chat message per line. It
++/// reports no usage, so tokens stay at zero.
++#[must_use]
++pub fn parse_kimi(stream: &str) -> Parsed {
++    let mut parsed = Parsed::default();
++    for line in stream.lines() {
++        let Ok(event) = serde_json::from_str::<Value>(line) else {
++            continue;
++        };
++        if event["role"] != "assistant" {
++            continue;
++        }
++        parsed.metrics.model_turns += 1;
++        let calls = event["tool_calls"]
++            .as_array()
++            .map_or(&[][..], Vec::as_slice);
++        for call in calls {
++            let name = call["function"]["name"].as_str().unwrap_or("?").to_owned();
++            *parsed.metrics.tool_calls.entry(name).or_insert(0) += 1;
++        }
++        if let Some(text) = event["content"].as_str().filter(|text| !text.is_empty()) {
++            text.clone_into(&mut parsed.answer);
++        }
++        parsed.completed = calls.is_empty() && !parsed.answer.is_empty();
++    }
++    parsed
++}
++
++/// Reads Grok's `streaming-json` output. The answer is the text streamed after
++/// the last tool call, and each `usage` event is one model turn.
++#[must_use]
++pub fn parse_grok(stream: &str) -> Parsed {
++    let mut parsed = Parsed::default();
++    for line in stream.lines() {
++        let Ok(event) = serde_json::from_str::<Value>(line) else {
++            continue;
++        };
++        match event["type"].as_str() {
++            Some("text") => parsed
++                .answer
++                .push_str(event["data"].as_str().unwrap_or_default()),
++            Some("tool_call") => {
++                parsed.answer.clear();
++                let name = event["toolName"].as_str().unwrap_or("?").to_owned();
++                *parsed.metrics.tool_calls.entry(name).or_insert(0) += 1;
++            }
++            Some("tool_call_update") if event["status"] == "failed" => {
++                parsed.metrics.tool_errors += 1;
++            }
++            Some("usage") => parsed.metrics.model_turns += 1,
++            Some("end") => {
++                parsed.completed = event["stopReason"] == "end_turn";
++                let usage = &event["usage"];
++                let count = |field: &str| usage[field].as_u64().unwrap_or(0);
++                parsed.metrics.tokens.cached_input_tokens = count("cache_read_input_tokens");
++                parsed.metrics.tokens.input_tokens = count("input_tokens")
++                    + count("cache_creation_input_tokens")
++                    + count("cache_read_input_tokens");
++                parsed.metrics.tokens.output_tokens = count("output_tokens");
++                parsed.metrics.tokens.reasoning_tokens = count("reasoning_tokens");
++            }
++            _ => {}
++        }
++    }
++    parsed
++}
++
+ /// Runs one case through `harness` with `model` and scores the result.
+ ///
+ /// # Errors
+@@ -212,7 +302,8 @@ pub async fn run_external(
+     let before = fingerprint_tree(&workspace)?;
+     let prompt = prompt_for(case, true);
+     let (program, arguments) = harness.command(model, &prompt, &workspace);
+-    let log_path = scratch.join(format!("{}.{}.jsonl", case.name, model));
++    // Model names such as `kimi-code/k3.1-pro` would otherwise name a directory.
++    let log_path = scratch.join(format!("{}.{}.jsonl", case.name, model.replace('/', "_")));
+ 
+     let started = Instant::now();
+     let mut child = tokio::process::Command::new(&program)
+@@ -248,6 +339,8 @@ pub async fn run_external(
+     let parsed = match harness {
+         Harness::ClaudeCode => parse_claude_code(&stream),
+         Harness::Codex => parse_codex(&stream),
++        Harness::Kimi => parse_kimi(&stream),
++        Harness::Grok => parse_grok(&stream),
+     };
+     let variant = Variant {
+         score: true,
+@@ -339,4 +432,54 @@ mod tests {
+         assert_eq!(parsed.metrics.tool_errors, 1);
+         assert_eq!(parsed.metrics.tokens.cached_input_tokens, 4_000);
+     }
++
++    #[test]
++    fn kimi_streams_count_assistant_turns_and_keep_the_last_answer() {
++        let stream = r#"{"role":"assistant","tool_calls":[{"type":"function","id":"a","function":{"name":"Read","arguments":"{}"}}]}
++{"role":"tool","tool_call_id":"a","content":"1\tfn main(){}"}
++{"role":"assistant","content":"Editing now.","tool_calls":[{"type":"function","id":"b","function":{"name":"Edit","arguments":"{}"}}]}
++{"role":"tool","tool_call_id":"b","content":"Replaced 1 occurrence in main.rs"}
++{"role":"assistant","content":"ready"}
++{"role":"meta","type":"session.resume_hint","session_id":"s"}"#;
++
++        let parsed = parse_kimi(stream);
++
++        assert!(parsed.completed);
++        assert_eq!(parsed.answer, "ready");
++        assert_eq!(parsed.metrics.model_turns, 3);
++        assert_eq!(parsed.metrics.tool_calls["Edit"], 1);
++    }
++
++    #[test]
++    fn kimi_streams_ending_on_a_tool_call_are_not_complete() {
++        let stream = r#"{"role":"assistant","content":"Looking.","tool_calls":[{"type":"function","id":"a","function":{"name":"Read","arguments":"{}"}}]}"#;
++
++        assert!(!parse_kimi(stream).completed);
++    }
++
++    #[test]
++    fn grok_streams_answer_with_the_text_after_the_last_call() {
++        let stream = r#"{"type":"available_commands","tools":["read_file"]}
++{"type":"text","data":"I'll read it."}
++{"type":"usage","usage":{"input_tokens":10}}
++{"type":"tool_call","toolCallId":"1","toolName":"read_file","status":"pending"}
++{"type":"tool_call_update","toolCallId":"1","status":"completed"}
++{"type":"tool_call","toolCallId":"2","toolName":"run_terminal_command","status":"pending"}
++{"type":"tool_call_update","toolCallId":"2","status":"failed"}
++{"type":"usage","usage":{"input_tokens":10}}
++{"type":"text","data":"rea"}
++{"type":"text","data":"dy"}
++{"type":"usage","usage":{"input_tokens":10}}
++{"type":"end","stopReason":"end_turn","usage":{"input_tokens":20,"cache_read_input_tokens":100,"cache_creation_input_tokens":0,"output_tokens":7,"reasoning_tokens":3}}"#;
++
++        let parsed = parse_grok(stream);
++
++        assert!(parsed.completed);
++        assert_eq!(parsed.answer, "ready");
++        assert_eq!(parsed.metrics.model_turns, 3);
++        assert_eq!(parsed.metrics.tool_errors, 1);
++        assert_eq!(parsed.metrics.tool_calls["read_file"], 1);
++        assert_eq!(parsed.metrics.tokens.input_tokens, 120);
++        assert_eq!(parsed.metrics.tokens.cached_input_tokens, 100);
++    }
+ }
+diff --git a/crates/dino-model/src/anthropic.rs b/crates/dino-model/src/anthropic.rs
+index 5feeca2..cad7051 100644
+--- a/crates/dino-model/src/anthropic.rs
++++ b/crates/dino-model/src/anthropic.rs
+@@ -187,6 +187,9 @@ impl AnthropicSession {
+         body.insert("max_tokens".into(), json!(self.config.max_output_tokens));
+         body.insert("messages".into(), json!(messages));
+         body.insert("stream".into(), json!(true));
++        // Automatic caching: the breakpoint follows the last block, so each turn
++        // reads the whole earlier conversation from cache.
++        body.insert("cache_control".into(), json!({"type": "ephemeral"}));
+         body.insert(
+             "output_config".into(),
+             json!({"effort": effort_name(self.config.effort)?}),
+@@ -1209,6 +1212,7 @@ mod tests {
+         assert_eq!(body["messages"][0]["content"][0]["is_error"], true);
+         assert_eq!(body["thinking"]["type"], "adaptive");
+         assert_eq!(body["output_config"]["effort"], "high");
++        assert_eq!(body["cache_control"]["type"], "ephemeral");
+     }
+ 
+     #[test]
+diff --git a/crates/dino-model/src/lib.rs b/crates/dino-model/src/lib.rs
+index 47586be..79290e0 100644
+--- a/crates/dino-model/src/lib.rs
++++ b/crates/dino-model/src/lib.rs
+@@ -294,6 +294,7 @@ pub fn supported_profiles() -> Vec<ModelProfile> {
+ pub fn builtin_profiles() -> Vec<ModelProfile> {
+     vec![
+         terra(),
++        terra_6_1(),
+         claude_opus(),
+         claude_opus_5_5(),
+         claude_sonnet(),
+@@ -310,6 +311,8 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
+         qwen_3_7_max(),
+         deepseek_v4_pro(),
+         glm_5_3(),
++        kimi_k3_1_pro(),
++        grok_4_7(),
+         qwen3_8b(),
+     ]
+ }
+@@ -347,6 +350,16 @@ fn terra() -> ModelProfile {
+     }
+ }
+ 
++/// Released 2026-10-27 at half `gpt-5.6-terra`'s price; window and efforts assumed unchanged.
++fn terra_6_1() -> ModelProfile {
++    ModelProfile {
++        key: "terra-6.1".into(),
++        provider_model: "gpt-6.1-terra".into(),
++        display_name: "GPT-6.1 Terra".into(),
++        ..terra()
++    }
++}
++
+ /// **Provider-documented, inspected 2026-10-28:** `claude-opus-5-5` has the
+ /// same window and output as Opus 5, cannot disable thinking at any effort, and
+ /// offers fast mode. Kept beside `claude-opus` so earlier eval results keep
+@@ -583,6 +596,22 @@ fn deepseek_v4_pro() -> ModelProfile {
+     dashscope("deepseek-v4-pro", "DeepSeek V4 Pro", 131_072, false)
+ }
+ 
++/// OpenAI-compatible chat endpoints, served through the Qwen adapter with
++/// `--api-base` and the provider's key in `QWEN_API_KEY`.
++fn kimi_k3_1_pro() -> ModelProfile {
++    ModelProfile {
++        display_name: "Kimi K3.1 Pro (Moonshot)".into(),
++        ..dashscope("kimi-k3.1-pro", "", 1_048_576, false)
++    }
++}
++
++fn grok_4_7() -> ModelProfile {
++    ModelProfile {
++        display_name: "Grok 4.7 (xAI)".into(),
++        ..dashscope("grok-4.7", "", 500_000, false)
++    }
++}
++
+ fn glm_5_3() -> ModelProfile {
+     dashscope("glm-5.3", "GLM-5.3", 131_072, false)
+ }
+@@ -694,7 +723,7 @@ mod tests {
+             .map(|profile| profile.key.as_str())
+             .collect::<HashSet<_>>();
+         assert_eq!(unique_keys.len(), all.len());
+-        assert_eq!(all.len(), 18);
++        assert_eq!(all.len(), 21);
+         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
+     }
+ 
+diff --git a/crates/dino-model/src/openai.rs b/crates/dino-model/src/openai.rs
+index e827a58..9993a40 100644
+--- a/crates/dino-model/src/openai.rs
++++ b/crates/dino-model/src/openai.rs
+@@ -144,7 +144,8 @@ impl OpenAiSession {
+                     "name": tool.name,
+                     "description": tool.description,
+                     "parameters": tool.input_schema,
+-                    "strict": true,
++                    // Strict mode needs every property required, and the tools have optional ones.
++                    "strict": false,
+                 })
+             })
+             .collect::<Vec<_>>();

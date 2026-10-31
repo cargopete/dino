@@ -107,6 +107,8 @@ pub struct EvalArgs {
 pub enum ExternalHarness {
     ClaudeCode,
     Codex,
+    Kimi,
+    Grok,
 }
 
 impl From<ExternalHarness> for dino_eval::external::Harness {
@@ -114,6 +116,8 @@ impl From<ExternalHarness> for dino_eval::external::Harness {
         match harness {
             ExternalHarness::ClaudeCode => Self::ClaudeCode,
             ExternalHarness::Codex => Self::Codex,
+            ExternalHarness::Kimi => Self::Kimi,
+            ExternalHarness::Grok => Self::Grok,
         }
     }
 }
