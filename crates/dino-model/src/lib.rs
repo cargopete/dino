@@ -646,7 +646,12 @@ fn kimi_k3_1_pro() -> ModelProfile {
             ReasoningEffort::High,
         ]),
         chat_server: ChatServer::Moonshot,
-        price: Some(Pricing::new(2.00, 0.20, 10.00)),
+        // platform.kimi.ai/docs/pricing/chat, read 2026-10-31: writes at the
+        // default 5-minute TTL cost input, 1-hour ones $4.00, which Dino never asks for.
+        price: Some(Pricing {
+            cache_write: Some(2.00),
+            ..Pricing::new(2.00, 0.20, 10.00)
+        }),
         ..dashscope("kimi-k3.1-pro", "", 1_048_576, true)
     }
 }
@@ -799,6 +804,8 @@ mod tests {
         ]
         .map(|(key, input, cached, output)| (key.to_owned(), input, cached, output));
         assert_eq!(priced, expected);
+        let kimi = builtin_profile("kimi-k3.1-pro").and_then(|profile| profile.price);
+        assert_eq!(kimi.and_then(|price| price.cache_write), Some(2.00));
         for profile in builtin_profiles() {
             let beside = profile
                 .price
