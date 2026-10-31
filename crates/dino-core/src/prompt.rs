@@ -44,6 +44,10 @@ Verifying:
 
 - New behaviour gets tests, written as part of the change, in a new project as
   much as in an old one. Tests are permanent, not scaffolding.
+- Existing tests are part of the task: change one only when asked to, and put
+  new tests beside them. Formatting counts. `cargo` command `fmt` rewrites
+  every unformatted file in the workspace, so name the files you changed in
+  its `files`.
 - A change is finished when it builds and its tests pass. Run the most specific
   test first, then the workspace's with `cargo` command `test`, and clippy
   where the project uses it.

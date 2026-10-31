@@ -542,3 +542,73 @@ async fn fmt_formats_the_file() {
     let source = std::fs::read_to_string(fixture.path.join("src/lib.rs")).unwrap();
     assert_eq!(source, "pub fn two() -> u32 {\n    2\n}\n");
 }
+
+#[tokio::test]
+async fn fmt_with_files_formats_only_those() {
+    let fixture = Fixture::new("pub fn  two( )->u32{2}\n");
+    let untouched = "#[test]\nfn two() { assert_eq!(fixture::two(), 2); }\n";
+    fs::create_dir_all(fixture.path.join("tests")).unwrap();
+    fs::write(fixture.path.join("tests/basics.rs"), untouched).unwrap();
+    let tool = fixture.tool();
+    let arguments = json!({"command": "fmt", "files": ["src/lib.rs"]});
+
+    assert_eq!(
+        tool.classify(&call(arguments.clone()))
+            .unwrap()
+            .subject
+            .unwrap(),
+        "rustfmt --edition 2021 src/lib.rs"
+    );
+    tool.execute(&call(arguments)).await.unwrap();
+
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("src/lib.rs")).unwrap(),
+        "pub fn two() -> u32 {\n    2\n}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("tests/basics.rs")).unwrap(),
+        untouched
+    );
+}
+
+#[test]
+fn fmt_files_take_an_inherited_edition_from_the_workspace() {
+    let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
+    fs::write(
+        fixture.path.join("Cargo.toml"),
+        "[workspace.package]\nedition = \"2024\"\n\n[workspace]\n\n\
+         [package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition.workspace = true\n",
+    )
+    .unwrap();
+    let tool = fixture.tool();
+
+    let action = tool
+        .classify(&call(
+            json!({"command": "fmt_check", "files": ["./src/lib.rs"]}),
+        ))
+        .unwrap();
+    assert_eq!(
+        action.subject.unwrap(),
+        "rustfmt --edition 2024 --check ./src/lib.rs"
+    );
+}
+
+#[test]
+fn fmt_files_must_be_rust_files_inside_the_workspace() {
+    let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
+    let tool = fixture.tool();
+
+    for arguments in [
+        json!({"command": "check", "files": ["src/lib.rs"]}),
+        json!({"command": "fmt", "files": ["../outside.rs"]}),
+        json!({"command": "fmt", "files": ["/tmp/outside.rs"]}),
+        json!({"command": "fmt", "files": ["--config=x.rs"]}),
+        json!({"command": "fmt", "files": ["Cargo.toml"]}),
+        json!({"command": "fmt", "package": "fixture", "files": ["src/lib.rs"]}),
+    ] {
+        assert!(
+            tool.classify(&call(arguments.clone())).is_err(),
+            "{arguments}"
+        );
+    }
+}
