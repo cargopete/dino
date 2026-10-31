@@ -1,7 +1,6 @@
 //! Black-box acceptance tests for the ledger contract. Each test starts the
-//! built binary on free ports and talks to it over HTTP and gRPC.
+//! built binary on reserved ports and talks to it over HTTP and gRPC.
 
-use std::net::TcpListener;
 use std::process::Child;
 use std::process::Command;
 use std::time::Duration;
@@ -15,6 +14,7 @@ struct Server {
     child: Child,
     http: String,
     grpc: String,
+    _reserved: [tokio::net::TcpSocket; 2],
 }
 
 impl Drop for Server {
@@ -24,17 +24,20 @@ impl Drop for Server {
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A port held, not listening, until the server is done with it. Bound to the
+/// wildcard with SO_REUSEADDR, nobody else is given it, yet the server can still
+/// bind 127.0.0.1 there, since std and tokio set SO_REUSEADDR too.
+fn reserve_port() -> (tokio::net::TcpSocket, u16) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_reuseaddr(true).unwrap();
+    socket.bind(([0, 0, 0, 0], 0).into()).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    (socket, port)
 }
 
 fn start() -> Server {
-    let (http, grpc) = (free_port(), free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_ledger"))
+    let ((http_socket, http), (grpc_socket, grpc)) = (reserve_port(), reserve_port());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ledger"))
         .env("LEDGER_HTTP_ADDR", format!("127.0.0.1:{http}"))
         .env("LEDGER_GRPC_ADDR", format!("127.0.0.1:{grpc}"))
         .spawn()
@@ -44,6 +47,9 @@ fn start() -> Server {
         .iter()
         .any(|port| std::net::TcpStream::connect(("127.0.0.1", *port)).is_err())
     {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("the ledger binary exited with {status} before listening");
+        }
         assert!(
             started.elapsed() < Duration::from_secs(20),
             "the servers did not start listening within 20 seconds"
@@ -54,6 +60,7 @@ fn start() -> Server {
         child,
         http: format!("http://127.0.0.1:{http}"),
         grpc: format!("http://127.0.0.1:{grpc}"),
+        _reserved: [http_socket, grpc_socket],
     }
 }
 
