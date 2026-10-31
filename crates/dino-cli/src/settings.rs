@@ -34,6 +34,8 @@ pub struct FileConfig {
     pub show_reasoning: Option<bool>,
     pub no_thinking: Option<bool>,
     pub plain: Option<bool>,
+    /// The dinosaur an interactive session opens with. On unless set false.
+    pub greeting: Option<bool>,
     pub approvals: Option<ApprovalMode>,
     pub sandbox: Option<SandboxMode>,
     pub api_base: Option<String>,
@@ -416,6 +418,15 @@ mod tests {
 
         assert_eq!(parsed.model.as_deref(), Some("claude-sonnet"));
         assert_eq!(parsed.max_turns.map(std::num::NonZeroU32::get), Some(8));
+    }
+
+    #[test]
+    fn the_greeting_is_a_preference_a_project_may_turn_off() {
+        let text = "greeting = false\n";
+
+        refuse_restricted(Path::new("/repo/.dino/config.toml"), text).unwrap();
+        assert_eq!(parse(Path::new("x"), text).unwrap().greeting, Some(false));
+        assert_eq!(parse(Path::new("x"), "").unwrap().greeting, None);
     }
 
     #[test]

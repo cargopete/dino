@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::style;
 use crate::style::FAINT;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK: Duration = Duration::from_millis(50);
@@ -148,7 +148,7 @@ fn tick(state: &Mutex<Option<Ticking>>, status: &Mutex<Status>) {
         let room = crate::markdown::terminal_width().saturating_sub(5);
         let line = format!(
             "  {} {}",
-            style::paint(SLATE, frame),
+            style::paint(PURPLE, frame),
             style::paint(FAINT, &row(ticking.label, elapsed, &figures, room))
         );
         let mut out = std::io::stdout().lock();

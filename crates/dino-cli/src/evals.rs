@@ -25,7 +25,7 @@ use crate::style;
 use crate::style::FAINT;
 use crate::style::MUTED;
 use crate::style::OK;
-use crate::style::SLATE;
+use crate::style::PURPLE;
 use crate::style::WARN;
 
 // Command-line flags are booleans by nature.
@@ -475,6 +475,7 @@ fn eval_settings(
         enable_thinking: None,
         reasoning_effort: args.effort,
         plain: args.plain,
+        greeting: false,
         fallback: Vec::new(),
         budget: None,
     }
@@ -542,7 +543,7 @@ async fn calibrate(args: &EvalArgs) -> Result<ExitCode> {
             println!(
                 "  {}  {}",
                 style::paint(FAINT, "skip"),
-                style::paint(SLATE, &format!("{:<28} no reference/", case.name))
+                style::paint(PURPLE, &format!("{:<28} no reference/", case.name))
             );
             continue;
         }
@@ -557,7 +558,7 @@ async fn calibrate(args: &EvalArgs) -> Result<ExitCode> {
                 if holds { OK } else { WARN },
                 if holds { "ok  " } else { "FAIL" }
             ),
-            style::paint(SLATE, &format!("{:<28}", case.name)),
+            style::paint(PURPLE, &format!("{:<28}", case.name)),
             style::paint(
                 FAINT,
                 &format!(
@@ -607,7 +608,7 @@ fn summarise(cases: &[dino_eval::Case], outcomes: &[Outcome]) -> dino_eval::scor
 fn print_score(model: &str, summary: &dino_eval::score::Summary) {
     println!(
         "\n  {}  {}",
-        style::paint(SLATE, &format!("{model}: {} / 100", summary.score)),
+        style::paint(PURPLE, &format!("{model}: {} / 100", summary.score)),
         style::paint(
             FAINT,
             &format!(
@@ -640,7 +641,7 @@ fn print_case(outcome: &Outcome) {
     println!(
         "  {}  {}  {}",
         style::paint(colour, mark),
-        style::paint(SLATE, &format!("{:<20}", outcome.case)),
+        style::paint(PURPLE, &format!("{:<20}", outcome.case)),
         style::paint(
             FAINT,
             &format!(

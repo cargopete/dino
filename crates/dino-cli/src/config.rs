@@ -80,6 +80,8 @@ pub enum Compaction {
     Automatic,
 }
 
+// Each switch is a separate setting a person can name in a config file.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct RunSettings {
     pub profile: ModelProfile,
@@ -114,6 +116,8 @@ pub struct RunSettings {
     /// Emit no terminal colour. Resolved like everything else, so a config file
     /// can ask for it.
     pub plain: bool,
+    /// Open an interactive session with the dinosaur, where it can be drawn.
+    pub greeting: bool,
     /// Where to continue, in order, when the provider refuses the account.
     /// Always empty for evals and probes, whose results would otherwise mix
     /// models.
@@ -398,6 +402,7 @@ mod tests {
             enable_thinking: None,
             reasoning_effort: None,
             plain: true,
+            greeting: false,
             fallback: Vec::new(),
             budget: None,
         }

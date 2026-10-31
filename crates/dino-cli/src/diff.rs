@@ -10,9 +10,9 @@ use similar::ChangeTag;
 use similar::TextDiff;
 
 use crate::style;
+use crate::style::EMBER;
 use crate::style::FAINT;
 use crate::style::OK;
-use crate::style::RUST;
 
 /// Unchanged lines kept either side of a change.
 const CONTEXT: usize = 2;
@@ -228,7 +228,7 @@ pub fn paint(rows: &[Row], limit: usize, indent: &str, width: usize) -> String {
             Row::Removed { number, parts } => format!(
                 "{}{}",
                 style::paint(FAINT, &gutter(*number)),
-                changed(parts, RUST, false, room)
+                changed(parts, EMBER, false, room)
             ),
             Row::Added { number, parts } => format!(
                 "{}{}",
