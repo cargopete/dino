@@ -1,5 +1,6 @@
 //! The `cargo` tool: a closed set of subcommands, parsed output, no shell.
 
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -191,17 +192,81 @@ impl CargoTool {
         arguments
     }
 
+    /// The program a request runs and its arguments: Cargo, or rustfmt for a
+    /// format held to the files it names.
+    fn command_line(&self, request: &CargoRequest) -> Result<(String, Vec<String>), ToolError> {
+        if request.files.is_empty() {
+            return Ok((Self::program(), self.arguments(request)));
+        }
+        let mut arguments = Vec::new();
+        if let Some(edition) = self.edition_for(&request.files)? {
+            arguments.extend(["--edition".to_owned(), edition]);
+        }
+        if request.command == CargoCommand::FmtCheck {
+            arguments.push("--check".to_owned());
+        }
+        arguments.extend(request.files.iter().cloned());
+        Ok(("rustfmt".to_owned(), arguments))
+    }
+
+    /// The edition rustfmt must parse `files` with, from the manifest of the
+    /// package each belongs to. None is Cargo's default, which is rustfmt's.
+    fn edition_for(&self, files: &[String]) -> Result<Option<String>, ToolError> {
+        let mut editions = std::collections::BTreeSet::new();
+        for file in files {
+            editions.insert(self.edition_of(Path::new(file))?);
+        }
+        if editions.len() > 1 {
+            return Err(ToolError::new(
+                "these files belong to packages of different editions; format each edition's \
+                 files in a call of its own",
+            ));
+        }
+        Ok(editions.pop_first().flatten())
+    }
+
+    fn edition_of(&self, file: &Path) -> Result<Option<String>, ToolError> {
+        let path = self.root.join(file);
+        for directory in path.ancestors().skip(1) {
+            if !directory.starts_with(&self.root) {
+                break;
+            }
+            let Some(package) = read_manifest(&directory.join("Cargo.toml"))?
+                .and_then(|manifest| manifest.get("package").cloned())
+            else {
+                continue;
+            };
+            return Ok(match package.get("edition") {
+                Some(toml::Value::String(edition)) => Some(edition.clone()),
+                Some(toml::Value::Table(_)) => read_manifest(&self.manifest)?.and_then(|root| {
+                    root.get("workspace")?
+                        .get("package")?
+                        .get("edition")?
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                }),
+                _ => None,
+            });
+        }
+        Ok(None)
+    }
+
     /// The command as a person would read it, and as a session rule is keyed.
     ///
     /// The manifest path is shown relative to the root because it is invariant
     /// for the session; every other argument appears exactly as it will be run.
-    fn subject_for(&self, request: &CargoRequest) -> String {
-        let subject = self.subject(&self.arguments(request));
-        if request.command.fetches() {
+    fn subject_for(&self, request: &CargoRequest) -> Result<String, ToolError> {
+        let (program, arguments) = self.command_line(request)?;
+        let subject = if request.files.is_empty() {
+            self.subject(&arguments)
+        } else {
+            format!("{program} {}", arguments.join(" "))
+        };
+        Ok(if request.command.fetches() {
             subject + FETCH_NOTE
         } else {
             subject
-        }
+        })
     }
 
     /// The sandbox a command runs in: the session's, or for a fetch the same
@@ -339,7 +404,8 @@ impl CargoTool {
 
     async fn run(&self, request: CargoRequest) -> Result<ToolOutput, ToolError> {
         self.require_manifest()?;
-        let arguments = self.arguments(&request);
+        let (program, arguments) = self.command_line(&request)?;
+        let subject = self.subject_for(&request)?;
         let sandbox = self.sandbox_for(request.command)?;
         // A program that does not exit, such as a server, is cut short sooner.
         let timeout = if request.command == CargoCommand::Run {
@@ -348,7 +414,7 @@ impl CargoTool {
             self.limits.timeout
         };
         let execution = process::run(
-            &Self::program(),
+            &program,
             &arguments,
             &self.root,
             sandbox.as_ref(),
@@ -359,7 +425,7 @@ impl CargoTool {
 
         if execution.timed_out {
             return json_output(&CargoOutput {
-                command: self.subject_for(&request),
+                command: subject,
                 exit_code: None,
                 timed_out: true,
                 counts: DiagnosticCounts::default(),
@@ -374,7 +440,7 @@ impl CargoTool {
         }
 
         let mut output = CargoOutput {
-            command: self.subject_for(&request),
+            command: subject,
             exit_code: execution.exit_code,
             timed_out: false,
             counts: DiagnosticCounts::default(),
@@ -441,8 +507,9 @@ impl ToolRuntime for CargoTool {
                  diagnostics. No subcommand is read-only: check, build and clippy run build scripts, \
                  and test runs test code. Everything runs offline except fetch, which \
                  downloads the locked dependencies, and add, which adds crates to Cargo.toml; \
-                 use those when a build fails for a missing dependency. fmt formats, so read a \
-                 file again after it; fmt_check only reports. run is for programs that exit \
+                 use those when a build fails for a missing dependency. fmt formats every file \
+                 in the workspace, existing tests included, unless files names the ones to \
+                 format; read a file again after it. fmt_check only reports. run is for programs that exit \
                  and is stopped after two minutes. Containment: {}.",
                 self.sandbox.label()
             ),
@@ -479,6 +546,11 @@ impl ToolRuntime for CargoTool {
                     "filter": {
                         "type": "string",
                         "description": "Only for test: run tests whose name contains this."
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Only for fmt and fmt_check: the .rs files to format, leaving every other file as it is."
                     }
                 },
                 "required": ["command"],
@@ -492,7 +564,7 @@ impl ToolRuntime for CargoTool {
             return Err(ToolError::new(format!("unknown tool {:?}", call.name)));
         }
         let request = CargoRequest::parse(&call.arguments)?;
-        Ok(ToolAction::process(self.subject_for(&request)))
+        Ok(ToolAction::process(self.subject_for(&request)?))
     }
 
     fn execute(&self, call: &ToolCall) -> ToolFuture<'_> {
@@ -554,6 +626,8 @@ struct CargoRequest {
     dev: bool,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    files: Vec<String>,
 }
 
 impl CargoRequest {
@@ -567,6 +641,7 @@ impl CargoRequest {
             features: Vec::new(),
             dev: false,
             args: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -597,6 +672,17 @@ impl CargoRequest {
         }
         if request.command != CargoCommand::Run && !request.args.is_empty() {
             return Err(ToolError::new("args apply only to run"));
+        }
+        if !request.files.is_empty() {
+            if !matches!(request.command, CargoCommand::Fmt | CargoCommand::FmtCheck) {
+                return Err(ToolError::new("files apply only to fmt and fmt_check"));
+            }
+            if request.package.is_some() {
+                return Err(ToolError::new("give files or package, not both"));
+            }
+            for file in &request.files {
+                validate_file(file)?;
+            }
         }
         if request
             .args
@@ -634,6 +720,34 @@ fn validate(field: &str, value: &str) -> Result<(), ToolError> {
         )));
     }
     Ok(())
+}
+
+/// Accepts a `.rs` path relative to the workspace root that stays inside it.
+fn validate_file(file: &str) -> Result<(), ToolError> {
+    let path = Path::new(file);
+    let inside = path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+    if file.starts_with('-')
+        || !inside
+        || file.chars().any(char::is_control)
+        || path.extension().is_none_or(|extension| extension != "rs")
+    {
+        return Err(ToolError::new(format!(
+            "files must be .rs paths relative to the workspace root and inside it: {file:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// A manifest as a table, or None when there is no file to read.
+fn read_manifest(path: &Path) -> Result<Option<toml::Table>, ToolError> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    toml::from_str(&text)
+        .map(Some)
+        .map_err(|error| ToolError::new(format!("cannot read {}: {error}", path.display())))
 }
 
 /// As [`validate`], allowing `extra` characters as well, for version
