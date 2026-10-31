@@ -106,9 +106,10 @@ impl ToolRuntime for TodoTool {
             name: TODO.into(),
             description: "Keep a short checklist for a task with several steps. Send the whole \
                           list every time, with each item pending, in_progress, done or blocked. Mark \
-                          one in_progress while you work on it and done as soon as it is finished. \
-                          Mark an item blocked, with a reason, only when it cannot be done here. \
-                          The person sees the list as it changes."
+                          one in_progress while you work on it and done once it is finished. \
+                          Send an update with the calls of the next step, or of the last check, \
+                          rather than on its own. Mark an item blocked, with a reason, only when \
+                          it cannot be done here. The person sees the list as it changes."
                 .into(),
             input_schema: json!({
                 "type": "object",
