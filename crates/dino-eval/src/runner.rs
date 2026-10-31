@@ -682,6 +682,49 @@ pub async fn calibrate(
     })
 }
 
+/// Rescores a recorded run with the current scorer. When the workspace the run
+/// left is still beside its log, its hidden tests are first run again on a
+/// clean copy of it, replacing the recorded results.
+///
+/// # Errors
+///
+/// Returns [`EvalError`] when the left workspace cannot be copied or Cargo
+/// cannot be run at all.
+pub async fn rescore(
+    case: &Case,
+    outcome: &mut Outcome,
+    scratch: &Path,
+    sandbox_for: &SandboxFor<'_>,
+) -> Result<(), EvalError> {
+    let Some(measured) = outcome.measured.as_mut() else {
+        return Ok(());
+    };
+    let left = Path::new(&outcome.log_path).with_extension("");
+    if case.expect.hidden_tests && left.is_dir() {
+        let workspace = scratch.join(&case.name);
+        if workspace.exists() {
+            std::fs::remove_dir_all(&workspace).map_err(|error| {
+                EvalError::Case(format!("cannot clear {}: {error}", workspace.display()))
+            })?;
+        }
+        crate::case::copy_left_workspace(&left, &workspace)?;
+        crate::case::overlay_hidden(case, &workspace)?;
+        let sandbox = sandbox_for(&workspace)?;
+        measured.hidden.clear();
+        measured.hidden_broken.clear();
+        hidden_results(case, &workspace, &sandbox, measured).await;
+        outcome
+            .failures
+            .retain(|failure| !failure.starts_with("hidden tests failed"));
+        if let Some(failure) = check_hidden_tests(&workspace, sandbox).await? {
+            outcome.failures.push(failure);
+        }
+        outcome.passed = outcome.failures.is_empty();
+    }
+    outcome.score = Some(crate::score::score(case, measured));
+    Ok(())
+}
+
 /// The case's prompt, with the report instruction when the run is scored.
 pub(crate) fn prompt_for(case: &Case, scored: bool) -> String {
     if !scored {
