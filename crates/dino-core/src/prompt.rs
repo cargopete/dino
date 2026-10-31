@@ -37,6 +37,8 @@ Working method:
 - Each response is one turn, and a run has a fixed number of them. Calls that
   do not depend on each other belong in the same response: read every file you
   need at once, and make all the edits a step needs before checking it once.
+  Calls in one response run in the order given, so the `cargo` command `test`
+  that checks a step goes after its edits in the same response.
 - Read a file whole, or in large spans. A window of eighty lines at a time
   costs a turn for each window.
 
@@ -109,8 +111,9 @@ Tool discipline:
   `background`: start it, read its `output`, and `stop` it when you are done.
 - `todo` keeps a checklist for a task of several steps. Send the whole list
   each time, keep one item in progress, and mark items done as you finish them.
-  Mark an item blocked, with the reason, when it cannot be done here. Skip it
-  for a task of one or two steps.
+  An update goes in the same response as the next step's calls, or the last
+  check's, not in a response of its own. Mark an item blocked, with the reason,
+  when it cannot be done here. Skip it for a task of one or two steps.
 - `remember` keeps a short note for later sessions. Use it when the person states
   a preference or corrects you, or for a hard-won fact about the repository.
 - `web_fetch` reads one URL as text, for documentation such as docs.rs. Each new
@@ -435,6 +438,7 @@ mod tests {
         assert!(prompt.contains("- Available tools: read, search, apply_patch"));
         assert!(prompt.contains("- Model turns: at most 40"), "{prompt}");
         assert!(prompt.contains("belong in the same response"), "{prompt}");
+        assert!(prompt.contains("not in a response of its own"), "{prompt}");
         assert!(prompt.contains("- Approval mode: read-only"));
     }
 }

@@ -1203,6 +1203,59 @@ async fn one_answer_can_cover_every_call_of_a_turn() {
 }
 
 #[tokio::test]
+async fn a_turn_of_several_calls_runs_them_in_order_and_answers_every_one() {
+    let (approver, asked) = ScriptedApprover::new(vec![
+        ApprovalReply::Reject(Some("not that file".into())),
+        ApprovalReply::Once,
+    ]);
+    let calls = [
+        tool_call("call-1", "read", "src/a.rs"),
+        tool_call("call-2", "apply_patch", "src/a.rs"),
+        tool_call("call-3", "cargo", "."),
+        tool_call("call-4", "read", "src/b.rs"),
+    ];
+    let mut turn: Vec<ModelEvent> = calls
+        .iter()
+        .map(|call| ModelEvent::ToolCallCompleted { call: call.clone() })
+        .collect();
+    turn.push(ModelEvent::Finished {
+        reason: StopReason::ToolUse,
+    });
+    let mut agent =
+        agent(vec![Turn::Events(turn), text_turn("done")]).with_policy(Interactive::new(approver));
+
+    let result = agent.run("look, edit, check").await.unwrap();
+
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    let executed: Vec<String> = agent
+        .tools()
+        .executed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.id.clone())
+        .collect();
+    assert_eq!(executed, ["call-1", "call-3", "call-4"]);
+    let TurnInput::ToolResults { results } = &agent.session().inputs[1] else {
+        panic!("one input carries the whole turn's results");
+    };
+    let answered: Vec<(&str, bool)> = results
+        .iter()
+        .map(|result| (result.call_id.as_str(), result.output.is_error))
+        .collect();
+    assert_eq!(
+        answered,
+        [
+            ("call-1", false),
+            ("call-2", true),
+            ("call-3", false),
+            ("call-4", false)
+        ]
+    );
+    assert_eq!(result.model_turns, 2);
+}
+
+#[tokio::test]
 async fn the_turn_count_rides_along_from_half_way() {
     let mut agent = Agent::new(
         ScriptedSession::new(vec![
