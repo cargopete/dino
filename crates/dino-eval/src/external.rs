@@ -33,6 +33,8 @@ use crate::runner::wall_outcome;
 pub enum Harness {
     ClaudeCode,
     Codex,
+    Kimi,
+    Grok,
 }
 
 impl Harness {
@@ -81,6 +83,27 @@ impl Harness {
                 .map(|part| (*part).to_owned())
                 .chain([workspace.display().to_string(), prompt.to_owned()])
                 .collect(),
+            ),
+            // Kimi Code runs every call unasked in prompt mode; it has no sandbox to pick.
+            Self::Kimi => (
+                "kimi".to_owned(),
+                owned(&["-p", prompt, "-m", model, "--output-format", "stream-json"]),
+            ),
+            // Shell is held to cargo: approving everything unattended was refused here.
+            Self::Grok => (
+                "grok".to_owned(),
+                owned(&[
+                    "-p",
+                    prompt,
+                    "-m",
+                    model,
+                    "--output-format",
+                    "streaming-json",
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--allow",
+                    "Bash(cargo:*)",
+                ]),
             ),
         }
     }
@@ -195,6 +218,73 @@ pub fn parse_codex(stream: &str) -> Parsed {
     parsed
 }
 
+/// Reads Kimi Code's `stream-json` output: one chat message per line. It
+/// reports no usage, so tokens stay at zero.
+#[must_use]
+pub fn parse_kimi(stream: &str) -> Parsed {
+    let mut parsed = Parsed::default();
+    for line in stream.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if event["role"] != "assistant" {
+            continue;
+        }
+        parsed.metrics.model_turns += 1;
+        let calls = event["tool_calls"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        for call in calls {
+            let name = call["function"]["name"].as_str().unwrap_or("?").to_owned();
+            *parsed.metrics.tool_calls.entry(name).or_insert(0) += 1;
+        }
+        if let Some(text) = event["content"].as_str().filter(|text| !text.is_empty()) {
+            text.clone_into(&mut parsed.answer);
+        }
+        parsed.completed = calls.is_empty() && !parsed.answer.is_empty();
+    }
+    parsed
+}
+
+/// Reads Grok's `streaming-json` output. The answer is the text streamed after
+/// the last tool call, and each `usage` event is one model turn.
+#[must_use]
+pub fn parse_grok(stream: &str) -> Parsed {
+    let mut parsed = Parsed::default();
+    for line in stream.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("text") => parsed
+                .answer
+                .push_str(event["data"].as_str().unwrap_or_default()),
+            Some("tool_call") => {
+                parsed.answer.clear();
+                let name = event["toolName"].as_str().unwrap_or("?").to_owned();
+                *parsed.metrics.tool_calls.entry(name).or_insert(0) += 1;
+            }
+            Some("tool_call_update") if event["status"] == "failed" => {
+                parsed.metrics.tool_errors += 1;
+            }
+            Some("usage") => parsed.metrics.model_turns += 1,
+            Some("end") => {
+                parsed.completed = event["stopReason"] == "end_turn";
+                let usage = &event["usage"];
+                let count = |field: &str| usage[field].as_u64().unwrap_or(0);
+                parsed.metrics.tokens.cached_input_tokens = count("cache_read_input_tokens");
+                parsed.metrics.tokens.input_tokens = count("input_tokens")
+                    + count("cache_creation_input_tokens")
+                    + count("cache_read_input_tokens");
+                parsed.metrics.tokens.output_tokens = count("output_tokens");
+                parsed.metrics.tokens.reasoning_tokens = count("reasoning_tokens");
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
 /// Runs one case through `harness` with `model` and scores the result.
 ///
 /// # Errors
@@ -212,7 +302,8 @@ pub async fn run_external(
     let before = fingerprint_tree(&workspace)?;
     let prompt = prompt_for(case, true);
     let (program, arguments) = harness.command(model, &prompt, &workspace);
-    let log_path = scratch.join(format!("{}.{}.jsonl", case.name, model));
+    // Model names such as `kimi-code/k3.1-pro` would otherwise name a directory.
+    let log_path = scratch.join(format!("{}.{}.jsonl", case.name, model.replace('/', "_")));
 
     let started = Instant::now();
     let mut child = tokio::process::Command::new(&program)
@@ -248,6 +339,8 @@ pub async fn run_external(
     let parsed = match harness {
         Harness::ClaudeCode => parse_claude_code(&stream),
         Harness::Codex => parse_codex(&stream),
+        Harness::Kimi => parse_kimi(&stream),
+        Harness::Grok => parse_grok(&stream),
     };
     let variant = Variant {
         score: true,
@@ -338,5 +431,55 @@ mod tests {
         assert_eq!(parsed.metrics.model_turns, 5);
         assert_eq!(parsed.metrics.tool_errors, 1);
         assert_eq!(parsed.metrics.tokens.cached_input_tokens, 4_000);
+    }
+
+    #[test]
+    fn kimi_streams_count_assistant_turns_and_keep_the_last_answer() {
+        let stream = r#"{"role":"assistant","tool_calls":[{"type":"function","id":"a","function":{"name":"Read","arguments":"{}"}}]}
+{"role":"tool","tool_call_id":"a","content":"1\tfn main(){}"}
+{"role":"assistant","content":"Editing now.","tool_calls":[{"type":"function","id":"b","function":{"name":"Edit","arguments":"{}"}}]}
+{"role":"tool","tool_call_id":"b","content":"Replaced 1 occurrence in main.rs"}
+{"role":"assistant","content":"ready"}
+{"role":"meta","type":"session.resume_hint","session_id":"s"}"#;
+
+        let parsed = parse_kimi(stream);
+
+        assert!(parsed.completed);
+        assert_eq!(parsed.answer, "ready");
+        assert_eq!(parsed.metrics.model_turns, 3);
+        assert_eq!(parsed.metrics.tool_calls["Edit"], 1);
+    }
+
+    #[test]
+    fn kimi_streams_ending_on_a_tool_call_are_not_complete() {
+        let stream = r#"{"role":"assistant","content":"Looking.","tool_calls":[{"type":"function","id":"a","function":{"name":"Read","arguments":"{}"}}]}"#;
+
+        assert!(!parse_kimi(stream).completed);
+    }
+
+    #[test]
+    fn grok_streams_answer_with_the_text_after_the_last_call() {
+        let stream = r#"{"type":"available_commands","tools":["read_file"]}
+{"type":"text","data":"I'll read it."}
+{"type":"usage","usage":{"input_tokens":10}}
+{"type":"tool_call","toolCallId":"1","toolName":"read_file","status":"pending"}
+{"type":"tool_call_update","toolCallId":"1","status":"completed"}
+{"type":"tool_call","toolCallId":"2","toolName":"run_terminal_command","status":"pending"}
+{"type":"tool_call_update","toolCallId":"2","status":"failed"}
+{"type":"usage","usage":{"input_tokens":10}}
+{"type":"text","data":"rea"}
+{"type":"text","data":"dy"}
+{"type":"usage","usage":{"input_tokens":10}}
+{"type":"end","stopReason":"end_turn","usage":{"input_tokens":20,"cache_read_input_tokens":100,"cache_creation_input_tokens":0,"output_tokens":7,"reasoning_tokens":3}}"#;
+
+        let parsed = parse_grok(stream);
+
+        assert!(parsed.completed);
+        assert_eq!(parsed.answer, "ready");
+        assert_eq!(parsed.metrics.model_turns, 3);
+        assert_eq!(parsed.metrics.tool_errors, 1);
+        assert_eq!(parsed.metrics.tool_calls["read_file"], 1);
+        assert_eq!(parsed.metrics.tokens.input_tokens, 120);
+        assert_eq!(parsed.metrics.tokens.cached_input_tokens, 100);
     }
 }

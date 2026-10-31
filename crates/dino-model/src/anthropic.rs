@@ -187,6 +187,9 @@ impl AnthropicSession {
         body.insert("max_tokens".into(), json!(self.config.max_output_tokens));
         body.insert("messages".into(), json!(messages));
         body.insert("stream".into(), json!(true));
+        // Automatic caching: the breakpoint follows the last block, so each turn
+        // reads the whole earlier conversation from cache.
+        body.insert("cache_control".into(), json!({"type": "ephemeral"}));
         body.insert(
             "output_config".into(),
             json!({"effort": effort_name(self.config.effort)?}),
@@ -1209,6 +1212,7 @@ mod tests {
         assert_eq!(body["messages"][0]["content"][0]["is_error"], true);
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
