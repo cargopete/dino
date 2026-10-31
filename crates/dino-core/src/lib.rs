@@ -10,6 +10,7 @@ pub mod blocker;
 pub mod git;
 pub mod loops;
 pub mod memory;
+pub mod outcomes;
 pub mod progress;
 pub mod prompt;
 pub mod resume;
@@ -437,6 +438,7 @@ pub struct Agent<S, T> {
     /// submission must answer them before anything else.
     unsent: Option<Vec<ToolResult>>,
     loops: loops::LoopWatch,
+    outcomes: outcomes::OutcomeWatch,
     /// Messages the person typed during a run, for its next tool results.
     inbox: Option<Inbox>,
 }
@@ -466,6 +468,7 @@ where
             pending_images: Vec::new(),
             unsent: None,
             loops: loops::LoopWatch::default(),
+            outcomes: outcomes::OutcomeWatch::default(),
             inbox: None,
         }
     }
@@ -623,6 +626,7 @@ where
         let mut warned = false;
         self.sent_back = false;
         self.loops.reset();
+        self.outcomes.reset();
 
         for model_turn in 1..=self.config.max_model_turns.get() {
             if cancel.is_cancelled() {
@@ -738,10 +742,12 @@ where
                 continue;
             }
             let note = self.loops.record(&call);
+            let recorded = call.clone();
             let Some(mut result) = self.settle(model_turn, call, events, cancel).await? else {
                 return Ok(Settled::Cancelled);
             };
-            if let Some(note) = note {
+            let progress = self.outcomes.record(&recorded, &result.output.content);
+            for note in [note, progress].into_iter().flatten() {
                 result.output.content.push_str("\n\n");
                 result.output.content.push_str(&note);
             }
