@@ -58,6 +58,10 @@ pub struct EvalArgs {
     /// Qwen defaults to 4096.
     #[arg(long)]
     pub thinking_budget: Option<u32>,
+    /// Reasoning effort for a model that offers a choice, recorded with each
+    /// run. Leaves the provider's default when absent; no config file sets it.
+    #[arg(long)]
+    pub effort: Option<dino_protocol::ReasoningEffort>,
     /// Emit the whole record, metrics included, as JSON.
     #[arg(long)]
     pub json: bool,
@@ -182,8 +186,14 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     }
     let profile = match args.harness {
         None => Some(config::resolve_profile(args.model.as_deref())?),
+        Some(_) if args.effort.is_some() => {
+            bail!("--effort sets dino's own models, not a harness's")
+        }
         Some(_) => None,
     };
+    if let (Some(profile), Some(effort)) = (&profile, args.effort) {
+        config::check_effort(profile, effort)?;
+    }
     let label = match (&profile, args.harness, &args.model) {
         (Some(profile), _, _) => profile.key.clone(),
         (None, Some(harness), Some(model)) => format!("{model} ({harness:?})"),
@@ -204,10 +214,13 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
             style::paint(
                 FAINT,
                 &format!(
-                    "{} · {} case(s){} · scratch {}",
+                    "{}{} · {} case(s){} · scratch {}",
                     profile
                         .as_ref()
                         .map_or(&label, |profile| &profile.display_name),
+                    args.effort
+                        .map(|effort| format!(" · {effort} effort"))
+                        .unwrap_or_default(),
                     cases.len(),
                     if args.without.is_empty() {
                         String::new()
@@ -293,6 +306,7 @@ async fn run_one(
         without: args.without.clone(),
         max_diagnostics: args.max_diagnostics,
         thinking_budget: args.thinking_budget,
+        reasoning_effort: args.effort,
         score: args.score,
     };
     Ok(run_case(case, &scratch, Arc::clone(&sandbox), &variant, &build).await?)
@@ -416,6 +430,7 @@ fn eval_settings(
         }),
         disable_thinking: args.no_thinking,
         enable_thinking: None,
+        reasoning_effort: args.effort,
         plain: args.plain,
         fallback: Vec::new(),
     }

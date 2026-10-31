@@ -210,6 +210,34 @@ async fn a_run_that_changes_nothing_fails_even_when_the_code_compiles() {
 }
 
 #[tokio::test]
+async fn the_record_says_which_effort_the_run_asked_for() {
+    let scratch = Scratch::new();
+    let case = Case::load(corpus().join("add-a-function")).unwrap();
+    let turns = vec![text_turn("Looks fine to me.")];
+    let build = |_prompt: String, _tools: Vec<dino_protocol::ToolDefinition>| {
+        Ok(Box::new(Scripted {
+            profile: dino_model::builtin_profiles().remove(0),
+            turns: VecDeque::from(turns.clone()),
+        }) as Box<dyn ModelSession>)
+    };
+    let variant = dino_eval::Variant {
+        reasoning_effort: Some(dino_protocol::ReasoningEffort::Low),
+        ..dino_eval::Variant::default()
+    };
+
+    let outcome = run_case(&case, &scratch.path, Arc::new(Unconfined), &variant, &build)
+        .await
+        .unwrap();
+
+    let record = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(record["reasoning_effort"], "low");
+    let mut old = record.clone();
+    old.as_object_mut().unwrap().remove("reasoning_effort");
+    let read: dino_eval::Outcome = serde_json::from_value(old).unwrap();
+    assert_eq!(read.reasoning_effort, None);
+}
+
+#[tokio::test]
 async fn a_run_that_exceeds_its_turn_limit_fails_and_names_the_limit() {
     let scratch = Scratch::new();
     let mut case = Case::load(corpus().join("add-a-function")).unwrap();

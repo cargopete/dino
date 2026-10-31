@@ -24,8 +24,56 @@ pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh", alias = "x_high")]
     XHigh,
     Max,
+}
+
+impl ReasoningEffort {
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    /// The level as providers spell it, and as a flag or config file takes it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for ReasoningEffort {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|effort| effort.name() == text)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Self::ALL.iter().map(|effort| effort.name()).collect();
+                format!(
+                    "unknown reasoning effort {text:?}; expected one of {}",
+                    names.join(", ")
+                )
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +512,20 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::AgentEvent;
+    use super::ReasoningEffort;
+
+    #[test]
+    fn an_effort_reads_as_it_is_written_and_nothing_else() {
+        for effort in ReasoningEffort::ALL {
+            assert_eq!(effort.name().parse::<ReasoningEffort>(), Ok(effort));
+            assert_eq!(
+                serde_json::to_string(&effort).unwrap(),
+                format!("\"{effort}\"")
+            );
+        }
+        let error = "hihg".parse::<ReasoningEffort>().unwrap_err();
+        assert!(error.contains("hihg") && error.contains("xhigh"), "{error}");
+    }
 
     #[test]
     fn an_old_context_warning_still_reads() {

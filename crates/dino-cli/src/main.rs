@@ -142,6 +142,10 @@ struct CommonArgs {
     /// when absent.
     #[arg(long)]
     no_thinking: bool,
+    /// Reasoning effort for a model that offers a choice: none, low, medium,
+    /// high, xhigh or max. Leaves the provider's default when absent.
+    #[arg(long)]
+    effort: Option<dino_protocol::ReasoningEffort>,
     /// Continue a previous session. Bare, the most recent in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
@@ -642,6 +646,10 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
     let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
         let mut settings = base.clone();
         settings.profile = config::resolve_profile(Some(key))?;
+        // Switching to a model without the configured effort is not a refusal.
+        settings.reasoning_effort = settings
+            .reasoning_effort
+            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
         let name = settings.profile.display_name.clone();
         let model = config::build_session(&settings, prompt.clone(), definitions.clone())?;
         Ok((model, name))
@@ -867,6 +875,7 @@ struct Resolved {
     protected: (Vec<PathBuf>, Source),
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
+    reasoning_effort: (Option<dino_protocol::ReasoningEffort>, Source),
     auto_compact: bool,
     fallback: Vec<String>,
     hooks: (Vec<dino_exec::Hook>, Source),
@@ -978,6 +987,7 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
             .unwrap_or((None, Source::Default)),
+        reasoning_effort: reasoning_effort(args, &layers),
         hooks: (
             hooks_for(&layers, settings::HookEvent::AfterEdit),
             Source::UserFile,
@@ -1003,6 +1013,18 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
     })
 }
 
+fn reasoning_effort(
+    args: &CommonArgs,
+    layers: &Layers,
+) -> (Option<dino_protocol::ReasoningEffort>, Source) {
+    match args.effort {
+        Some(effort) => (Some(effort), Source::Flag),
+        None => layers
+            .pick(|file| file.reasoning_effort.map(Some))
+            .unwrap_or((None, Source::Default)),
+    }
+}
+
 fn listed(paths: &[PathBuf]) -> String {
     if paths.is_empty() {
         return "nothing".to_owned();
@@ -1019,6 +1041,10 @@ fn in_order(keys: &[String]) -> String {
         return "none".to_owned();
     }
     keys.join(", then ")
+}
+
+fn file_named(path: Option<&PathBuf>) -> String {
+    path.map_or_else(|| "none".to_owned(), |path| path.display().to_string())
 }
 
 fn print_config(args: &PromptArgs) -> Result<()> {
@@ -1092,26 +1118,25 @@ fn print_config(args: &PromptArgs) -> Result<()> {
             show(resolved.no_thinking.0.to_string(), resolved.no_thinking.1),
         ),
         (
+            "reasoning effort",
+            show(
+                resolved.reasoning_effort.0.map_or_else(
+                    || "provider default".to_owned(),
+                    |effort| effort.to_string(),
+                ),
+                resolved.reasoning_effort.1,
+            ),
+        ),
+        (
             "plain",
             show(resolved.plain.0.to_string(), resolved.plain.1),
         ),
         ("fallback", fallback),
         (
             "project file",
-            resolved
-                .layers
-                .project_path
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), |path| path.display().to_string()),
+            file_named(resolved.layers.project_path.as_ref()),
         ),
-        (
-            "user file",
-            resolved
-                .layers
-                .user_path
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), |path| path.display().to_string()),
-        ),
+        ("user file", file_named(resolved.layers.user_path.as_ref())),
     ];
     print!("{}", crate::render::status_block(&rows));
     println!(
@@ -1157,6 +1182,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,
         enable_thinking: None,
+        reasoning_effort: resolved.reasoning_effort.0,
         plain: resolved.plain.0,
         fallback,
     })

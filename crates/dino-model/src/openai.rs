@@ -160,7 +160,7 @@ impl OpenAiSession {
         body.insert(
             "reasoning".into(),
             json!({
-                "effort": reasoning_effort_name(self.config.reasoning_effort),
+                "effort": self.config.reasoning_effort.name(),
                 "summary": "auto",
             }),
         );
@@ -301,17 +301,6 @@ fn set_response_id(state: &Mutex<Option<String>>, response_id: String) -> Result
         .map_err(|_| ModelError::Protocol("OpenAI response ID lock was poisoned".into()))?;
     *state = Some(response_id);
     Ok(())
-}
-
-pub(crate) const fn reasoning_effort_name(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::None => "none",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::XHigh => "xhigh",
-        ReasoningEffort::Max => "max",
-    }
 }
 
 fn truncate_for_error(body: &str) -> &str {
