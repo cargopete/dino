@@ -139,6 +139,40 @@ impl From<ExternalHarness> for dino_eval::external::Harness {
 /// or a case is broken. A case that fails its assertions is not an error: it is
 /// the result, and it decides the exit code.
 pub async fn run(args: EvalArgs) -> Result<ExitCode> {
+    // Each child runs in a process group of its own, beyond the terminal's
+    // Ctrl-C, and is killed when its future is dropped. Dying on the signal
+    // would skip that and leave them running.
+    tokio::select! {
+        result = run_corpus(args) => result,
+        code = stopped() => Ok(code),
+    }
+}
+
+/// Resolves when the process is asked to stop, with the conventional status.
+async fn stopped() -> ExitCode {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::SignalKind;
+        use tokio::signal::unix::signal;
+        let (Ok(mut interrupt), Ok(mut terminate)) = (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) else {
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            _ = interrupt.recv() => ExitCode::from(130),
+            _ = terminate.recv() => ExitCode::from(143),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        ExitCode::from(130)
+    }
+}
+
+async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     style::enable(args.plain);
     if args.calibrate {
         return calibrate(&args).await;

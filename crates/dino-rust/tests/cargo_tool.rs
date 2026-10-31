@@ -238,6 +238,47 @@ async fn a_wall_clock_kills_a_long_run_and_says_so() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_test_that_loops_is_killed_with_cargo() {
+    let fixture = Fixture::new(
+        "#[test]\n\
+         fn spins() {\n\
+         let pid = std::process::id().to_string();\n\
+         std::fs::write(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/pid\"), pid).unwrap();\n\
+         loop { std::hint::spin_loop(); }\n\
+         }\n",
+    );
+    // Long enough to build and start the test, which the clock must then end.
+    let limits = CargoLimits {
+        timeout: Duration::from_secs(10),
+        ..CargoLimits::default()
+    };
+
+    let output = fixture
+        .tool_with(limits, Arc::new(Unconfined))
+        .execute(&call(json!({"command": "test"})))
+        .await
+        .unwrap();
+
+    assert_eq!(parse(&output)["timed_out"], true);
+    let pid = fs::read_to_string(fixture.path.join("pid")).expect("the test started");
+    // A killed process can linger briefly as a zombie until it is reaped.
+    let gone = (0..20).any(|_| {
+        let found = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if found {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        !found
+    });
+    assert!(gone, "the test binary {pid} outlived cargo");
+}
+
 #[test]
 fn every_cargo_call_is_classified_as_a_process() {
     let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
