@@ -16,16 +16,17 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 6] = [
+const RESTRICTED: [(&str, &str); 7] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
     ("sandbox", "weakens a boundary"),
     ("api_base", "redirects where a credential is sent"),
     ("fallback", "sends the conversation to another provider"),
+    ("budget", "could raise what a session may spend"),
 ];
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub model: Option<String>,
@@ -56,6 +57,51 @@ pub struct FileConfig {
     /// Models to continue on, in order, when the provider refuses the account.
     /// One name is a list of one. User file only.
     pub fallback: Option<Fallback>,
+    /// Spending ceilings for sessions, in USD at list price. User file only.
+    pub budget: Option<BudgetConfig>,
+}
+
+/// The `[budget]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetConfig {
+    pub session_usd: Option<f64>,
+    /// Across every session in a UTC day.
+    pub daily_usd: Option<f64>,
+    /// The share of a budget at which to warn. 0.8 when unset.
+    pub warn_at: Option<f64>,
+}
+
+impl BudgetConfig {
+    /// The budget to enforce, or `None` when neither ceiling is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the key whose value cannot be a ceiling.
+    pub fn resolve(self) -> Result<Option<crate::spend::Budget>> {
+        for (key, value) in [
+            ("session_usd", self.session_usd),
+            ("daily_usd", self.daily_usd),
+        ] {
+            if let Some(value) = value
+                && !(value.is_finite() && value > 0.0)
+            {
+                bail!("budget.{key} must be a number of dollars above zero, not {value}");
+            }
+        }
+        let warn_at = self.warn_at.unwrap_or(0.8);
+        if !(warn_at > 0.0 && warn_at <= 1.0) {
+            bail!("budget.warn_at is a share of the budget, above 0 and at most 1, not {warn_at}");
+        }
+        if self.session_usd.is_none() && self.daily_usd.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(crate::spend::Budget {
+            session: self.session_usd,
+            daily: self.daily_usd,
+            warn_at,
+        }))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -183,6 +229,15 @@ impl Layers {
         choose(&self.project)
             .map(|value| (value, Source::ProjectFile))
             .or_else(|| choose(&self.user).map(|value| (value, Source::UserFile)))
+    }
+
+    /// The user file's budget, checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a ceiling or the warning share is unusable.
+    pub fn budget(&self) -> Result<Option<crate::spend::Budget>> {
+        self.user.budget.map_or(Ok(None), BudgetConfig::resolve)
     }
 
     /// As [`Layers::pick`], for settings a project file may not set.
@@ -393,6 +448,35 @@ mod tests {
             message.contains("meduim") && message.contains("medium"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_budget_is_dollars_above_zero_and_a_share_to_warn_at() {
+        let budget = |text: &str| {
+            parse(Path::new("x"), text)
+                .unwrap()
+                .budget
+                .unwrap()
+                .resolve()
+        };
+
+        let set = budget("[budget]\ndaily_usd = 5\n").unwrap().unwrap();
+        assert_eq!(
+            (set.session, set.daily, set.warn_at),
+            (None, Some(5.0), 0.8)
+        );
+        assert!(budget("[budget]\nwarn_at = 0.5\n").unwrap().is_none());
+        for wrong in [
+            "session_usd = 0",
+            "daily_usd = -1",
+            "daily_usd = nan",
+            "daily_usd = 5\nwarn_at = 1.5",
+        ] {
+            let error = budget(&format!("[budget]\n{wrong}\n")).unwrap_err();
+            assert!(error.to_string().starts_with("budget."), "{error}");
+        }
+        assert!(parse(Path::new("x"), "[budget]\nmonthly_usd = 9\n").is_err());
+        assert!(refuse_restricted(Path::new("p"), "[budget]\ndaily_usd = 900\n").is_err());
     }
 
     #[test]

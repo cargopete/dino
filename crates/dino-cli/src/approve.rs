@@ -322,6 +322,50 @@ fn select(choices: &[Choice]) -> Option<ApprovalReply> {
     })
 }
 
+/// Tells and asks the person at the terminal about a budget. With nobody
+/// there to answer, the run stops.
+pub struct TerminalPurse;
+
+impl crate::spend::Purse for TerminalPurse {
+    fn warn(&self, message: &str) {
+        let _keyboard = crate::listen::hold();
+        crate::render::others_wrote();
+        eprintln!(
+            "\n{}",
+            style::paint(style::WARN, &format!("  budget  {message}"))
+        );
+    }
+
+    fn approve(&self, message: &str) -> bool {
+        if !stdin().is_terminal() {
+            return false;
+        }
+        let _keyboard = crate::listen::hold();
+        crate::render::others_wrote();
+        eprintln!(
+            "\n{}  {message}",
+            style::paint_with(RUST, &[BOLD], "  budget")
+        );
+        let choices = [
+            Choice {
+                key: 'y',
+                label: "carry on, as far again".to_owned(),
+                reply: ApprovalReply::Once,
+            },
+            Choice {
+                key: 'n',
+                label: "stop here".to_owned(),
+                reply: ApprovalReply::Reject(None),
+            },
+        ];
+        let reply = match stderr().is_terminal().then(|| select(&choices)).flatten() {
+            Some(reply) => reply,
+            None => read_typed_answer(&choices),
+        };
+        matches!(reply, ApprovalReply::Once)
+    }
+}
+
 /// Restores the terminal however the selector exits.
 struct RawGuard;
 

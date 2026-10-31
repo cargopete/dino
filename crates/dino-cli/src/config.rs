@@ -118,6 +118,8 @@ pub struct RunSettings {
     /// Always empty for evals and probes, whose results would otherwise mix
     /// models.
     pub fallback: Vec<ModelProfile>,
+    /// Spending ceilings. Always `None` for evals, which are not metered.
+    pub budget: Option<crate::spend::Budget>,
 }
 
 /// Resolves the model profile named by a flag or `DINO_MODEL`.
@@ -397,6 +399,7 @@ mod tests {
             reasoning_effort: None,
             plain: true,
             fallback: Vec::new(),
+            budget: None,
         }
     }
 
