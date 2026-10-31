@@ -2,14 +2,16 @@
 //! by the same hidden tests and scorer as a dino run.
 //!
 //! The harness runs as installed and logged in, without the person's own
-//! settings. Codex keeps its own sandbox; the others, which approve their own
-//! calls unattended, run inside dino's: writes only to the case, the harness's
-//! own state and the Cargo and temporary directories, network only to HTTPS
-//! and DNS. What is comparable is the outcome and the
+//! settings, on its own model or, given a [`Provider`], on that provider's, so
+//! the harness is the only variable. Codex keeps its own sandbox; the others,
+//! which approve their own calls unattended, run inside dino's: writes only to
+//! the case, the harness's own state and the Cargo and temporary directories,
+//! network only to HTTPS and DNS. What is comparable is the outcome and the
 //! claims; turns and tool errors are read from each harness's event stream and
 //! are close to, not identical with, dino's.
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,6 +40,53 @@ pub enum Harness {
     Codex,
     Kimi,
     Grok,
+    Pi,
+}
+
+/// An API serving one model in the wire formats of several harnesses, so they
+/// can be compared on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    Moonshot,
+}
+
+impl Provider {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Moonshot => "moonshot",
+        }
+    }
+
+    const fn openai_base(self) -> &'static str {
+        match self {
+            Self::Moonshot => "https://api.moonshot.ai/v1",
+        }
+    }
+
+    const fn anthropic_base(self) -> &'static str {
+        match self {
+            Self::Moonshot => "https://api.moonshot.ai/anthropic",
+        }
+    }
+
+    const fn key_variable(self) -> &'static str {
+        match self {
+            Self::Moonshot => "MOONSHOT_API_KEY",
+        }
+    }
+}
+
+/// A harness's command, what it needs in its environment, and the files and
+/// directories it is given for its own state.
+#[derive(Debug, Default)]
+struct Invocation {
+    program: String,
+    arguments: Vec<String>,
+    environment: Vec<(String, String)>,
+    removed: Vec<&'static str>,
+    files: Vec<(PathBuf, String)>,
+    writable: Vec<PathBuf>,
 }
 
 impl Harness {
@@ -53,28 +102,30 @@ impl Harness {
             ]),
             Self::Kimi => Some(&[".kimi-code", ".kimi"]),
             Self::Grok => Some(&[".grok"]),
+            // Pi's state is the run's own directory, in the invocation.
+            Self::Pi => Some(&[]),
         }
     }
 
     /// The command wrapped in a sandbox for this workspace, where one applies.
     fn contained(
         self,
-        program: String,
-        arguments: Vec<String>,
+        invocation: Invocation,
         workspace: &Path,
         confine: bool,
-    ) -> Result<(String, Vec<String>), EvalError> {
+    ) -> Result<Invocation, EvalError> {
         let Some(state) = self.state().filter(|_| confine) else {
-            return Ok((program, arguments));
+            return Ok(invocation);
         };
         let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
             .unwrap_or_default();
-        let mut writable: Vec<std::path::PathBuf> = state
+        let mut writable: Vec<PathBuf> = state
             .iter()
             .chain(&[".cargo", ".rustup"])
             .map(|path| home.join(path))
             .collect();
+        writable.extend(invocation.writable.iter().cloned());
         writable.push(std::env::temp_dir());
         // Claude Code's shell keeps its state in /tmp/claude-<uid>; without it
         // no command runs at all, and the model works blind.
@@ -87,14 +138,27 @@ impl Harness {
             .for_fetching(&writable)
             .ok_or_else(|| EvalError::Setup("this sandbox cannot allow HTTPS".into()))?;
         let wrapped = sandbox
-            .wrap(&program, &arguments)
+            .wrap(&invocation.program, &invocation.arguments)
             .map_err(|error| EvalError::Setup(error.to_string()))?;
-        Ok((wrapped.program, wrapped.arguments))
+        Ok(Invocation {
+            program: wrapped.program,
+            arguments: wrapped.arguments,
+            ..invocation
+        })
     }
 
-    fn command(self, model: &str, prompt: &str, workspace: &Path) -> (String, Vec<String>) {
+    /// The command for one run. `state` is a fresh directory of the run's own,
+    /// for a harness whose usual one would carry the person's setup.
+    fn command(
+        self,
+        model: &str,
+        prompt: &str,
+        workspace: &Path,
+        provider: Option<(Provider, &str)>,
+        state: &Path,
+    ) -> Result<Invocation, EvalError> {
         let owned = |parts: &[&str]| parts.iter().map(|part| (*part).to_owned()).collect();
-        match self {
+        let (program, arguments) = match self {
             Self::ClaudeCode => (
                 "claude".to_owned(),
                 owned(&[
@@ -131,11 +195,19 @@ impl Harness {
                     // Dependencies have to be fetchable, as dino's cargo fetch allows.
                     "-c",
                     "sandbox_workspace_write.network_access=true",
-                    "-C",
                 ]
                 .iter()
                 .map(|part| (*part).to_owned())
-                .chain([workspace.display().to_string(), prompt.to_owned()])
+                .chain(
+                    provider
+                        .into_iter()
+                        .flat_map(|(provider, _)| codex_provider(provider)),
+                )
+                .chain([
+                    "-C".to_owned(),
+                    workspace.display().to_string(),
+                    prompt.to_owned(),
+                ])
                 .collect(),
             ),
             // Kimi Code runs every call unasked in prompt mode, so dino contains it.
@@ -159,8 +231,155 @@ impl Harness {
                     "Bash(cargo:*)",
                 ]),
             ),
-        }
+            // Pi has no approvals at all, so dino contains it.
+            Self::Pi => {
+                let mut arguments: Vec<String> =
+                    owned(&["-p", "--mode", "json", "--no-session", "--offline"]);
+                if let Some((provider, _)) = provider {
+                    arguments.extend(["--provider".to_owned(), provider.name().to_owned()]);
+                }
+                arguments.extend(["--model".to_owned(), model.to_owned(), prompt.to_owned()]);
+                ("pi".to_owned(), arguments)
+            }
+        };
+        self.provisioned(
+            Invocation {
+                program,
+                arguments,
+                ..Invocation::default()
+            },
+            model,
+            provider,
+            state,
+        )
     }
+
+    /// `invocation` with the environment and state that keep the person's
+    /// setup out and point the harness at `provider`.
+    fn provisioned(
+        self,
+        mut invocation: Invocation,
+        model: &str,
+        provider: Option<(Provider, &str)>,
+        state: &Path,
+    ) -> Result<Invocation, EvalError> {
+        match (self, provider) {
+            (Self::Pi, _) => {
+                // A directory of its own is stock Pi: no personal settings,
+                // extensions, skills or AGENTS.md.
+                invocation.environment.push((
+                    "PI_CODING_AGENT_DIR".to_owned(),
+                    state.display().to_string(),
+                ));
+                invocation.writable.push(state.to_path_buf());
+                if let Some((provider, _)) = provider {
+                    invocation
+                        .files
+                        .push((state.join("models.json"), pi_models(provider, model)));
+                }
+            }
+            (Self::Codex, Some(_)) => {
+                // --ignore-user-config still loads ~/.codex's AGENTS.md, skills
+                // and memories. A provider keyed from the environment needs no login.
+                invocation
+                    .environment
+                    .push(("CODEX_HOME".to_owned(), state.display().to_string()));
+            }
+            (Self::ClaudeCode, Some((provider, key))) => {
+                invocation.environment = claude_code_environment(provider, model, key);
+                invocation.removed.push("ANTHROPIC_AUTH_TOKEN");
+            }
+            (Self::Kimi | Self::Grok, Some((provider, _))) => {
+                return Err(EvalError::Setup(format!(
+                    "{self:?} cannot be pointed at {}",
+                    provider.name()
+                )));
+            }
+            (_, None) => {}
+        }
+        Ok(invocation)
+    }
+}
+
+/// Codex's overrides adding `provider` and selecting it. Codex reads the key
+/// from its variable itself.
+fn codex_provider(provider: Provider) -> Vec<String> {
+    let name = provider.name();
+    [
+        format!("model_provider=\"{name}\""),
+        format!("model_providers.{name}.name=\"{name}\""),
+        format!(
+            "model_providers.{name}.base_url=\"{}\"",
+            provider.openai_base()
+        ),
+        format!(
+            "model_providers.{name}.env_key=\"{}\"",
+            provider.key_variable()
+        ),
+        // The only wire format Codex still speaks.
+        format!("model_providers.{name}.wire_api=\"responses\""),
+    ]
+    .into_iter()
+    .flat_map(|setting| ["-c".to_owned(), setting])
+    .collect()
+}
+
+/// Claude Code's environment for `provider`. Every model alias is the one
+/// model, or background calls would ask the provider for Haiku.
+fn claude_code_environment(provider: Provider, model: &str, key: &str) -> Vec<(String, String)> {
+    let mut environment = vec![
+        (
+            "ANTHROPIC_BASE_URL".to_owned(),
+            provider.anthropic_base().to_owned(),
+        ),
+        // In place of the person's own key, which would otherwise go to the provider.
+        ("ANTHROPIC_API_KEY".to_owned(), key.to_owned()),
+        (
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
+            "1".to_owned(),
+        ),
+    ];
+    environment.extend(
+        [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ]
+        .map(|variable| (variable.to_owned(), model.to_owned())),
+    );
+    environment
+}
+
+/// Pi's `models.json` adding `model` to `provider`. Pi takes the provider's
+/// quirks from its address; the window and output limit come from dino's
+/// profile, where it has one.
+fn pi_models(provider: Provider, model: &str) -> String {
+    let profile = dino_model::builtin_profile(model);
+    let mut entry = serde_json::json!({ "id": model, "reasoning": true });
+    if let Some(window) = profile
+        .as_ref()
+        .and_then(|profile| profile.context_window_tokens)
+    {
+        entry["contextWindow"] = window.into();
+    }
+    if let Some(output) = profile
+        .as_ref()
+        .and_then(|profile| profile.max_output_tokens)
+    {
+        entry["maxTokens"] = output.into();
+    }
+    serde_json::json!({
+        "providers": {
+            provider.name(): {
+                "baseUrl": provider.openai_base(),
+                "api": "openai-completions",
+                "apiKey": provider.key_variable(),
+                "models": [entry],
+            }
+        }
+    })
+    .to_string()
 }
 
 /// What a harness's event stream says happened.
@@ -242,7 +461,9 @@ pub fn parse_codex(stream: &str) -> Parsed {
                             .unwrap_or_default()
                             .clone_into(&mut parsed.answer);
                     }
-                    Some("reasoning") | None => {}
+                    // An `error` item is Codex's own warning, such as a model it
+                    // has no metadata for, not a step.
+                    Some("reasoning" | "error") | None => {}
                     Some(kind) => {
                         steps += 1;
                         *parsed
@@ -264,6 +485,7 @@ pub fn parse_codex(stream: &str) -> Parsed {
                 let count = |field: &str| usage[field].as_u64().unwrap_or(0);
                 parsed.metrics.tokens.input_tokens += count("input_tokens");
                 parsed.metrics.tokens.cached_input_tokens += count("cached_input_tokens");
+                parsed.metrics.tokens.cache_write_input_tokens += count("cache_write_input_tokens");
                 parsed.metrics.tokens.output_tokens += count("output_tokens");
                 parsed.metrics.tokens.reasoning_tokens += count("reasoning_output_tokens");
             }
@@ -343,6 +565,100 @@ pub fn parse_grok(stream: &str) -> Parsed {
     parsed
 }
 
+/// Reads `pi --mode json` output. Each assistant message is a turn, and the
+/// answer is the text of the last. Pi's bash tool fails a command that ran and
+/// exited non-zero; that is a result, as it is in dino, unless the shell could
+/// not run it.
+#[must_use]
+pub fn parse_pi(stream: &str) -> Parsed {
+    let mut parsed = Parsed::default();
+    let mut stopped = false;
+    for line in stream.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("message_end") if event["message"]["role"] == "assistant" => {
+                let message = &event["message"];
+                parsed.metrics.model_turns += 1;
+                parsed.answer = message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str())
+                    .collect();
+                stopped = message["stopReason"] == "stop";
+                let usage = &message["usage"];
+                let count = |field: &str| usage[field].as_u64().unwrap_or(0);
+                let tokens = &mut parsed.metrics.tokens;
+                tokens.input_tokens += count("input") + count("cacheRead") + count("cacheWrite");
+                tokens.cached_input_tokens += count("cacheRead");
+                tokens.cache_write_input_tokens += count("cacheWrite");
+                tokens.output_tokens += count("output");
+            }
+            Some("tool_execution_start") => {
+                let name = event["toolName"].as_str().unwrap_or("?").to_owned();
+                *parsed.metrics.tool_calls.entry(name).or_insert(0) += 1;
+            }
+            Some("tool_execution_end") if event["isError"] == true => {
+                let text = event["result"]["content"].to_string();
+                let exit = text
+                    .rsplit_once("Command exited with code ")
+                    .and_then(|(_, rest)| {
+                        rest.split(|c: char| !c.is_ascii_digit())
+                            .next()?
+                            .parse::<u32>()
+                            .ok()
+                    });
+                if !matches!(exit, Some(code) if code != 126 && code != 127) {
+                    parsed.metrics.tool_errors += 1;
+                }
+            }
+            Some("agent_end") => parsed.completed = stopped,
+            _ => {}
+        }
+    }
+    parsed
+}
+
+/// The harness's command for `case`, with a fresh state directory beside the
+/// workspace and the files it is given there written.
+fn prepare(
+    case: &Case,
+    scratch: &Path,
+    workspace: &Path,
+    harness: Harness,
+    model: &str,
+    provider: Option<Provider>,
+) -> Result<Invocation, EvalError> {
+    let key = provider
+        .map(|provider| {
+            std::env::var(provider.key_variable())
+                .map(|key| (provider, key))
+                .map_err(|_| EvalError::Setup(format!("{} is not set", provider.key_variable())))
+        })
+        .transpose()?;
+    let state = scratch.join(format!("{}.{harness:?}-state", case.name));
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&state)
+        .map_err(|error| EvalError::Setup(format!("cannot create {}: {error}", state.display())))?;
+    let invocation = harness.command(
+        model,
+        &prompt_for(case, true),
+        workspace,
+        key.as_ref()
+            .map(|(provider, key)| (*provider, key.as_str())),
+        &state,
+    )?;
+    for (path, contents) in &invocation.files {
+        std::fs::write(path, contents).map_err(|error| {
+            EvalError::Setup(format!("cannot write {}: {error}", path.display()))
+        })?;
+    }
+    Ok(invocation)
+}
+
 /// Runs one case through `harness` with `model` and scores the result.
 ///
 /// # Errors
@@ -355,26 +671,33 @@ pub async fn run_external(
     sandbox: Arc<dyn Sandbox>,
     harness: Harness,
     model: &str,
+    provider: Option<Provider>,
 ) -> Result<Outcome, EvalError> {
     let workspace = case.materialise(scratch)?;
     let before = fingerprint_tree(&workspace)?;
-    let prompt = prompt_for(case, true);
-    let (program, arguments) = harness.command(model, &prompt, &workspace);
-    let (program, arguments) =
-        harness.contained(program, arguments, &workspace, sandbox.confines_writes())?;
+    let invocation = prepare(case, scratch, &workspace, harness, model, provider)?;
+    let invocation = harness.contained(invocation, &workspace, sandbox.confines_writes())?;
     // Model names such as `kimi-code/k3.1-pro` would otherwise name a directory.
     let log_path = scratch.join(format!("{}.{}.jsonl", case.name, model.replace('/', "_")));
 
     let started = Instant::now();
-    let mut child = tokio::process::Command::new(&program)
-        .args(&arguments)
+    let mut command = tokio::process::Command::new(&invocation.program);
+    command
+        .args(&invocation.arguments)
+        .envs(invocation.environment.iter().cloned());
+    for variable in &invocation.removed {
+        command.env_remove(variable);
+    }
+    let mut child = command
         .current_dir(&workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|error| EvalError::Setup(format!("cannot start {program}: {error}")))?;
+        .map_err(|error| {
+            EvalError::Setup(format!("cannot start {}: {error}", invocation.program))
+        })?;
     let mut stdout = child
         .stdout
         .take()
@@ -401,6 +724,7 @@ pub async fn run_external(
         Harness::Codex => parse_codex(&stream),
         Harness::Kimi => parse_kimi(&stream),
         Harness::Grok => parse_grok(&stream),
+        Harness::Pi => parse_pi(&stream),
     };
     let variant = Variant {
         score: true,
@@ -448,26 +772,260 @@ pub async fn run_external(
 mod tests {
     use super::*;
 
+    fn invocation(program: &str, arguments: &[&str]) -> Invocation {
+        Invocation {
+            program: program.to_owned(),
+            arguments: arguments.iter().map(|part| (*part).to_owned()).collect(),
+            ..Invocation::default()
+        }
+    }
+
+    fn setting<'a>(arguments: &'a [String], prefix: &str) -> Option<&'a str> {
+        arguments
+            .windows(2)
+            .find(|pair| pair[0] == "-c" && pair[1].starts_with(prefix))
+            .map(|pair| pair[1].as_str())
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn harnesses_that_approve_their_own_calls_run_contained() {
         let workspace = std::env::temp_dir();
-        for harness in [Harness::Kimi, Harness::ClaudeCode, Harness::Grok] {
-            let (program, arguments) = harness
-                .contained("tool".into(), vec!["-p".into()], &workspace, true)
+        for harness in [
+            Harness::Kimi,
+            Harness::ClaudeCode,
+            Harness::Grok,
+            Harness::Pi,
+        ] {
+            let contained = harness
+                .contained(invocation("tool", &["-p"]), &workspace, true)
                 .unwrap();
-            assert_eq!(program, "/usr/bin/sandbox-exec", "{harness:?}");
-            assert!(arguments[1].contains("remote tcp \"*:443\""), "{harness:?}");
-            assert_eq!(arguments[2], "tool");
+            assert_eq!(contained.program, "/usr/bin/sandbox-exec", "{harness:?}");
+            assert!(
+                contained.arguments[1].contains("remote tcp \"*:443\""),
+                "{harness:?}"
+            );
+            assert_eq!(contained.arguments[2], "tool");
         }
-        let (program, _) = Harness::Codex
-            .contained("codex".into(), Vec::new(), &workspace, true)
+        let contained = Harness::Codex
+            .contained(invocation("codex", &[]), &workspace, true)
             .unwrap();
-        assert_eq!(program, "codex", "Codex keeps its own sandbox");
-        let (program, _) = Harness::Kimi
-            .contained("kimi".into(), Vec::new(), &workspace, false)
+        assert_eq!(contained.program, "codex", "Codex keeps its own sandbox");
+        let contained = Harness::Kimi
+            .contained(invocation("kimi", &[]), &workspace, false)
             .unwrap();
-        assert_eq!(program, "kimi", "--sandbox none is respected");
+        assert_eq!(contained.program, "kimi", "--sandbox none is respected");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pi_may_write_its_own_state_directory() {
+        // Any directory that exists outside the temporary one will do.
+        let state = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pi = Harness::Pi
+            .command(
+                "kimi-k3.1-pro",
+                "fix it",
+                &std::env::temp_dir(),
+                None,
+                state,
+            )
+            .unwrap();
+        assert!(pi.environment.contains(&(
+            "PI_CODING_AGENT_DIR".to_owned(),
+            state.display().to_string()
+        )));
+        let contained = Harness::Pi
+            .contained(pi, &std::env::temp_dir(), true)
+            .unwrap();
+        assert!(
+            contained.arguments[1].contains(&state.display().to_string()),
+            "{}",
+            contained.arguments[1]
+        );
+    }
+
+    #[test]
+    fn codex_is_pointed_at_a_provider_without_the_persons_codex_home() {
+        let state = Path::new("/scratch/case.Codex-state");
+        let codex = Harness::Codex
+            .command(
+                "kimi-k3.1-pro",
+                "fix it",
+                Path::new("/scratch/case"),
+                Some((Provider::Moonshot, "secret")),
+                state,
+            )
+            .unwrap();
+
+        assert_eq!(
+            setting(&codex.arguments, "model_provider="),
+            Some("model_provider=\"moonshot\"")
+        );
+        assert_eq!(
+            setting(&codex.arguments, "model_providers.moonshot.base_url"),
+            Some("model_providers.moonshot.base_url=\"https://api.moonshot.ai/v1\"")
+        );
+        assert_eq!(
+            setting(&codex.arguments, "model_providers.moonshot.env_key"),
+            Some("model_providers.moonshot.env_key=\"MOONSHOT_API_KEY\"")
+        );
+        assert!(
+            !codex.arguments.iter().any(|part| part.contains("secret")),
+            "Codex reads the key itself"
+        );
+        assert_eq!(
+            codex.arguments[codex.arguments.len() - 3..],
+            ["-C", "/scratch/case", "fix it"]
+        );
+        assert!(
+            codex
+                .environment
+                .contains(&("CODEX_HOME".to_owned(), state.display().to_string()))
+        );
+
+        let native = Harness::Codex
+            .command("gpt-6.1", "fix it", Path::new("/scratch/case"), None, state)
+            .unwrap();
+        assert!(setting(&native.arguments, "model_provider").is_none());
+        assert!(native.environment.is_empty(), "a login lives in ~/.codex");
+    }
+
+    #[test]
+    fn claude_code_on_a_provider_sends_it_the_providers_key_for_every_model() {
+        let claude = Harness::ClaudeCode
+            .command(
+                "kimi-k3.1-pro",
+                "fix it",
+                Path::new("/scratch/case"),
+                Some((Provider::Moonshot, "secret")),
+                Path::new("/scratch/state"),
+            )
+            .unwrap();
+        let variable = |name: &str| {
+            claude
+                .environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+
+        assert_eq!(
+            variable("ANTHROPIC_BASE_URL"),
+            Some("https://api.moonshot.ai/anthropic")
+        );
+        assert_eq!(variable("ANTHROPIC_API_KEY"), Some("secret"));
+        assert_eq!(
+            variable("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some("kimi-k3.1-pro")
+        );
+        assert_eq!(claude.removed, ["ANTHROPIC_AUTH_TOKEN"]);
+    }
+
+    #[test]
+    fn pi_on_a_provider_is_given_the_model_in_its_own_directory() {
+        let state = Path::new("/scratch/case.Pi-state");
+        let pi = Harness::Pi
+            .command(
+                "kimi-k3.1-pro",
+                "fix it",
+                Path::new("/scratch/case"),
+                Some((Provider::Moonshot, "secret")),
+                state,
+            )
+            .unwrap();
+
+        assert_eq!(
+            pi.arguments,
+            [
+                "-p",
+                "--mode",
+                "json",
+                "--no-session",
+                "--offline",
+                "--provider",
+                "moonshot",
+                "--model",
+                "kimi-k3.1-pro",
+                "fix it"
+            ]
+        );
+        assert_eq!(pi.writable, [state]);
+        let (path, models) = &pi.files[0];
+        assert_eq!(path, &state.join("models.json"));
+        let models: Value = serde_json::from_str(models).unwrap();
+        let moonshot = &models["providers"]["moonshot"];
+        assert_eq!(moonshot["baseUrl"], "https://api.moonshot.ai/v1");
+        assert_eq!(
+            moonshot["apiKey"], "MOONSHOT_API_KEY",
+            "a variable, not the key"
+        );
+        assert_eq!(moonshot["models"][0]["id"], "kimi-k3.1-pro");
+        assert_eq!(moonshot["models"][0]["contextWindow"], 1_048_576);
+    }
+
+    #[test]
+    fn harnesses_with_their_own_provider_refuse_another() {
+        for harness in [Harness::Kimi, Harness::Grok] {
+            assert!(
+                harness
+                    .command(
+                        "k",
+                        "fix it",
+                        Path::new("/scratch/case"),
+                        Some((Provider::Moonshot, "secret")),
+                        Path::new("/scratch/state"),
+                    )
+                    .is_err(),
+                "{harness:?}"
+            );
+        }
+    }
+
+    /// Recorded from Pi 0.73.1 on Kimi K3.1 Pro, trimmed to the events read,
+    /// with two bash calls added: one exiting 1, one not found.
+    #[test]
+    fn pi_streams_give_turns_tokens_errors_and_the_answer() {
+        let stream = r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Use the read tool on notes.txt, then try to read missing.txt, then reply with the number of lines in notes.txt."}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I need use read notes then try missing then reply lines. Should obey sequencing. I should read notes.","thinkingSignature":"reasoning_content"},{"type":"toolCall","id":"read_0_644eb4af","name":"read","arguments":{"path":"notes.txt"}}],"provider":"moonshotai","model":"kimi-k3.1-pro","usage":{"input":160,"output":73,"cacheRead":0,"cacheWrite":1280},"stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"read_0_644eb4af","toolName":"read","args":{"path":"notes.txt"}}
+{"type":"tool_execution_end","toolCallId":"read_0_644eb4af","toolName":"read","result":{"content":[{"type":"text","text":"a\nb\n"}]},"isError":false}
+{"type":"message_end","message":{"role":"toolResult","toolCallId":"read_0_644eb4af","toolName":"read","content":[{"type":"text","text":"a\nb\n"}],"isError":false}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Should try missing.","thinkingSignature":"reasoning_content"},{"type":"toolCall","id":"read_1_238f5c4b","name":"read","arguments":{"path":"missing.txt"}}],"provider":"moonshotai","model":"kimi-k3.1-pro","usage":{"input":263,"output":56,"cacheRead":1024,"cacheWrite":256},"stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"read_1_238f5c4b","toolName":"read","args":{"path":"missing.txt"}}
+{"type":"tool_execution_end","toolCallId":"read_1_238f5c4b","toolName":"read","result":{"content":[{"type":"text","text":"ENOENT: no such file or directory, access '/case/missing.txt'"}],"details":{}},"isError":true}
+{"type":"tool_execution_start","toolCallId":"b1","toolName":"bash","args":{"command":"cargo test"}}
+{"type":"tool_execution_end","toolCallId":"b1","toolName":"bash","result":{"content":[{"type":"text","text":"test failed\n\nCommand exited with code 101"}]},"isError":true}
+{"type":"tool_execution_start","toolCallId":"b2","toolName":"bash","args":{"command":"rg x"}}
+{"type":"tool_execution_end","toolCallId":"b2","toolName":"bash","result":{"content":[{"type":"text","text":"bash: rg: command not found\n\nCommand exited with code 127"}]},"isError":true}
+{"type":"message_end","message":{"role":"toolResult","toolCallId":"read_1_238f5c4b","toolName":"read","content":[{"type":"text","text":"ENOENT: no such file or directory, access '/case/missing.txt'"}],"details":{},"isError":true}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Respond 2. Should think notes has a b output blank likely 2 lines yes.","thinkingSignature":"reasoning_content"},{"type":"text","text":"2"}],"provider":"moonshotai","model":"kimi-k3.1-pro","usage":{"input":146,"output":35,"cacheRead":1536,"cacheWrite":0},"stopReason":"stop"}}
+{"type":"agent_end","messages":[]}"#;
+
+        let parsed = parse_pi(stream);
+
+        assert!(parsed.completed);
+        assert_eq!(parsed.answer, "2");
+        assert_eq!(parsed.metrics.model_turns, 3);
+        assert_eq!(parsed.metrics.tool_calls["read"], 2);
+        assert_eq!(parsed.metrics.tool_calls["bash"], 2);
+        assert_eq!(
+            parsed.metrics.tool_errors, 2,
+            "the missing file and the missing command; a failing test is a result"
+        );
+        assert_eq!(parsed.metrics.tokens.input_tokens, 4_665);
+        assert_eq!(parsed.metrics.tokens.cached_input_tokens, 2_560);
+        assert_eq!(parsed.metrics.tokens.cache_write_input_tokens, 1_536);
+        assert_eq!(parsed.metrics.tokens.output_tokens, 164);
+    }
+
+    #[test]
+    fn pi_streams_that_end_in_an_error_are_not_complete() {
+        let stream = r#"{"type":"message_end","message":{"role":"assistant","content":[],"usage":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0},"stopReason":"error","errorMessage":"429 rate limited"}}
+{"type":"agent_end","messages":[]}"#;
+
+        assert!(!parse_pi(stream).completed);
+        assert!(!parse_pi("").completed, "no agent_end, no completion");
     }
 
     #[test]
@@ -499,21 +1057,27 @@ mod tests {
     #[test]
     fn codex_streams_count_steps_and_only_unrunnable_commands_as_errors() {
         let stream = r#"{"type":"thread.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `kimi-k3.1-pro` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
 {"type":"item.completed","item":{"type":"agent_message","text":"Reading first."}}
 {"type":"item.completed","item":{"type":"command_execution","exit_code":0,"status":"completed"}}
 {"type":"item.completed","item":{"type":"command_execution","exit_code":1,"status":"failed"}}
 {"type":"item.completed","item":{"type":"command_execution","exit_code":127,"status":"failed"}}
 {"type":"item.completed","item":{"type":"file_change","status":"completed"}}
 {"type":"item.completed","item":{"type":"agent_message","text":"All done."}}
-{"type":"turn.completed","usage":{"input_tokens":5000,"cached_input_tokens":4000,"output_tokens":300,"reasoning_output_tokens":40}}"#;
+{"type":"turn.completed","usage":{"input_tokens":5000,"cached_input_tokens":4000,"cache_write_input_tokens":600,"output_tokens":300,"reasoning_output_tokens":40}}"#;
 
         let parsed = parse_codex(stream);
 
         assert!(parsed.completed);
         assert_eq!(parsed.answer, "All done.");
-        assert_eq!(parsed.metrics.model_turns, 5);
+        assert_eq!(
+            parsed.metrics.model_turns, 5,
+            "Codex's own warning is not a step"
+        );
+        assert!(!parsed.metrics.tool_calls.contains_key("error"));
         assert_eq!(parsed.metrics.tool_errors, 1);
         assert_eq!(parsed.metrics.tokens.cached_input_tokens, 4_000);
+        assert_eq!(parsed.metrics.tokens.cache_write_input_tokens, 600);
     }
 
     #[test]

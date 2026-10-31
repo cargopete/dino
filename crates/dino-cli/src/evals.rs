@@ -118,6 +118,11 @@ pub struct EvalArgs {
     /// same way. `--model` is then that harness's model name, passed through.
     #[arg(long, value_enum)]
     pub harness: Option<ExternalHarness>,
+    /// Point the harness at this provider's API instead of its own, so harnesses
+    /// can be compared on one model. Codex, Claude Code and Pi; `--model` is the
+    /// provider's model name. The person's own configuration is left untouched.
+    #[arg(long, value_enum, requires = "harness")]
+    pub harness_provider: Option<HarnessProvider>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -126,6 +131,7 @@ pub enum ExternalHarness {
     Codex,
     Kimi,
     Grok,
+    Pi,
 }
 
 impl From<ExternalHarness> for dino_eval::external::Harness {
@@ -135,6 +141,20 @@ impl From<ExternalHarness> for dino_eval::external::Harness {
             ExternalHarness::Codex => Self::Codex,
             ExternalHarness::Kimi => Self::Kimi,
             ExternalHarness::Grok => Self::Grok,
+            ExternalHarness::Pi => Self::Pi,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum HarnessProvider {
+    Moonshot,
+}
+
+impl From<HarnessProvider> for dino_eval::external::Provider {
+    fn from(provider: HarnessProvider) -> Self {
+        match provider {
+            HarnessProvider::Moonshot => Self::Moonshot,
         }
     }
 }
@@ -200,7 +220,10 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     }
     let label = match (&profile, args.harness, &args.model) {
         (Some(profile), _, _) => profile.key.clone(),
-        (None, Some(harness), Some(model)) => format!("{model} ({harness:?})"),
+        (None, Some(harness), Some(model)) => match args.harness_provider {
+            Some(provider) => format!("{model} ({harness:?} on {provider:?})"),
+            None => format!("{model} ({harness:?})"),
+        },
         (None, _, _) => bail!("--harness needs --model, the harness's own model name"),
     };
     let mut cases = select(&args)?;
@@ -315,6 +338,7 @@ async fn run_one(
             Arc::clone(&sandbox),
             harness.into(),
             model,
+            args.harness_provider.map(Into::into),
         )
         .await?);
     }
