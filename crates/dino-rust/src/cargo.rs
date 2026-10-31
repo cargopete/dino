@@ -24,6 +24,8 @@ use crate::diagnostics;
 use crate::diagnostics::Diagnostic;
 use crate::diagnostics::DiagnosticCounts;
 use crate::diagnostics::ParsedDiagnostics;
+use crate::trim;
+use crate::trim::Source;
 use dino_exec::process;
 
 /// The longest a package name or test filter may be.
@@ -434,6 +436,7 @@ impl CargoTool {
                 packages: None,
                 added: Vec::new(),
                 output: format!("no result: killed after {} seconds", timeout.as_secs()),
+                trimmed: None,
                 truncated: execution.truncated,
                 restored_protected_paths: execution.restored,
             });
@@ -449,6 +452,7 @@ impl CargoTool {
             packages: None,
             added: Vec::new(),
             output: String::new(),
+            trimmed: None,
             truncated: execution.truncated,
             restored_protected_paths: execution.restored,
         };
@@ -464,18 +468,27 @@ impl CargoTool {
                 );
                 output.diagnostics = kept;
                 output.dropped_diagnostics = dropped;
+                if !request.full {
+                    let shortened = diagnostics::shorten(&mut output.diagnostics);
+                    output.trimmed = (shortened > 0).then(|| {
+                        format!(
+                            "{shortened} repeated or later diagnostics without their rendering; \
+                             pass full for all of it"
+                        )
+                    });
+                }
                 // Cargo's own failures, as opposed to the compiler's, arrive on
                 // stderr and are not JSON. They count as one error, so `errors: 0`
                 // never describes a build that failed.
                 if output.counts.errors == 0 && execution.exit_code != Some(0) {
                     output.counts.errors = 1;
-                    output.output = capped(&execution.stderr, self.limits.max_output_bytes);
+                    output.output = self.text(&execution.stderr, &request, &mut output);
                 }
             }
             CargoCommand::Metadata => {
                 output.packages = Some(summarise_metadata(&execution.stdout, &self.root)?);
                 if execution.exit_code != Some(0) {
-                    output.output = capped(&execution.stderr, self.limits.max_output_bytes);
+                    output.output = self.text(&execution.stderr, &request, &mut output);
                 }
             }
             CargoCommand::Test
@@ -487,14 +500,31 @@ impl CargoTool {
                 // Neither has a machine-readable stream worth parsing yet, so
                 // the captured text is returned as text and labelled as such.
                 let combined = format!("{}{}", execution.stdout, execution.stderr);
-                output.output = capped(&combined, self.limits.max_output_bytes);
-                output.truncated |= combined.len() > self.limits.max_output_bytes;
+                output.output = self.text(&combined, &request, &mut output);
                 if request.command == CargoCommand::Add {
                     output.added = added(&execution.stderr);
                 }
             }
         }
         json_output(&output)
+    }
+
+    /// Cargo's text, trimmed unless the request asked for all of it, then capped.
+    fn text(&self, text: &str, request: &CargoRequest, output: &mut CargoOutput) -> String {
+        let text = if request.full {
+            text.to_owned()
+        } else {
+            let source = match request.command {
+                CargoCommand::Test => Source::Test,
+                CargoCommand::FmtCheck => Source::FormatCheck,
+                _ => Source::Other,
+            };
+            let trimmed = trim::trim(text, &self.root, source);
+            output.trimmed = trimmed.summary();
+            trimmed.text
+        };
+        output.truncated |= text.len() > self.limits.max_output_bytes;
+        capped(&text, self.limits.max_output_bytes)
     }
 }
 
@@ -510,7 +540,9 @@ impl ToolRuntime for CargoTool {
                  use those when a build fails for a missing dependency. fmt formats every file \
                  in the workspace, existing tests included, unless files names the ones to \
                  format; read a file again after it. fmt_check only reports. run is for programs that exit \
-                 and is stopped after two minutes. Containment: {}.",
+                 and is stopped after two minutes. Output leaves out progress lines and passing \
+                 tests and shortens repeated diagnostics, trimmed says what went, and full \
+                 returns all of it. Containment: {}.",
                 self.sandbox.label()
             ),
             input_schema: json!({
@@ -553,6 +585,10 @@ impl ToolRuntime for CargoTool {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Only for fmt and fmt_check: the .rs files to format, leaving every other file as it is."
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": "Return Cargo's output untrimmed: progress, passing tests and every diagnostic rendered in full."
                     }
                 },
                 "required": ["command"],
@@ -630,6 +666,8 @@ struct CargoRequest {
     args: Vec<String>,
     #[serde(default)]
     files: Vec<String>,
+    #[serde(default)]
+    full: bool,
 }
 
 impl CargoRequest {
@@ -644,6 +682,7 @@ impl CargoRequest {
             dev: false,
             args: Vec::new(),
             files: Vec::new(),
+            full: false,
         }
     }
 
@@ -831,6 +870,9 @@ struct CargoOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     added: Vec<String>,
     output: String,
+    /// What was cut from `output` and `diagnostics` to keep them short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trimmed: Option<String>,
     truncated: bool,
     /// Protected paths this command changed, which have been put back.
     #[serde(skip_serializing_if = "Vec::is_empty")]

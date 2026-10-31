@@ -188,6 +188,42 @@ async fn a_long_failing_test_run_keeps_its_summary() {
 }
 
 #[tokio::test]
+async fn a_test_run_leaves_out_progress_and_passing_tests_unless_asked() {
+    let fixture = Fixture::new(
+        "#[test]\nfn passes() {}\n\n#[test]\nfn fails() {\n    panic!(\"the failure\");\n}\n",
+    );
+    let tool = fixture.tool();
+
+    let trimmed = parse(
+        &tool
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+    let full = parse(
+        &tool
+            .execute(&call(json!({"command": "test", "full": true})))
+            .await
+            .unwrap(),
+    );
+
+    let text = trimmed["output"].as_str().unwrap();
+    assert!(text.contains("the failure"), "{text}");
+    assert!(
+        text.contains("test result: FAILED. 1 passed; 1 failed"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Compiling") && !text.contains("Running"),
+        "{text}"
+    );
+    assert!(!text.contains("passes ... ok"), "{text}");
+    assert!(trimmed["trimmed"].as_str().unwrap().contains("pass full"));
+    assert!(full["output"].as_str().unwrap().contains("passes ... ok"));
+    assert!(full.get("trimmed").is_none());
+}
+
+#[tokio::test]
 async fn metadata_is_summarised_rather_than_returned_whole() {
     let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
 
@@ -481,7 +517,7 @@ async fn a_confined_run_gets_a_temporary_directory_inside_the_workspace() {
 
     let output = fixture
         .sandboxed()
-        .execute(&call(json!({"command": "test"})))
+        .execute(&call(json!({"command": "test", "full": true})))
         .await
         .unwrap();
     let output = parse(&output);
