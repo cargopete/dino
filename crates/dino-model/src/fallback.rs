@@ -1,9 +1,10 @@
-//! A second provider that takes over when the first refuses the account.
+//! Further providers that take over, in order, when the one in use refuses
+//! the account.
 //!
-//! Only [`ModelError::Account`] moves the session across: a spent quota or a
+//! Only [`ModelError::Account`] moves the session along: a spent quota or a
 //! lapsed subscription will not recover within a session, whereas a dropped
 //! connection or a rate limit will, and the core already retries those. Once
-//! across, the session stays there.
+//! moved, the session does not go back.
 
 use dino_protocol::ModelProfile;
 use dino_protocol::ProviderKind;
@@ -21,53 +22,47 @@ use crate::SessionState;
 pub type SwitchNotice = Box<dyn Fn(&str) + Send>;
 
 pub struct FallbackSession {
-    primary: Box<dyn ModelSession>,
-    backup: Box<dyn ModelSession>,
-    on_backup: bool,
+    /// The primary, then each fallback in the order it is tried.
+    chain: Vec<Box<dyn ModelSession>>,
+    active: usize,
     notice: SwitchNotice,
 }
 
 impl FallbackSession {
-    /// `notice` is told why the session moved, once, when it does.
+    /// `notice` is told why the session moved, each time it does.
     #[must_use]
     pub fn new(
         primary: Box<dyn ModelSession>,
-        backup: Box<dyn ModelSession>,
+        fallbacks: Vec<Box<dyn ModelSession>>,
         notice: SwitchNotice,
     ) -> Self {
+        let mut chain = vec![primary];
+        chain.extend(fallbacks);
         Self {
-            primary,
-            backup,
-            on_backup: false,
+            chain,
+            active: 0,
             notice,
         }
     }
 
     fn active(&self) -> &dyn ModelSession {
-        if self.on_backup {
-            &*self.backup
-        } else {
-            &*self.primary
-        }
+        &*self.chain[self.active]
     }
 
     fn active_mut(&mut self) -> &mut dyn ModelSession {
-        if self.on_backup {
-            &mut *self.backup
-        } else {
-            &mut *self.primary
-        }
+        &mut *self.chain[self.active]
     }
 
     fn switch(&mut self, reason: &str) -> Result<(), ModelError> {
-        let state = self.primary.export_state()?;
-        let handed = hand_over(&state, self.backup.profile())?;
-        self.backup.restore_state(&handed)?;
-        self.on_backup = true;
+        let (from, to) = (self.active, self.active + 1);
+        let state = self.chain[from].export_state()?;
+        let handed = hand_over(&state, self.chain[to].profile())?;
+        self.chain[to].restore_state(&handed)?;
+        self.active = to;
         (self.notice)(&format!(
             "{} refused the account ({reason}); continuing on {}",
-            self.primary.profile().display_name,
-            self.backup.profile().display_name,
+            self.chain[from].profile().display_name,
+            self.chain[to].profile().display_name,
         ));
         Ok(())
     }
@@ -80,17 +75,15 @@ impl ModelSession for FallbackSession {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
-            if self.on_backup {
-                return self.backup.next(input).await;
-            }
-            // An account refusal arrives before anything streams, so the
-            // primary's history is untouched and the same input can go across.
-            match self.primary.next(input.clone()).await {
-                Err(ModelError::Account(reason)) => {
-                    self.switch(&reason)?;
-                    self.backup.next(input).await
+            loop {
+                // An account refusal arrives before anything streams, so the
+                // history is untouched and the same input can go across.
+                match self.chain[self.active].next(input.clone()).await {
+                    Err(ModelError::Account(reason)) if self.active + 1 < self.chain.len() => {
+                        self.switch(&reason)?;
+                    }
+                    other => return other,
                 }
-                other => other,
             }
         })
     }
@@ -107,16 +100,22 @@ impl ModelSession for FallbackSession {
         self.active().export_state()
     }
 
+    /// A saved session continues on the model that wrote it, or failing that
+    /// the first of the chain on its provider.
     fn restore_state(&mut self, state: &SessionState) -> Result<(), ModelError> {
-        if state.provider == self.backup.profile().provider
-            && state.provider != self.primary.profile().provider
-        {
-            self.backup.restore_state(state)?;
-            self.on_backup = true;
-            return Ok(());
-        }
-        self.on_backup = false;
-        self.primary.restore_state(state)
+        let index = self
+            .chain
+            .iter()
+            .position(|session| session.profile().key == state.model_key)
+            .or_else(|| {
+                self.chain
+                    .iter()
+                    .position(|session| session.profile().provider == state.provider)
+            })
+            .unwrap_or(0);
+        self.chain[index].restore_state(state)?;
+        self.active = index;
+        Ok(())
     }
 }
 
@@ -309,9 +308,130 @@ fn call_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    /// A session that refuses the account or answers with an empty stream, and
+    /// records which model was asked and what was handed to it.
+    struct Fake {
+        profile: ModelProfile,
+        refuses: bool,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ModelSession for Fake {
+        fn profile(&self) -> &ModelProfile {
+            &self.profile
+        }
+
+        fn next(&mut self, _input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("ask {}", self.profile.key));
+            let refuses = self.refuses;
+            Box::pin(async move {
+                if refuses {
+                    return Err(ModelError::Account("insufficient balance".into()));
+                }
+                let stream: ModelEventStream = Box::pin(futures_util::stream::empty());
+                Ok(stream)
+            })
+        }
+
+        fn export_state(&self) -> Result<SessionState, ModelError> {
+            Ok(SessionState {
+                provider: self.profile.provider,
+                model_key: self.profile.key.clone(),
+                version: crate::qwen::STATE_VERSION,
+                payload: json!([{"role": "user", "content": "fix it"}]),
+            })
+        }
+
+        fn restore_state(&mut self, state: &SessionState) -> Result<(), ModelError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("{} takes {}", self.profile.key, state.model_key));
+            Ok(())
+        }
+    }
+
+    fn chain(refusing: &[&str], log: &Arc<Mutex<Vec<String>>>) -> FallbackSession {
+        let fake = |key: &str| -> Box<dyn ModelSession> {
+            Box::new(Fake {
+                profile: crate::builtin_profile(key).unwrap(),
+                refuses: refusing.contains(&key),
+                log: Arc::clone(log),
+            })
+        };
+        FallbackSession::new(
+            fake("kimi-k3.1-pro"),
+            vec![fake("qwen3.7-max"), fake("claude-opus-5.5")],
+            Box::new(|_| {}),
+        )
+    }
+
+    fn ask() -> TurnInput {
+        TurnInput::User {
+            content: "fix it".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn each_refusal_moves_the_session_one_model_along() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut session = chain(&["kimi-k3.1-pro", "qwen3.7-max"], &log);
+
+        assert!(session.next(ask()).await.is_ok());
+        assert!(session.next(ask()).await.is_ok());
+
+        assert_eq!(session.profile().key, "claude-opus-5.5");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "ask kimi-k3.1-pro",
+                "qwen3.7-max takes qwen3.7-max",
+                "ask qwen3.7-max",
+                "claude-opus-5.5 takes claude-opus-5.5",
+                "ask claude-opus-5.5",
+                "ask claude-opus-5.5",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_last_refusal_is_the_error() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut session = chain(&["kimi-k3.1-pro", "qwen3.7-max", "claude-opus-5.5"], &log);
+
+        let Err(error) = session.next(ask()).await else {
+            panic!("every model refused");
+        };
+
+        assert!(matches!(error, ModelError::Account(_)), "{error}");
+        assert_eq!(session.profile().key, "claude-opus-5.5");
+    }
+
+    #[test]
+    fn a_saved_session_resumes_on_the_model_that_wrote_it() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut session = chain(&[], &log);
+        let saved = SessionState {
+            provider: ProviderKind::Qwen,
+            model_key: "qwen3.7-max".into(),
+            version: crate::qwen::STATE_VERSION,
+            payload: json!([]),
+        };
+
+        session.restore_state(&saved).unwrap();
+
+        assert_eq!(session.profile().key, "qwen3.7-max");
+    }
 
     #[test]
     fn a_history_survives_the_round_trip_back_to_chat() {

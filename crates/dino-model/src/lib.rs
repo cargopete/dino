@@ -278,8 +278,30 @@ pub(crate) fn unparsed(raw: &str, error: &serde_json::Error) -> Value {
     }})
 }
 
-/// The model used when none is selected. Open weights, so anyone can serve it.
-pub const DEFAULT_PROFILE: &str = "qwen3.8-27b";
+/// The model used when none is selected, chosen on the 2026-10-30 run in
+/// `evals/MODEL-CHOICE.md`.
+pub const DEFAULT_PROFILE: &str = "kimi-k3.1-pro";
+
+/// Where a hosted model on the chat adapter is served, for the profiles that
+/// do not take the Qwen endpoint, and the variable that holds its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedEndpoint {
+    pub api_base: &'static str,
+    pub key_variable: &'static str,
+}
+
+#[must_use]
+pub fn hosted_endpoint(key: &str) -> Option<HostedEndpoint> {
+    let (api_base, key_variable) = match key {
+        "kimi-k3.1-pro" => ("https://api.moonshot.ai/v1", "MOONSHOT_API_KEY"),
+        "grok-4.7" => ("https://api.x.ai/v1", "XAI_API_KEY"),
+        _ => return None,
+    };
+    Some(HostedEndpoint {
+        api_base,
+        key_variable,
+    })
+}
 
 /// The MVP coding targets, without development-only entries.
 #[must_use]
@@ -596,8 +618,8 @@ fn deepseek_v4_pro() -> ModelProfile {
     dashscope("deepseek-v4-pro", "DeepSeek V4 Pro", 131_072, false)
 }
 
-/// OpenAI-compatible chat endpoints, served through the Qwen adapter with
-/// `--api-base` and the provider's key in `QWEN_API_KEY`.
+/// OpenAI-compatible chat endpoints, served through the Qwen adapter at the
+/// address and with the key [`hosted_endpoint`] names.
 fn kimi_k3_1_pro() -> ModelProfile {
     ModelProfile {
         display_name: "Kimi K3.1 Pro (Moonshot)".into(),
@@ -734,6 +756,16 @@ mod tests {
         assert_eq!(unique_keys.len(), all.len());
         assert_eq!(all.len(), 21);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
+    }
+
+    #[test]
+    fn hosted_endpoints_belong_to_chat_profiles() {
+        for key in ["kimi-k3.1-pro", "grok-4.7"] {
+            let profile = builtin_profile(key).expect("a built-in profile");
+            assert_eq!(profile.provider, ProviderKind::Qwen, "{key}");
+            assert!(hosted_endpoint(key).is_some(), "{key}");
+        }
+        assert_eq!(hosted_endpoint("qwen3.7-max"), None);
     }
 
     #[test]

@@ -153,7 +153,7 @@ enum TurnOutcome {
 /// credential. A check that fails is a report and an exit code, not an error.
 pub(crate) async fn execute(mut settings: RunSettings, args: ProbeArgs) -> Result<ExitCode> {
     // A probe measures one model; a fallback would answer for it.
-    settings.fallback = None;
+    settings.fallback.clear();
     style::enable(args.plain);
     let options = options_from(&settings.profile, args.canary_tokens, true);
     let report = run_probe(&mut LiveHost { settings }, &options).await?;
