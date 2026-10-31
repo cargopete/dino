@@ -118,7 +118,7 @@ def rescore(case, ws):
     """Run the hidden tests on a copy of the workspace as the model left it."""
     dst = os.path.join(B, "rescore", os.path.basename(os.path.dirname(ws)) + "-" + case)
     shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(ws, dst, ignore=shutil.ignore_patterns(".dino"))
+    shutil.copytree(ws, dst, ignore=shutil.ignore_patterns(".dino", "target"))
     shutil.copytree(os.path.join(CORPUS, case, "hidden"), dst, dirs_exist_ok=True)
     r = subprocess.run(["cargo", "test", "--offline", "--workspace", "--no-fail-fast"], cwd=dst, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
     # Only the case's own test files count, not tests the model wrote.

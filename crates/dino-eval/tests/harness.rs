@@ -432,6 +432,87 @@ async fn hidden_tests_decide_a_case_the_compiler_cannot() {
     );
 }
 
+#[tokio::test]
+async fn hidden_tests_replacing_a_file_the_model_built_are_the_ones_run() {
+    let scratch = Scratch::new();
+    let case = hidden_test_case(&scratch);
+
+    let outcome = run(
+        &case,
+        &scratch,
+        vec![
+            tool_turn(
+                "c1",
+                "write_file",
+                json!({"path": "tests/two.rs", "content": "#[test]\nfn two_is_two() {}\n"}),
+            ),
+            tool_turn("c2", "cargo", json!({"command": "test"})),
+            text_turn("Done."),
+            text_turn("Done."),
+        ],
+    )
+    .await;
+
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.starts_with("hidden tests failed")),
+        "failures: {:?}",
+        outcome.failures
+    );
+}
+
+#[tokio::test]
+async fn a_rescore_runs_the_hidden_tests_again_on_the_workspace_left() {
+    let scratch = Scratch::new();
+    let case = hidden_test_case(&scratch);
+    let sha = digest(&fs::read(case.directory.join("workspace/src/lib.rs")).unwrap());
+    let turns = vec![
+        tool_turn(
+            "c1",
+            "apply_patch",
+            patch("src/lib.rs", &sha, "    1\n", "    2\n"),
+        ),
+        text_turn("Done."),
+        text_turn("Done."),
+    ];
+    let build = |_prompt: String, _tools: Vec<dino_protocol::ToolDefinition>| {
+        Ok(Box::new(Scripted {
+            profile: dino_model::builtin_profiles().remove(0),
+            turns: VecDeque::from(turns.clone()),
+        }) as Box<dyn ModelSession>)
+    };
+    let variant = dino_eval::Variant {
+        score: true,
+        ..dino_eval::Variant::default()
+    };
+    let recorded = run_case(&case, &scratch.path, Arc::new(Unconfined), &variant, &build)
+        .await
+        .unwrap();
+    assert!(recorded.passed, "failures: {:?}", recorded.failures);
+
+    let mut stale = recorded.clone();
+    let measured = stale.measured.as_mut().unwrap();
+    measured.hidden[0].passed = false;
+    stale.score = None;
+    stale.passed = false;
+    stale.failures = vec!["hidden tests failed: recorded wrongly".to_owned()];
+    let sandbox_for = |_: &Path| Ok(Arc::new(Unconfined) as Arc<dyn dino_sandbox::Sandbox>);
+    dino_eval::rescore(
+        &case,
+        &mut stale,
+        &scratch.path.join("rescore"),
+        &sandbox_for,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(stale.measured, recorded.measured);
+    assert_eq!(stale.score, recorded.score);
+    assert!(stale.passed, "failures: {:?}", stale.failures);
+}
+
 #[test]
 fn a_case_asking_for_hidden_tests_must_have_them() {
     let scratch = Scratch::new();

@@ -183,7 +183,7 @@ impl Case {
                 ))
             })?;
         }
-        copy_tree(&self.directory.join("workspace"), &workspace)?;
+        copy_tree(&self.directory.join("workspace"), &workspace, &[])?;
         Ok(workspace)
     }
 }
@@ -202,7 +202,7 @@ pub fn overlay_reference(case: &Case, workspace: &Path) -> Result<(), EvalError>
             case.name
         )));
     }
-    copy_tree(&reference, workspace)
+    copy_tree(&reference, workspace, &[])
 }
 
 /// Lays the case's hidden tests over a finished workspace.
@@ -211,10 +211,20 @@ pub fn overlay_reference(case: &Case, workspace: &Path) -> Result<(), EvalError>
 ///
 /// Returns [`EvalError`] when the copy fails.
 pub fn overlay_hidden(case: &Case, workspace: &Path) -> Result<(), EvalError> {
-    copy_tree(&case.directory.join("hidden"), workspace)
+    copy_tree(&case.directory.join("hidden"), workspace, &[])
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<(), EvalError> {
+/// Copies the workspace a run left, without its build output, so the copy
+/// builds from the sources alone.
+///
+/// # Errors
+///
+/// Returns [`EvalError`] when the copy fails.
+pub(crate) fn copy_left_workspace(from: &Path, to: &Path) -> Result<(), EvalError> {
+    copy_tree(from, to, &["target", ".dino"])
+}
+
+fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> Result<(), EvalError> {
     std::fs::create_dir_all(to)
         .map_err(|error| EvalError::Case(format!("cannot create {}: {error}", to.display())))?;
     let entries = std::fs::read_dir(from)
@@ -222,6 +232,9 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), EvalError> {
     for entry in entries {
         let entry = entry
             .map_err(|error| EvalError::Case(format!("cannot read {}: {error}", from.display())))?;
+        if skip.iter().any(|name| entry.file_name() == *name) {
+            continue;
+        }
         let target = to.join(entry.file_name());
         let kind = entry.file_type().map_err(|error| {
             EvalError::Case(format!(
@@ -230,11 +243,20 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), EvalError> {
             ))
         })?;
         if kind.is_dir() {
-            copy_tree(&entry.path(), &target)?;
+            copy_tree(&entry.path(), &target, skip)?;
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), &target).map_err(|error| {
-                EvalError::Case(format!("cannot copy into {}: {error}", target.display()))
-            })?;
+            // macOS keeps the source's mtime on copy, so Cargo would take an
+            // overlaid test for the older file it replaced and run a stale binary.
+            std::fs::copy(entry.path(), &target)
+                .and_then(|_| {
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&target)?
+                        .set_modified(std::time::SystemTime::now())
+                })
+                .map_err(|error| {
+                    EvalError::Case(format!("cannot copy into {}: {error}", target.display()))
+                })?;
         }
         // Symbolic links in a fixture are skipped rather than followed. A
         // fixture that needs one is describing a case this harness cannot yet

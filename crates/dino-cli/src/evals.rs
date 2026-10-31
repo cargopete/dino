@@ -102,6 +102,10 @@ pub struct EvalArgs {
     /// or more. RFC-0019 section 5.
     #[arg(long)]
     pub calibrate: bool,
+    /// Rescore a record written by `--json --score` and print it again, with no
+    /// model. Hidden tests are run afresh where the run's workspace remains.
+    #[arg(long, value_name = "RECORD")]
+    pub rescore: Option<PathBuf>,
     /// Run the cases through another agent's own CLI instead of dino, scored the
     /// same way. `--model` is then that harness's model name, passed through.
     #[arg(long, value_enum)]
@@ -138,6 +142,9 @@ pub async fn run(args: EvalArgs) -> Result<ExitCode> {
     style::enable(args.plain);
     if args.calibrate {
         return calibrate(&args).await;
+    }
+    if let Some(record) = &args.rescore {
+        return rescore(&args, record).await;
     }
     let profile = match args.harness {
         None => Some(config::resolve_profile(args.model.as_deref())?),
@@ -265,7 +272,8 @@ fn report(
     cases: &[Case],
     outcomes: &[dino_eval::Outcome],
 ) -> Result<()> {
-    let summary = (args.score || args.harness.is_some()).then(|| summarise(cases, outcomes));
+    let summary = (args.score || args.harness.is_some() || args.rescore.is_some())
+        .then(|| summarise(cases, outcomes));
     if args.json {
         match &summary {
             Some(summary) => println!(
@@ -377,6 +385,51 @@ fn eval_settings(
         plain: args.plain,
         fallback: Vec::new(),
     }
+}
+
+/// Rescores a stored record and reports it as a run would have.
+async fn rescore(args: &EvalArgs, record: &Path) -> Result<ExitCode> {
+    #[derive(serde::Deserialize)]
+    struct Record {
+        model: String,
+        trials: u32,
+        outcomes: Vec<Outcome>,
+    }
+    let Record {
+        model,
+        trials,
+        mut outcomes,
+    } = serde_json::from_str(&std::fs::read_to_string(record)?)?;
+    let all = Case::load_corpus(&args.corpus)?;
+    let scratch = match &args.scratch {
+        Some(path) => path.clone(),
+        None => std::env::temp_dir().join(format!("dino-rescore-{}", std::process::id())),
+    };
+    std::fs::create_dir_all(&scratch)?;
+    let scratch = std::path::absolute(&scratch)?;
+    let sandbox_for = |workspace: &std::path::Path| {
+        config::build_sandbox(args.sandbox, workspace, &[])
+            .map_err(|error| dino_eval::EvalError::Setup(error.to_string()))
+    };
+    let mut cases: Vec<Case> = Vec::new();
+    for outcome in &mut outcomes {
+        let Some(case) = all.iter().find(|case| case.name == outcome.case) else {
+            bail!(
+                "no case named {:?} in {}",
+                outcome.case,
+                args.corpus.display()
+            );
+        };
+        dino_eval::rescore(case, outcome, &scratch, &sandbox_for).await?;
+        if !cases.iter().any(|known| known.name == case.name) {
+            cases.push(case.clone());
+        }
+        if !args.json {
+            print_case(outcome);
+        }
+    }
+    report(args, &model, trials, &cases, &outcomes)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Checks every selected case against the scorer's floor and ceiling.
