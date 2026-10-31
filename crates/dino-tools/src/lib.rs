@@ -194,7 +194,8 @@ impl WorkspaceTools {
                 description: "Replace exact UTF-8 text in a previously read workspace file: one \
                               old_text with new_text, or several replacements at once in edits. \
                               Each old_text must occur exactly once in the file as it was before \
-                              the call, and edits may not overlap."
+                              the call, unless the same edit is given once for each occurrence, \
+                              and edits may not overlap."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -983,22 +984,39 @@ fn replace_all(text: &str, edits: &[Edit]) -> Result<String, ToolError> {
             .match_indices(&edit.old_text)
             .map(|(at, _)| at)
             .collect();
-        match found.as_slice() {
-            [at] => spans.push((*at, *at + edit.old_text.len(), edit)),
-            [] => {
-                return Err(ToolError::new(format!(
-                    "{which}old_text must match exactly once, found 0 matches{}",
-                    nearest_lines(text, &edit.old_text)
-                )));
-            }
-            _ => {
-                return Err(ToolError::new(format!(
-                    "{which}old_text must match exactly once, found {} matches; include more \
-                     surrounding lines to make it unique",
-                    found.len()
-                )));
-            }
+        // The same edit given once per occurrence takes the occurrences in order.
+        let repeats: Vec<usize> = (0..edits.len())
+            .filter(|&other| {
+                edits[other].old_text == edit.old_text && edits[other].new_text == edit.new_text
+            })
+            .collect();
+        let nth = repeats
+            .iter()
+            .position(|&other| other == index)
+            .unwrap_or(0);
+        if found.len() == repeats.len() {
+            let at = found[nth];
+            spans.push((at, at + edit.old_text.len(), edit));
+            continue;
         }
+        if found.is_empty() {
+            return Err(ToolError::new(format!(
+                "{which}old_text must match exactly once, found 0 matches{}",
+                nearest_lines(text, &edit.old_text)
+            )));
+        }
+        let expected = if repeats.len() == 1 {
+            "exactly once".to_owned()
+        } else {
+            format!("{} times, once for each copy of this edit", repeats.len())
+        };
+        return Err(ToolError::new(format!(
+            "{which}old_text must match {expected}, found {} {}; add a line that tells the one \
+             you mean apart, or give this edit once per match to change every one{}",
+            found.len(),
+            if found.len() == 1 { "match" } else { "matches" },
+            matching_lines(text, &found, &edit.old_text)
+        )));
     }
     spans.sort_by_key(|(start, _, _)| *start);
     if spans.windows(2).any(|pair| pair[0].1 > pair[1].0) {
@@ -1019,6 +1037,32 @@ fn replace_all(text: &str, edits: &[Edit]) -> Result<String, ToolError> {
 
 /// How many file lines a miss shows, at most.
 const NEAREST_LINES: usize = 12;
+
+/// How many of an ambiguous `old_text`'s matches are shown.
+const SHOWN_MATCHES: usize = 6;
+
+/// Each match of an ambiguous `old_text` with a line either side, so the next
+/// attempt can pick one without reading the file again.
+fn matching_lines(text: &str, found: &[usize], old_text: &str) -> String {
+    let file: Vec<&str> = text.lines().collect();
+    let line_of = |at: usize| text[..at].matches('\n').count();
+    let mut shown = Vec::new();
+    for &at in found.iter().take(SHOWN_MATCHES) {
+        let first = line_of(at);
+        let last = line_of(at + old_text.trim_end_matches('\n').len());
+        let start = first.saturating_sub(1);
+        let end = (last + 2).min(file.len()).min(start + NEAREST_LINES);
+        let lines: Vec<String> = (start..end)
+            .map(|index| format!("{:>6}\t{}", index + 1, file[index]))
+            .collect();
+        shown.push(format!("line {}:\n{}", first + 1, lines.join("\n")));
+    }
+    let more = found.len().saturating_sub(SHOWN_MATCHES);
+    if more > 0 {
+        shown.push(format!("and {more} more"));
+    }
+    format!(":\n{}", shown.join("\n"))
+}
 
 /// The file's lines where a missed `old_text` most likely meant, so the next
 /// attempt can copy them. Matching ignores leading and trailing whitespace on
@@ -1965,6 +2009,70 @@ mod tests {
         assert_eq!(
             fs::read(workspace.path.join("src/lib.rs")).unwrap(),
             original
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_edit_is_refused_with_every_match_shown() {
+        let workspace = TestWorkspace::new();
+        let original = "fn a() {\n    x(1);\n}\n\nfn b() {\n    x(1);\n}\n";
+        workspace.write("src/lib.rs", original);
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+
+        let error = tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": "    x(1);", "new_text": "    x(2);"}),
+            ))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("found 2 matches"), "{error}");
+        assert!(
+            error.contains("line 2:\n     1\tfn a() {\n     2\t    x(1);\n     3\t}"),
+            "{error}"
+        );
+        assert!(
+            error.contains("line 6:\n     5\tfn b() {\n     6\t    x(1);\n     7\t}"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn an_edit_given_once_per_occurrence_changes_each() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "x(1);\ny(1);\nx(1);\n");
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+        let twice = json!({"old_text": "x(1);", "new_text": "x(2);"});
+
+        let error = tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "edits": [twice, twice, twice]}),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("3 times, once for each copy"), "{error}");
+
+        tools
+            .execute_sync(&call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "edits": [twice, {"old_text": "y(1)", "new_text": "y(2)"}, twice]}),
+            ))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "x(2);\ny(2);\nx(2);\n"
         );
     }
 
