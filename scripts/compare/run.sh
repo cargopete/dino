@@ -30,7 +30,10 @@ trials=${TRIALS:-3}
 git -C "$repo" diff --quiet HEAD -- crates || git -C "$repo" diff HEAD -- crates > "$out/$name.patch"
 
 cd "$repo"
+# The record is written outside the repo and moved in at the end, so git
+# operations on the checkout during a long run cannot lose it.
 status=0
 dino eval --plain --json --score --trials "$trials" --scratch "$work/$name" "$@" \
-    > "$out/$name.json" 2> "$work/$name.err" || status=$?
+    > "$work/$name.json" 2> "$work/$name.err" || status=$?
+mv "$work/$name.json" "$out/$name.json"
 echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ), exit $status" >> "$out/$name.manifest"
