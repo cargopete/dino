@@ -424,6 +424,8 @@ fn claude_haiku_5_5() -> ModelProfile {
         display_name: "Claude Haiku 5.5".into(),
         status: ProfileStatus::Development,
         price: Some(Pricing::new(0.10, 0.01, 0.50)),
+        // Low against high on the #195 subset, four trials each: 97 vs 97 at half the cost.
+        default_effort: Some(ReasoningEffort::Low),
         ..claude_sonnet()
     }
 }
