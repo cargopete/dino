@@ -119,8 +119,9 @@ pub struct EvalArgs {
     #[arg(long, value_enum)]
     pub harness: Option<ExternalHarness>,
     /// Point the harness at this provider's API instead of its own, so harnesses
-    /// can be compared on one model. Codex, Claude Code and Pi; `--model` is the
-    /// provider's model name. The person's own configuration is left untouched.
+    /// can be compared on one model. Claude Code, Pi, and Codex on Moonshot;
+    /// `--model` is the provider's model name. The person's own configuration
+    /// is left untouched.
     #[arg(long, value_enum, requires = "harness")]
     pub harness_provider: Option<HarnessProvider>,
     /// Before a run ends, have this model review the change with none of the
@@ -154,12 +155,14 @@ impl From<ExternalHarness> for dino_eval::external::Harness {
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum HarnessProvider {
     Moonshot,
+    Anthropic,
 }
 
 impl From<HarnessProvider> for dino_eval::external::Provider {
     fn from(provider: HarnessProvider) -> Self {
         match provider {
             HarnessProvider::Moonshot => Self::Moonshot,
+            HarnessProvider::Anthropic => Self::Anthropic,
         }
     }
 }
