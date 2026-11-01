@@ -154,7 +154,7 @@ impl AnthropicSession {
                     .chain(std::iter::once(json!({"type": "text", "text": content})))
                     .collect(),
             },
-            TurnInput::ToolResults { results } => AnthropicMessage {
+            TurnInput::ToolResults { results, note } => AnthropicMessage {
                 role: Role::User,
                 content: results
                     .into_iter()
@@ -166,6 +166,8 @@ impl AnthropicSession {
                             "is_error": result.output.is_error,
                         })
                     })
+                    // The results must come first in the message, so the note follows.
+                    .chain(note.map(|note| json!({"type": "text", "text": note})))
                     .collect(),
             },
         }
@@ -1032,20 +1034,22 @@ mod tests {
                     "input": {"path": "src/lib.rs"},
                 })],
             },
-            AnthropicMessage {
-                role: Role::User,
-                content: vec![json!({
-                    "type": "tool_result",
-                    "tool_use_id": "call-1",
-                    "content": "fn main() {}",
-                    "is_error": false,
-                })],
-            },
+            AnthropicSession::pending_message(TurnInput::ToolResults {
+                results: vec![dino_protocol::ToolResult {
+                    call_id: "call-1".into(),
+                    output: dino_protocol::ToolOutput::success("fn main() {}"),
+                }],
+                note: Some("[dino: verified]".into()),
+            }),
         ]);
 
         let state = original.export_state().unwrap();
         let mut restored = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
         restored.restore_state(&state).unwrap();
+        assert_eq!(
+            restored.history.lock().unwrap()[2].content[1],
+            json!({"type": "text", "text": "[dino: verified]"})
+        );
 
         // Serialising and deserialising is not the claim. The claim is that the
         // next request is the one the original would have sent.
@@ -1204,13 +1208,18 @@ mod tests {
                 call_id: "toolu-1".into(),
                 output: dino_protocol::ToolOutput::error("not found"),
             }],
+            note: Some("[dino: verified]".into()),
         });
         let body = session.request_body(&pending).unwrap();
 
         assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"][0]["type"], "tool_result");
-        assert_eq!(body["messages"][0]["content"][0]["tool_use_id"], "toolu-1");
-        assert_eq!(body["messages"][0]["content"][0]["is_error"], true);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {"type": "tool_result", "tool_use_id": "toolu-1", "content": "not found", "is_error": true},
+                {"type": "text", "text": "[dino: verified]"},
+            ])
+        );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "high");
         assert_eq!(body["cache_control"]["type"], "ephemeral");

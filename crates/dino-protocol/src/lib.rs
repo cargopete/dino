@@ -258,6 +258,10 @@ pub enum TurnInput {
     },
     ToolResults {
         results: Vec<ToolResult>,
+        /// Dino's own words for the model, sent after the results as a message
+        /// rather than inside them, where a model rightly distrusts instructions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 
@@ -550,9 +554,9 @@ pub enum AgentEvent {
         model_turn: u32,
         turns_left: u32,
     },
-    /// A note dino added to a call's result after it finished, such as a loop
-    /// noticed or the work verified. Its own event because the finished result
-    /// is kept as the tool returned it, for the readers that parse it.
+    /// A note dino sent the model after a call finished, such as a loop noticed
+    /// or the work verified. It goes with the turn's results, not inside any of
+    /// them, so each result stays as the tool returned it.
     Noted {
         model_turn: u32,
         call_id: String,

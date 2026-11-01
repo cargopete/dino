@@ -169,7 +169,7 @@ impl QwenSession {
                 message.images = images.iter().map(dino_protocol::Image::data_url).collect();
                 vec![message]
             }
-            TurnInput::ToolResults { results } => results
+            TurnInput::ToolResults { results, note } => results
                 .into_iter()
                 .map(|result| {
                     let content = if result.output.is_error {
@@ -179,6 +179,7 @@ impl QwenSession {
                     };
                     ChatMessage::tool(result.call_id, content)
                 })
+                .chain(note.map(ChatMessage::user))
                 .collect(),
         }
     }
@@ -1045,19 +1046,26 @@ mod tests {
                 tool_call_id: None,
                 images: Vec::new(),
             },
-            ChatMessage {
-                role: Role::Tool,
-                content: Some("fn main() {}".to_owned()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                tool_call_id: Some("call-1".into()),
-                images: Vec::new(),
-            },
         ]);
+        original
+            .history
+            .lock()
+            .unwrap()
+            .extend(QwenSession::pending_messages(TurnInput::ToolResults {
+                results: vec![dino_protocol::ToolResult {
+                    call_id: "call-1".into(),
+                    output: dino_protocol::ToolOutput::success("fn main() {}"),
+                }],
+                note: Some("[dino: verified]".into()),
+            }));
 
         let state = original.export_state().unwrap();
         let mut restored = build();
         restored.restore_state(&state).unwrap();
+        let history = restored.history.lock().unwrap().clone();
+        assert_eq!(history[2].content.as_deref(), Some("fn main() {}"));
+        assert_eq!(history[3].role, Role::User);
+        assert_eq!(history[3].content.as_deref(), Some("[dino: verified]"));
 
         let pending = QwenSession::pending_messages(TurnInput::User {
             content: "and now?".into(),
@@ -1332,11 +1340,15 @@ mod tests {
                 call_id: "call-1".into(),
                 output: dino_protocol::ToolOutput::success("fn main() {}"),
             }],
+            note: Some("[dino: verified]".into()),
         });
         let body = session.request_body(&pending).unwrap();
 
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["messages"][0]["role"], "tool");
+        assert_eq!(body["messages"][0]["content"], "fn main() {}");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "[dino: verified]");
         assert_eq!(
             body["chat_template_kwargs"],
             json!({"enable_thinking": true, "preserve_thinking": true})
@@ -1782,6 +1794,7 @@ mod tests {
                     output: dino_protocol::ToolOutput::success(format!("for {id}")),
                 })
                 .collect(),
+            note: None,
         };
         let body = session
             .request_body(&QwenSession::pending_messages(results))

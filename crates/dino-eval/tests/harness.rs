@@ -756,7 +756,7 @@ async fn a_run_that_hits_its_wall_fails_as_a_wall_and_nothing_else() {
 
 fn tool_text(input: &TurnInput) -> String {
     match input {
-        TurnInput::ToolResults { results } => results
+        TurnInput::ToolResults { results, .. } => results
             .last()
             .map(|result| result.output.content.clone())
             .unwrap_or_default(),

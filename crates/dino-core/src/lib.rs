@@ -390,7 +390,8 @@ struct Turn<'a> {
 
 /// What settling a turn's tool calls came to.
 enum Settled {
-    Results(Vec<ToolResult>),
+    /// The results, and what dino noticed while they ran.
+    Results(Vec<ToolResult>, Option<String>),
     /// The model reported a blocker, and this is what it said.
     Blocked(String),
     Cancelled,
@@ -440,7 +441,7 @@ pub struct Agent<S, T> {
     /// Tool results a run computed but never sent, because it hit the turn
     /// limit. The provider's history ends in those calls, so the next
     /// submission must answer them before anything else.
-    unsent: Option<Vec<ToolResult>>,
+    unsent: Option<(Vec<ToolResult>, Option<String>)>,
     loops: loops::LoopWatch,
     outcomes: outcomes::OutcomeWatch,
     /// Messages the person typed during a run, for its next tool results.
@@ -520,7 +521,7 @@ where
 
     /// The first turn of a submission, carrying any attached images.
     fn first_input(&mut self, content: String) -> TurnInput {
-        if let Some(mut results) = self.unsent.take() {
+        if let Some((mut results, note)) = self.unsent.take() {
             // Images wait for a submission that can carry them as a message.
             if let Some(last) = results.last_mut() {
                 let _ = write!(
@@ -529,7 +530,7 @@ where
                      were sent. The person has since written:]\n{content}"
                 );
             }
-            return TurnInput::ToolResults { results };
+            return TurnInput::ToolResults { results, note };
         }
         let images = std::mem::take(&mut self.pending_images);
         if images.is_empty() {
@@ -719,8 +720,8 @@ where
             }
         }
 
-        if let TurnInput::ToolResults { results } = input {
-            self.unsent = Some(results);
+        if let TurnInput::ToolResults { results, note } = input {
+            self.unsent = Some((results, note));
         }
         Err(AgentError::ModelTurnLimit(
             self.config.max_model_turns.get(),
@@ -748,6 +749,7 @@ where
         cancel: &CancellationToken,
     ) -> Result<Settled, AgentError> {
         let mut results = Vec::with_capacity(calls.len());
+        let mut notes = Vec::new();
         let mut reported_blocker = None;
         let classified: Vec<(ToolCall, ToolAction)> = calls
             .iter()
@@ -767,21 +769,20 @@ where
             }
             let note = self.loops.record(&call);
             let recorded = call.clone();
-            let Some(mut result) = self.settle(model_turn, call, events, cancel).await? else {
+            let Some(result) = self.settle(model_turn, call, events, cancel).await? else {
                 return Ok(Settled::Cancelled);
             };
             let progress = self.outcomes.record(&recorded, &result.output.content);
             for note in [note, progress].into_iter().flatten() {
-                result.output.content.push_str("\n\n");
-                result.output.content.push_str(&note);
                 self.emit(
                     AgentEvent::Noted {
                         model_turn,
                         call_id: result.call_id.clone(),
-                        note,
+                        note: note.clone(),
                     },
                     events,
                 )?;
+                notes.push(note);
             }
             // Only a call that went through counts: a refused one is a refusal.
             if !result.output.is_error {
@@ -791,7 +792,7 @@ where
         }
         Ok(match reported_blocker {
             Some(reason) => Settled::Blocked(reason),
-            None => Settled::Results(results),
+            None => Settled::Results(results, (!notes.is_empty()).then(|| notes.join("\n\n"))),
         })
     }
 
@@ -842,8 +843,8 @@ where
                 content: note.unwrap_or_default().to_owned(),
             }));
         }
-        let mut results = match self.settle_all(model_turn, calls, events, cancel).await? {
-            Settled::Results(results) => results,
+        let (mut results, noted) = match self.settle_all(model_turn, calls, events, cancel).await? {
+            Settled::Results(results, noted) => (results, noted),
             Settled::Blocked(reason) => {
                 let events = std::mem::take(events);
                 return Ok(Err(blocked(events, text.to_owned(), &reason, model_turn)));
@@ -860,7 +861,10 @@ where
         self.count_down(model_turn, &mut results, events, cancel)
             .await?;
         self.deliver_inbox(model_turn, &mut results, events)?;
-        Ok(Ok(TurnInput::ToolResults { results }))
+        Ok(Ok(TurnInput::ToolResults {
+            results,
+            note: noted,
+        }))
     }
 
     /// What to tell a model that ended its turn with work unfinished, if this
