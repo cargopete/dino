@@ -1,10 +1,16 @@
 //! The `dino probe` command.
 //!
-//! Five checks against one endpoint, the last of which, the costly context
-//! window, can be skipped. A failure here is a report, not a gate on
-//! `dino run`. Each check opens its own session, so history cannot leak between
-//! them. Thinking on and thinking off are two sessions: the switch is fixed
-//! when the session is built.
+//! Nine checks against one endpoint, the last of which, the costly context
+//! window, can be skipped, as can the four awkward histories before it. A
+//! failure here is a report, not a gate on `dino run`. Each check opens its own
+//! session, so history cannot leak between them. Thinking on and thinking off
+//! are two sessions: the switch is fixed when the session is built.
+//!
+//! The histories are seeded the way a fallback hands a conversation over, so
+//! they test that path too. Dino sends a note after tool results every turn, so
+//! that one must be answered. The other three it never means to send; what it
+//! needs from a provider sent one is a verdict, an answer or a refusal of the
+//! request, rather than a stream that breaks. Which of the two is evidence.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,12 +20,16 @@ use std::time::Instant;
 use anyhow::Result;
 use dino_model::ModelError;
 use dino_model::ModelSession;
+use dino_model::SessionState;
 use dino_protocol::ModelEvent;
 use dino_protocol::ModelProfile;
+use dino_protocol::ProviderKind;
 use dino_protocol::ReasoningSupport;
 use dino_protocol::TokenUsage;
 use dino_protocol::ToolCall;
 use dino_protocol::ToolDefinition;
+use dino_protocol::ToolOutput;
+use dino_protocol::ToolResult;
 use dino_protocol::TurnInput;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -37,6 +47,7 @@ const TAIL: &str = "DINOPROBETAIL";
 const SCHEMA: &str = "DINOPROBESCHEMA";
 const TOKEN: &str = "DINOPROBETOKEN";
 const WINDOW: &str = "DINOPROBEWINDOW";
+const NOTE: &str = "DINOPROBENOTE";
 
 const TOOL_PHRASE: &str = "Call the tool probe_echo";
 const PLAIN_SYSTEM: &str = "Reply briefly.";
@@ -52,6 +63,10 @@ const PROMPT_AND_SCHEMA: &str = "prompt_and_schema";
 const THINKING: &str = "thinking";
 const THROUGHPUT: &str = "throughput";
 const CONTEXT_WINDOW: &str = "context_window";
+const NOTE_AFTER_RESULTS: &str = "note_after_results";
+const ORPHANED_RESULT: &str = "orphaned_result";
+const DUPLICATE_CALL_ID: &str = "duplicate_call_id";
+const RESULTS_OUT_OF_ORDER: &str = "results_out_of_order";
 
 /// Tokens held back from the declared window so the reply still fits.
 const MARGIN: u32 = 4096;
@@ -63,7 +78,12 @@ const MAX_OUTPUT_TOKENS: u32 = 256;
 // reasoning, and Moonshot counts reasoning against the cap. Kimi spent all of
 // 256 thinking about the prompt check and up to 521 when given room.
 const ANSWER_TOKENS: u32 = 4096;
+// A history is a few short messages; the cap leaves a reasoning model room to
+// reach its answer.
+const HISTORY_TOKENS: u32 = 512;
 
+// Command-line flags are booleans by nature.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct ProbeArgs {
     /// Model key from `dino models`. Flag, then `DINO_MODEL`, then the config file.
@@ -84,6 +104,11 @@ pub struct ProbeArgs {
     /// window: about a million tokens, and a few dollars, on Kimi.
     #[arg(long, conflicts_with = "canary_tokens")]
     pub skip_context_window: bool,
+    /// Skip the four awkward histories: a note after tool results, an orphaned
+    /// result, a reused call id and results out of order. Each is one small
+    /// request.
+    #[arg(long)]
+    pub skip_history: bool,
     /// Emit the report as JSON.
     #[arg(long)]
     pub json: bool,
@@ -123,6 +148,7 @@ struct ProbeOptions {
     reasoning: ReasoningSupport,
     canary_tokens: Option<u32>,
     context_window: bool,
+    history: bool,
     /// Prints the canary size on stderr. Tests leave this off.
     announce: bool,
 }
@@ -168,6 +194,7 @@ pub(crate) async fn execute(mut settings: RunSettings, args: ProbeArgs) -> Resul
     style::enable(args.plain);
     let mut options = options_from(&settings.profile, args.canary_tokens, true);
     options.context_window = !args.skip_context_window;
+    options.history = !args.skip_history;
     let report = run_probe(&mut LiveHost { settings }, &options).await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -192,6 +219,7 @@ fn options_from(
         reasoning: profile.reasoning.clone(),
         canary_tokens,
         context_window: true,
+        history: true,
         announce,
     }
 }
@@ -222,6 +250,11 @@ async fn run_probe(host: &mut impl ProbeHost, options: &ProbeOptions) -> Result<
         check_thinking(host, &options.reasoning).await?,
         check_throughput(host).await?,
     ];
+    if options.history {
+        for history in histories() {
+            checks.push(check_history(host, history).await?);
+        }
+    }
     if options.context_window {
         checks.push(check_context(host, options).await?);
     }
@@ -368,6 +401,193 @@ async fn check_throughput(host: &mut impl ProbeHost) -> Result<Check> {
         }
     }
     Ok(passed(THROUGHPUT, parts.join("; ")))
+}
+
+/// A conversation so far, in the chat shape, and the tool results sent after it.
+struct History {
+    name: &'static str,
+    prefix: serde_json::Value,
+    results: &'static [&'static str],
+    note: Option<String>,
+    /// What the answer must hold; `None` when a refusal will do.
+    answer_holds: Option<&'static str>,
+}
+
+fn histories() -> [History; 4] {
+    let user = |content: &str| serde_json::json!({"role": "user", "content": content});
+    let calls = |ids: &[&str]| {
+        let calls: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": "probe_echo", "arguments": format!("{{\"token\":\"{TOKEN}\"}}")},
+                })
+            })
+            .collect();
+        serde_json::json!({"role": "assistant", "tool_calls": calls})
+    };
+    let result =
+        |id: &str| serde_json::json!({"role": "tool", "tool_call_id": id, "content": "echoed"});
+    [
+        History {
+            name: NOTE_AFTER_RESULTS,
+            prefix: serde_json::json!([user("Call probe_echo."), calls(&["probe-1"])]),
+            results: &["probe-1"],
+            note: Some(format!("Reply with {NOTE}.")),
+            answer_holds: Some(NOTE),
+        },
+        History {
+            name: ORPHANED_RESULT,
+            prefix: serde_json::json!([
+                user("Reply with ok."),
+                {"role": "assistant", "content": "ok"},
+            ]),
+            results: &["probe-ghost"],
+            note: None,
+            answer_holds: None,
+        },
+        History {
+            name: DUPLICATE_CALL_ID,
+            prefix: serde_json::json!([
+                user("Call probe_echo twice, one call at a time."),
+                calls(&["probe-1"]),
+                result("probe-1"),
+                calls(&["probe-1"]),
+            ]),
+            results: &["probe-1"],
+            note: None,
+            answer_holds: None,
+        },
+        History {
+            name: RESULTS_OUT_OF_ORDER,
+            prefix: serde_json::json!([
+                user("Call probe_echo twice at once."),
+                calls(&["probe-a", "probe-b"]),
+            ]),
+            results: &["probe-b", "probe-a"],
+            note: None,
+            answer_holds: None,
+        },
+    ]
+}
+
+async fn check_history(host: &mut impl ProbeHost, history: History) -> Result<Check> {
+    let mut session = host.open(SessionRequest {
+        system: PLAIN_SYSTEM.to_owned(),
+        tools: vec![probe_tool()],
+        thinking: Thinking::Default,
+        max_output_tokens: HISTORY_TOKENS,
+    })?;
+    let name = history.name;
+    if session.profile().provider == ProviderKind::OpenAi {
+        return Ok(passed(
+            name,
+            "not applicable: OpenAI keeps the conversation on its server",
+        ));
+    }
+    if let Err(error) = seed(&mut *session, history.prefix) {
+        return Ok(failed(
+            name,
+            format!("the history could not be handed over: {error}"),
+        ));
+    }
+    let input = TurnInput::ToolResults {
+        results: history
+            .results
+            .iter()
+            .map(|id| ToolResult {
+                call_id: (*id).to_owned(),
+                output: ToolOutput::success("echoed"),
+            })
+            .collect(),
+        note: history.note,
+    };
+    Ok(
+        match (attempt(&mut *session, input).await, history.answer_holds) {
+            (Verdict::Answered(transcript), Some(needle)) if !transcript.text.contains(needle) => {
+                failed(
+                    name,
+                    format!(
+                        "answered without {needle}: {}",
+                        excerpt(&echoed(&transcript))
+                    ),
+                )
+            }
+            (Verdict::Answered(transcript), _) => {
+                passed(name, format!("answered: {}", excerpt(&echoed(&transcript))))
+            }
+            (Verdict::Refused(error), None) => passed(name, format!("refused: {error}")),
+            (Verdict::Refused(error) | Verdict::Broken(error), _) => failed(name, error),
+        },
+    )
+}
+
+/// Puts `prefix` in the session as a fallback hands a conversation over.
+fn seed(session: &mut dyn ModelSession, prefix: serde_json::Value) -> Result<(), ModelError> {
+    let own = session.export_state()?;
+    let chat = SessionState {
+        provider: ProviderKind::Qwen,
+        payload: prefix,
+        ..own
+    };
+    let native = dino_model::fallback::hand_over(&chat, session.profile())?;
+    session.restore_state(&native)
+}
+
+enum Verdict {
+    Answered(Transcript),
+    /// The provider turned the request down before anything streamed.
+    Refused(String),
+    Broken(String),
+}
+
+async fn attempt(session: &mut dyn ModelSession, input: TurnInput) -> Verdict {
+    let started = Instant::now();
+    let mut stream = match session.next(input).await {
+        Ok(stream) => stream,
+        Err(error) if refused(&error) => return Verdict::Refused(error.to_string()),
+        Err(error) => return Verdict::Broken(error.to_string()),
+    };
+    let mut transcript = Transcript::default();
+    let mut finished = false;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(event) => {
+                finished |= matches!(event, ModelEvent::Finished { .. });
+                note(&mut transcript, event, started.elapsed());
+            }
+            Err(error) => return Verdict::Broken(error.to_string()),
+        }
+    }
+    if finished {
+        Verdict::Answered(transcript)
+    } else {
+        Verdict::Broken("the stream ended without finishing".to_owned())
+    }
+}
+
+/// A client error other than a timeout or a rate limit. Every adapter words a
+/// status it was refused with as `... returned <status>: <body>`.
+fn refused(error: &ModelError) -> bool {
+    let ModelError::Transport(message) = error else {
+        return false;
+    };
+    message
+        .split_once(" returned ")
+        .and_then(|(_, rest)| rest.get(..3)?.parse::<u16>().ok())
+        .is_some_and(|status| (400..500).contains(&status) && status != 408 && status != 429)
+}
+
+fn excerpt(text: &str) -> String {
+    let text = text.trim();
+    let cut: String = text.chars().take(80).collect();
+    if cut.len() < text.len() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
 }
 
 async fn check_context(host: &mut impl ProbeHost, options: &ProbeOptions) -> Result<Check> {
@@ -734,6 +954,11 @@ mod tests {
         /// Reasons for this many tokens before any answer, all counted against
         /// the cap, as Kimi does on Moonshot.
         ReasonsFirst(u32),
+        /// Turns down every request that carries tool results.
+        RefusesHistory,
+        IgnoresNote,
+        /// Breaks partway through any answer to tool results.
+        BreaksHistory,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -742,6 +967,10 @@ mod tests {
         systems: Vec<String>,
         tool_descriptions: Vec<String>,
         users: Vec<String>,
+        /// Each history a session was given, in its own provider's shape.
+        restored: Vec<serde_json::Value>,
+        /// The call ids of each set of tool results, in the order sent.
+        results: Vec<Vec<String>>,
     }
 
     struct ScriptedHost {
@@ -843,22 +1072,72 @@ mod tests {
                 TurnInput::User { content } | TurnInput::UserWithImages { content, .. } => {
                     content.clone()
                 }
-                TurnInput::ToolResults { .. } => String::new(),
+                TurnInput::ToolResults { note, .. } => note.clone().unwrap_or_default(),
             };
-            self.record
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .users
-                .push(user.clone());
+            {
+                let mut record = self
+                    .record
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                record.users.push(user.clone());
+                if let TurnInput::ToolResults { results, .. } = &input {
+                    record.results.push(
+                        results
+                            .iter()
+                            .map(|result| result.call_id.clone())
+                            .collect(),
+                    );
+                }
+            }
             if self.fault == Fault::Transport {
                 return Box::pin(async { Err(ModelError::Transport("connection reset".into())) });
             }
-            let events = self.events(&user);
+            let events = match &input {
+                TurnInput::ToolResults { .. } if self.fault == Fault::RefusesHistory => {
+                    return Box::pin(async {
+                        Err(ModelError::Transport(
+                            "Qwen endpoint returned 400 Bad Request: invalid messages".into(),
+                        ))
+                    });
+                }
+                TurnInput::ToolResults { .. } => self.history_events(&user),
+                _ => self.events(&user),
+            };
             Box::pin(async move { Ok(Box::pin(stream::iter(events)) as ModelEventStream) })
+        }
+
+        fn export_state(&self) -> Result<SessionState, ModelError> {
+            Ok(SessionState {
+                provider: self.profile.provider,
+                model_key: self.profile.key.clone(),
+                version: 1,
+                payload: json!([]),
+            })
+        }
+
+        fn restore_state(&mut self, state: &SessionState) -> Result<(), ModelError> {
+            self.record
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .restored
+                .push(state.payload.clone());
+            Ok(())
         }
     }
 
     impl ScriptedSession {
+        fn history_events(&self, note: &str) -> Vec<std::result::Result<ModelEvent, ModelError>> {
+            match self.fault {
+                Fault::BreaksHistory => vec![
+                    Ok(ModelEvent::TextDelta { text: "o".into() }),
+                    Err(ModelError::Transport("connection reset".into())),
+                ],
+                Fault::IgnoresNote => text_events("ok", false, false),
+                _ if note.contains(NOTE) => text_events(NOTE, false, false),
+                _ => text_events("ok", false, false),
+            }
+        }
+
         fn events(&self, user: &str) -> Vec<std::result::Result<ModelEvent, ModelError>> {
             if user.contains(WINDOW) {
                 let text = if self.fault == Fault::DropContextTail {
@@ -898,6 +1177,9 @@ mod tests {
                 | Fault::DropTailSentinel
                 | Fault::DropContextTail
                 | Fault::Transport
+                | Fault::RefusesHistory
+                | Fault::IgnoresNote
+                | Fault::BreaksHistory
                 | Fault::ReasonsFirst(_) => self.thinking == Thinking::On,
             };
             text_events("ok", think, self.double_usage)
@@ -1099,6 +1381,10 @@ mod tests {
                 PROMPT_AND_SCHEMA,
                 THINKING,
                 THROUGHPUT,
+                NOTE_AFTER_RESULTS,
+                ORPHANED_RESULT,
+                DUPLICATE_CALL_ID,
+                RESULTS_OUT_OF_ORDER,
                 CONTEXT_WINDOW
             ]
         );
@@ -1280,7 +1566,7 @@ mod tests {
         let opts = options(&host.profile, Some(32));
         let report = probe(&mut host, &opts).await;
         assert!(!report.passed);
-        assert_eq!(report.checks.len(), 5);
+        assert_eq!(report.checks.len(), 9);
         for check in &report.checks {
             assert!(!check.passed, "{check:?}");
             assert!(
@@ -1352,5 +1638,150 @@ mod tests {
         assert!(named(&report, THROUGHPUT).passed, "{evidence}");
         assert!(evidence.contains("64 in"), "{evidence}");
         assert!(!evidence.contains("65 in"), "{evidence}");
+    }
+
+    const HISTORIES: [&str; 4] = [
+        NOTE_AFTER_RESULTS,
+        ORPHANED_RESULT,
+        DUPLICATE_CALL_ID,
+        RESULTS_OUT_OF_ORDER,
+    ];
+
+    #[tokio::test]
+    async fn each_history_is_handed_over_and_answered() {
+        let mut host = ScriptedHost::new("qwen3.7-max", Fault::Honest);
+        let opts = options(&host.profile, Some(32));
+        let report = probe(&mut host, &opts).await;
+        assert!(report.passed, "{report:?}");
+        for name in HISTORIES {
+            let evidence = &named(&report, name).evidence;
+            assert!(evidence.starts_with("answered: "), "{name}: {evidence}");
+        }
+        assert!(named(&report, NOTE_AFTER_RESULTS).evidence.contains(NOTE));
+        let record = host.snapshot();
+        assert_eq!(record.restored.len(), 4);
+        let ids = |history: &serde_json::Value| -> Vec<String> {
+            history
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|message| {
+                    message["tool_calls"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .filter_map(|call| call["id"].as_str().map(str::to_owned))
+                .collect()
+        };
+        assert_eq!(ids(&record.restored[2]), ["probe-1", "probe-1"]);
+        assert_eq!(
+            record.results,
+            [
+                vec!["probe-1"],
+                vec!["probe-ghost"],
+                vec!["probe-1"],
+                vec!["probe-b", "probe-a"],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_session_gets_the_histories_in_its_own_shape() {
+        let mut host = ScriptedHost::new("claude-haiku-5.5", Fault::Honest);
+        let opts = options(&host.profile, Some(32));
+        let report = probe(&mut host, &opts).await;
+        for name in HISTORIES {
+            assert!(named(&report, name).passed, "{report:?}");
+        }
+        let restored = host.snapshot().restored;
+        let duplicated = restored[2].to_string();
+        assert_eq!(
+            duplicated.matches("\"tool_use\"").count(),
+            2,
+            "{duplicated}"
+        );
+        assert!(!duplicated.contains("tool_calls"), "{duplicated}");
+    }
+
+    #[tokio::test]
+    async fn an_openai_session_keeps_its_history_on_the_server_and_is_not_seeded() {
+        let mut host = ScriptedHost::new("terra", Fault::Honest);
+        let opts = options(&host.profile, Some(32));
+        let report = probe(&mut host, &opts).await;
+        for name in HISTORIES {
+            let check = named(&report, name);
+            assert!(check.passed, "{check:?}");
+            assert!(check.evidence.contains("not applicable"), "{check:?}");
+        }
+        assert!(host.snapshot().restored.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refusal_will_do_for_every_history_but_the_note() {
+        let check = only(Fault::RefusesHistory, NOTE_AFTER_RESULTS).await;
+        assert!(check.evidence.contains("400 Bad Request"), "{check:?}");
+        let mut host = ScriptedHost::new("qwen3.7-max", Fault::RefusesHistory);
+        let opts = options(&host.profile, Some(32));
+        let report = probe(&mut host, &opts).await;
+        for name in &HISTORIES[1..] {
+            let evidence = &named(&report, name).evidence;
+            assert!(evidence.starts_with("refused: "), "{name}: {evidence}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_note_the_answer_ignores_fails() {
+        let check = only(Fault::IgnoresNote, NOTE_AFTER_RESULTS).await;
+        assert!(check.evidence.contains("answered without"), "{check:?}");
+    }
+
+    #[tokio::test]
+    async fn a_history_answer_that_breaks_fails_every_history_and_nothing_else() {
+        let mut host = ScriptedHost::new("qwen3.7-max", Fault::BreaksHistory);
+        let opts = options(&host.profile, Some(32));
+        let report = probe(&mut host, &opts).await;
+        for check in &report.checks {
+            assert_eq!(check.passed, !HISTORIES.contains(&check.name), "{check:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn skipping_the_histories_sends_none() {
+        let mut host = ScriptedHost::new("qwen3.7-max", Fault::Honest);
+        let mut opts = options(&host.profile, Some(32));
+        opts.history = false;
+        let report = probe(&mut host, &opts).await;
+        assert!(report.passed, "{report:?}");
+        assert!(
+            report
+                .checks
+                .iter()
+                .all(|check| !HISTORIES.contains(&check.name))
+        );
+        let record = host.snapshot();
+        assert!(record.restored.is_empty());
+        assert!(record.results.is_empty());
+    }
+
+    #[test]
+    fn only_a_client_error_counts_as_a_refusal() {
+        let transport = |message: &str| ModelError::Transport(message.into());
+        assert!(refused(&transport(
+            "Anthropic returned 400 Bad Request: tool_use ids must be unique"
+        )));
+        assert!(refused(&transport(
+            "Qwen endpoint returned 422 Unprocessable Entity: x"
+        )));
+        assert!(!refused(&transport(
+            "Qwen endpoint returned 429 Too Many Requests: x"
+        )));
+        assert!(!refused(&transport(
+            "OpenAI returned 500 Internal Server Error: x"
+        )));
+        assert!(!refused(&transport("connection reset")));
+        assert!(!refused(&ModelError::Account(
+            "Qwen endpoint returned 401 Unauthorized: x".into()
+        )));
     }
 }
