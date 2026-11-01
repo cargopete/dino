@@ -44,6 +44,13 @@ Two rules the harness applies to every case, whether or not the case remembers:
   anything, and therefore inside the sandbox. Unattended and unconfined is the
   worst combination in this project.
 
+`--early-stop` stops a run the moment it changes a path its case protects, and
+judges it as it was left, since that rule scores the run 0. Only another
+harness, outside dino's protecting sandbox, can usually get that far. The one
+run it can misjudge is one that would have put the file back byte for byte
+before it finished. It is off by default and recorded with each run, so older
+records stay comparable.
+
 ```console
 dino eval --model claude-opus
 dino eval --case fix-type-errors --json
