@@ -346,16 +346,14 @@ fn blocked(events: Vec<AgentEvent>, mut text: String, reason: &str, turns: u32) 
     }
 }
 
-/// Told to the model with its last tool result, because that is the one
-/// channel every provider carries into the next turn.
 fn turns_left_note(turns_left: u32, unfinished: Option<&str>) -> String {
     let mut note = if turns_left == 1 {
-        "\n\n[dino: your next response is the last in this run. Make no tool calls: say \
+        "[dino: your next response is the last in this run. Make no tool calls: say \
          what is done, what is not, and what should happen next.]"
             .to_owned()
     } else {
         format!(
-            "\n\n[dino: {turns_left} model turns left in this run, including your next \
+            "[dino: {turns_left} model turns left in this run, including your next \
              response. Finish the change, check it once, and say what is done and what is \
              not.]"
         )
@@ -381,6 +379,16 @@ const CUT_OFF_NOTE: &str = "[dino: your last response was cut off because the co
      window filled. Older tool results have been elided to make room. Carry on from where you \
      stopped, and keep each response short.]";
 
+/// What the person typed, framed as theirs rather than as dino's.
+fn person_says(text: &str) -> String {
+    format!("The person says:\n{text}")
+}
+
+/// The notes for one turn's results, as the single message sent after them.
+fn joined(notes: &[String]) -> Option<String> {
+    (!notes.is_empty()).then(|| notes.join("\n\n"))
+}
+
 /// Which turn is being attempted, and how many times so far.
 struct Turn<'a> {
     number: u32,
@@ -391,7 +399,7 @@ struct Turn<'a> {
 /// What settling a turn's tool calls came to.
 enum Settled {
     /// The results, and what dino noticed while they ran.
-    Results(Vec<ToolResult>, Option<String>),
+    Results(Vec<ToolResult>, Vec<String>),
     /// The model reported a blocker, and this is what it said.
     Blocked(String),
     Cancelled,
@@ -521,16 +529,18 @@ where
 
     /// The first turn of a submission, carrying any attached images.
     fn first_input(&mut self, content: String) -> TurnInput {
-        if let Some((mut results, note)) = self.unsent.take() {
+        if let Some((results, note)) = self.unsent.take() {
             // Images wait for a submission that can carry them as a message.
-            if let Some(last) = results.last_mut() {
-                let _ = write!(
-                    last.output.content,
-                    "\n\n[dino: the last run reached its turn limit before these results \
-                     were sent. The person has since written:]\n{content}"
-                );
-            }
-            return TurnInput::ToolResults { results, note };
+            let mut notes = vec![
+                person_says(&content),
+                "[dino: the last run reached its turn limit before these results were sent.]"
+                    .to_owned(),
+            ];
+            notes.extend(note);
+            return TurnInput::ToolResults {
+                results,
+                note: joined(&notes),
+            };
         }
         let images = std::mem::take(&mut self.pending_images);
         if images.is_empty() {
@@ -792,7 +802,7 @@ where
         }
         Ok(match reported_blocker {
             Some(reason) => Settled::Blocked(reason),
-            None => Settled::Results(results, (!notes.is_empty()).then(|| notes.join("\n\n"))),
+            None => Settled::Results(results, notes),
         })
     }
 
@@ -843,7 +853,7 @@ where
                 content: note.unwrap_or_default().to_owned(),
             }));
         }
-        let (mut results, noted) = match self.settle_all(model_turn, calls, events, cancel).await? {
+        let (results, noted) = match self.settle_all(model_turn, calls, events, cancel).await? {
             Settled::Results(results, noted) => (results, noted),
             Settled::Blocked(reason) => {
                 let events = std::mem::take(events);
@@ -854,16 +864,14 @@ where
                 return Ok(Err(cancelled(events, text.to_owned(), model_turn)));
             }
         };
-        if let (Some(note), Some(last)) = (note, results.last_mut()) {
-            last.output.content.push_str("\n\n");
-            last.output.content.push_str(note);
-        }
-        self.count_down(model_turn, &mut results, events, cancel)
-            .await?;
-        self.deliver_inbox(model_turn, &mut results, events)?;
+        let countdown = self.count_down(model_turn, events, cancel).await?;
+        let mut said = self.deliver_inbox(model_turn, events)?;
+        said.extend(note.map(str::to_owned));
+        said.extend(noted);
+        said.extend(countdown);
         Ok(Ok(TurnInput::ToolResults {
             results,
-            note: noted,
+            note: joined(&said),
         }))
     }
 
@@ -941,60 +949,45 @@ where
         Ok(note)
     }
 
-    /// Hands the model, with its tool results, anything the person has typed
-    /// since the last ones.
+    /// Anything the person has typed since the last tool results, for the
+    /// model to read after these.
     fn deliver_inbox(
         &mut self,
         model_turn: u32,
-        results: &mut [ToolResult],
         events: &mut Vec<AgentEvent>,
-    ) -> Result<(), AgentError> {
-        let Some(last) = results.last_mut() else {
-            return Ok(());
-        };
+    ) -> Result<Vec<String>, AgentError> {
         let typed: Vec<String> = match &self.inbox {
             Some(inbox) => inbox
                 .lock()
                 .map(|mut inbox| std::mem::take(&mut *inbox))
                 .unwrap_or_default(),
-            None => return Ok(()),
+            None => return Ok(Vec::new()),
         };
+        let mut said = Vec::with_capacity(typed.len());
         for text in typed {
-            let _ = write!(
-                last.output.content,
-                "\n\n[dino: the person wrote this while you were working:]\n{text}"
-            );
+            said.push(person_says(&text));
             self.emit(AgentEvent::Steered { model_turn, text }, events)?;
         }
-        Ok(())
+        Ok(said)
     }
 
-    /// Tells the model, with its tool results, how few turns remain, and what
-    /// the finish check finds unfinished, since a run cut off by the turn limit
-    /// is never sent back.
+    /// How few turns remain, and what the finish check finds unfinished,
+    /// since a run cut off by the turn limit is never sent back.
     async fn count_down(
         &mut self,
         model_turn: u32,
-        results: &mut [ToolResult],
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Option<String>, AgentError> {
         let max = self.config.max_model_turns.get();
         let turns_left = max - model_turn;
         if turns_left == 0 {
-            return Ok(());
+            return Ok(None);
         }
         if turns_left > self.config.turn_notice_at {
             // From half-way the count rides along, so the end is no surprise.
-            if model_turn * 2 >= max
-                && let Some(last) = results.last_mut()
-            {
-                let _ = write!(
-                    last.output.content,
-                    "\n\n[dino: {model_turn} of {max} model turns used.]"
-                );
-            }
-            return Ok(());
+            return Ok((model_turn * 2 >= max)
+                .then(|| format!("[dino: {model_turn} of {max} model turns used.]")));
         }
         self.emit(
             AgentEvent::TurnsRunningOut {
@@ -1010,12 +1003,7 @@ where
                 .flatten(),
             None => None,
         };
-        if let Some(last) = results.last_mut() {
-            last.output
-                .content
-                .push_str(&turns_left_note(turns_left, unfinished.as_deref()));
-        }
-        Ok(())
+        Ok(Some(turns_left_note(turns_left, unfinished.as_deref())))
     }
 
     /// Streams a turn, sending it again while its stream breaks partway and

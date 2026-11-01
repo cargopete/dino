@@ -258,8 +258,9 @@ pub enum TurnInput {
     },
     ToolResults {
         results: Vec<ToolResult>,
-        /// Dino's own words for the model, sent after the results as a message
-        /// rather than inside them, where a model rightly distrusts instructions.
+        /// What the person typed and dino's own words for the model, sent after
+        /// the results as a message rather than inside them, where a model
+        /// rightly distrusts instructions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
