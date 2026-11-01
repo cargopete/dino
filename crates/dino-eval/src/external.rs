@@ -16,6 +16,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
 
+use dino_protocol::ReasoningEffort;
 use dino_sandbox::Sandbox;
 use serde::Deserialize;
 use serde::Serialize;
@@ -49,30 +50,35 @@ pub enum Harness {
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     Moonshot,
+    Anthropic,
 }
 
 impl Provider {
     const fn name(self) -> &'static str {
         match self {
             Self::Moonshot => "moonshot",
+            Self::Anthropic => "anthropic",
         }
     }
 
-    const fn openai_base(self) -> &'static str {
+    const fn openai_base(self) -> Option<&'static str> {
         match self {
-            Self::Moonshot => "https://api.moonshot.ai/v1",
+            Self::Moonshot => Some("https://api.moonshot.ai/v1"),
+            Self::Anthropic => None,
         }
     }
 
     const fn anthropic_base(self) -> &'static str {
         match self {
             Self::Moonshot => "https://api.moonshot.ai/anthropic",
+            Self::Anthropic => "https://api.anthropic.com",
         }
     }
 
     const fn key_variable(self) -> &'static str {
         match self {
             Self::Moonshot => "MOONSHOT_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
         }
     }
 }
@@ -117,6 +123,19 @@ impl Harness {
             Self::Grok => Some(&[".grok"]),
             // Pi's state is the run's own directory, in the invocation.
             Self::Pi => Some(&[]),
+        }
+    }
+
+    /// The reasoning effort the harness is told to run at, recorded with the
+    /// run. `None` is the harness's own default, which none of them reports.
+    #[must_use]
+    pub const fn effort(self, provider: Option<Provider>) -> Option<ReasoningEffort> {
+        match (self, provider) {
+            // Low, as dino runs Claude.
+            (Self::Pi, Some(Provider::Anthropic)) => Some(ReasoningEffort::Low),
+            // Pi's own default, as the runs before this was recorded had.
+            (Self::Pi, _) => Some(ReasoningEffort::Medium),
+            _ => None,
         }
     }
 
@@ -213,8 +232,9 @@ impl Harness {
                 .map(|part| (*part).to_owned())
                 .chain(
                     provider
-                        .into_iter()
-                        .flat_map(|(provider, _)| codex_provider(provider)),
+                        .map(|(provider, _)| codex_provider(provider))
+                        .transpose()?
+                        .unwrap_or_default(),
                 )
                 .chain([
                     "-C".to_owned(),
@@ -250,6 +270,15 @@ impl Harness {
                     owned(&["-p", "--mode", "json", "--no-session", "--offline"]);
                 if let Some((provider, _)) = provider {
                     arguments.extend(["--provider".to_owned(), provider.name().to_owned()]);
+                }
+                if let Some(effort) = self.effort(provider.map(|(provider, _)| provider)) {
+                    arguments.extend(["--thinking".to_owned(), effort.name().to_owned()]);
+                }
+                if let Some((Provider::Anthropic, _)) = provider {
+                    arguments.extend([
+                        "-e".to_owned(),
+                        state.join(PI_ADAPTIVE).display().to_string(),
+                    ]);
                 }
                 arguments.extend(["--model".to_owned(), model.to_owned(), prompt.to_owned()]);
                 ("pi".to_owned(), arguments)
@@ -289,6 +318,14 @@ impl Harness {
                     invocation
                         .files
                         .push((state.join("models.json"), pi_models(provider, model)));
+                }
+                if let (Some((Provider::Anthropic, _)), Some(effort)) = (
+                    provider,
+                    self.effort(provider.map(|(provider, _)| provider)),
+                ) {
+                    invocation
+                        .files
+                        .push((state.join(PI_ADAPTIVE), pi_adaptive(effort)));
                 }
             }
             (Self::Codex, _) => {
@@ -347,15 +384,15 @@ fn codex_home() -> PathBuf {
 
 /// Codex's overrides adding `provider` and selecting it. Codex reads the key
 /// from its variable itself.
-fn codex_provider(provider: Provider) -> Vec<String> {
+fn codex_provider(provider: Provider) -> Result<Vec<String>, EvalError> {
     let name = provider.name();
-    [
+    let base = provider
+        .openai_base()
+        .ok_or_else(|| EvalError::Setup(format!("Codex cannot be pointed at {name}")))?;
+    Ok([
         format!("model_provider=\"{name}\""),
         format!("model_providers.{name}.name=\"{name}\""),
-        format!(
-            "model_providers.{name}.base_url=\"{}\"",
-            provider.openai_base()
-        ),
+        format!("model_providers.{name}.base_url=\"{base}\""),
         format!(
             "model_providers.{name}.env_key=\"{}\"",
             provider.key_variable()
@@ -365,7 +402,7 @@ fn codex_provider(provider: Provider) -> Vec<String> {
     ]
     .into_iter()
     .flat_map(|setting| ["-c".to_owned(), setting])
-    .collect()
+    .collect())
 }
 
 /// Claude Code's environment for `provider`. Every model alias is the one
@@ -399,7 +436,11 @@ fn claude_code_environment(provider: Provider, model: &str, key: &str) -> Vec<(S
 /// quirks from its address; the window and output limit come from dino's
 /// profile, where it has one.
 fn pi_models(provider: Provider, model: &str) -> String {
-    let profile = dino_model::builtin_profile(model);
+    let profile = dino_model::builtin_profile(model).or_else(|| {
+        dino_model::builtin_profiles()
+            .into_iter()
+            .find(|profile| profile.provider_model == model)
+    });
     let mut entry = serde_json::json!({ "id": model, "reasoning": true });
     if let Some(window) = profile
         .as_ref()
@@ -413,17 +454,45 @@ fn pi_models(provider: Provider, model: &str) -> String {
     {
         entry["maxTokens"] = output.into();
     }
+    let (base, api) = provider
+        .openai_base()
+        .map_or((provider.anthropic_base(), "anthropic-messages"), |base| {
+            (base, "openai-completions")
+        });
     serde_json::json!({
         "providers": {
             provider.name(): {
-                "baseUrl": provider.openai_base(),
-                "api": "openai-completions",
+                "baseUrl": base,
+                "api": api,
                 "apiKey": provider.key_variable(),
                 "models": [entry],
             }
         }
     })
     .to_string()
+}
+
+/// The Pi extension that turns its thinking requests to Anthropic adaptive.
+const PI_ADAPTIVE: &str = "adaptive-thinking.ts";
+
+/// Pi 0.73.1 predates Claude 5 and asks it for budgeted thinking, which it
+/// refuses; this sends adaptive thinking at `effort` in its place.
+fn pi_adaptive(effort: ReasoningEffort) -> String {
+    format!(
+        r#"export default function (pi) {{
+  pi.on("before_provider_request", (event) => {{
+    const payload = event.payload;
+    if (payload?.thinking?.type !== "enabled") return undefined;
+    const {{ budget_tokens, ...thinking }} = payload.thinking;
+    return {{
+      ...payload,
+      thinking: {{ ...thinking, type: "adaptive" }},
+      output_config: {{ ...payload.output_config, effort: "{effort}" }},
+    }};
+  }});
+}}
+"#
+    )
 }
 
 /// What a harness's event stream says happened.
@@ -789,6 +858,7 @@ pub async fn run_external(
     };
     let variant = Variant {
         score: true,
+        reasoning_effort: harness.effort(provider),
         ..Variant::default()
     };
     if timed_out {
@@ -1074,11 +1144,14 @@ mod tests {
                 "--offline",
                 "--provider",
                 "moonshot",
+                "--thinking",
+                "medium",
                 "--model",
                 "kimi-k3.1-pro",
                 "fix it"
             ]
         );
+        assert_eq!(pi.files.len(), 1, "no thinking shim off Anthropic");
         assert_eq!(pi.writable, [state]);
         let (path, models) = &pi.files[0];
         assert_eq!(path, &state.join("models.json"));
@@ -1091,6 +1164,83 @@ mod tests {
         );
         assert_eq!(moonshot["models"][0]["id"], "kimi-k3.1-pro");
         assert_eq!(moonshot["models"][0]["contextWindow"], 1_048_576);
+    }
+
+    #[test]
+    fn pi_on_anthropic_thinks_adaptively_at_low_effort() {
+        let state = Path::new("/scratch/case.Pi-state");
+        let pi = Harness::Pi
+            .command(
+                "claude-haiku-5-5",
+                "fix it",
+                Path::new("/scratch/case"),
+                Some((Provider::Anthropic, "secret")),
+                state,
+            )
+            .unwrap();
+
+        let shim = state.join(PI_ADAPTIVE).display().to_string();
+        assert_eq!(
+            pi.arguments,
+            [
+                "-p",
+                "--mode",
+                "json",
+                "--no-session",
+                "--offline",
+                "--provider",
+                "anthropic",
+                "--thinking",
+                "low",
+                "-e",
+                shim.as_str(),
+                "--model",
+                "claude-haiku-5-5",
+                "fix it"
+            ]
+        );
+        assert_eq!(
+            Harness::Pi.effort(Some(Provider::Anthropic)),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(pi.writable, [state]);
+        let models = pi
+            .files
+            .iter()
+            .find(|(path, _)| path == &state.join("models.json"))
+            .map(|(_, models)| serde_json::from_str::<Value>(models).unwrap())
+            .unwrap();
+        let anthropic = &models["providers"]["anthropic"];
+        assert_eq!(anthropic["baseUrl"], "https://api.anthropic.com");
+        assert_eq!(anthropic["api"], "anthropic-messages");
+        assert_eq!(anthropic["apiKey"], "ANTHROPIC_API_KEY");
+        assert_eq!(anthropic["models"][0]["id"], "claude-haiku-5-5");
+        assert_eq!(anthropic["models"][0]["reasoning"], true);
+        assert_eq!(
+            anthropic["models"][0]["contextWindow"], 1_000_000,
+            "found by the provider's model name"
+        );
+        let (_, extension) = pi
+            .files
+            .iter()
+            .find(|(path, _)| path == &state.join(PI_ADAPTIVE))
+            .unwrap();
+        assert!(extension.contains(r#"type: "adaptive""#), "{extension}");
+        assert!(extension.contains(r#"effort: "low""#), "{extension}");
+    }
+
+    #[test]
+    fn codex_cannot_be_pointed_at_anthropic() {
+        let Err(EvalError::Setup(message)) = Harness::Codex.command(
+            "claude-haiku-5-5",
+            "fix it",
+            Path::new("/scratch/case"),
+            Some((Provider::Anthropic, "secret")),
+            Path::new("/scratch/state"),
+        ) else {
+            panic!("Codex speaks no Anthropic API");
+        };
+        assert!(message.contains("anthropic"), "{message}");
     }
 
     #[test]
