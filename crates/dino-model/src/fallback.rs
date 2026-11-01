@@ -3,8 +3,10 @@
 //!
 //! Only [`ModelError::Account`] moves the session along: a spent quota or a
 //! lapsed subscription will not recover within a session, whereas a dropped
-//! connection or a rate limit will, and the core already retries those. Once
-//! moved, the session does not go back.
+//! connection or a rate limit will, and the adapters already retry those. A
+//! request the provider rejected as malformed would be rejected by the next
+//! one too, so that does not move it either. Once moved, the session does not
+//! go back.
 
 use dino_protocol::ModelProfile;
 use dino_protocol::ProviderKind;
@@ -315,12 +317,24 @@ mod tests {
 
     use super::*;
 
-    /// A session that refuses the account or answers with an empty stream, and
+    /// A session that fails with `fails` or answers with an empty stream, and
     /// records which model was asked and what was handed to it.
     struct Fake {
         profile: ModelProfile,
-        refuses: bool,
+        fails: Option<fn() -> ModelError>,
         log: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn spent() -> ModelError {
+        ModelError::Account("insufficient balance".into())
+    }
+
+    fn malformed() -> ModelError {
+        ModelError::Http {
+            provider: "Qwen endpoint",
+            status: 400,
+            body: "invalid tool schema".into(),
+        }
     }
 
     impl ModelSession for Fake {
@@ -333,10 +347,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("ask {}", self.profile.key));
-            let refuses = self.refuses;
+            let fails = self.fails;
             Box::pin(async move {
-                if refuses {
-                    return Err(ModelError::Account("insufficient balance".into()));
+                if let Some(fails) = fails {
+                    return Err(fails());
                 }
                 let stream: ModelEventStream = Box::pin(futures_util::stream::empty());
                 Ok(stream)
@@ -362,10 +376,18 @@ mod tests {
     }
 
     fn chain(refusing: &[&str], log: &Arc<Mutex<Vec<String>>>) -> FallbackSession {
+        chain_failing(refusing, spent, log)
+    }
+
+    fn chain_failing(
+        failing: &[&str],
+        failure: fn() -> ModelError,
+        log: &Arc<Mutex<Vec<String>>>,
+    ) -> FallbackSession {
         let fake = |key: &str| -> Box<dyn ModelSession> {
             Box::new(Fake {
                 profile: crate::builtin_profile(key).unwrap(),
-                refuses: refusing.contains(&key),
+                fails: failing.contains(&key).then_some(failure),
                 log: Arc::clone(log),
             })
         };
@@ -415,6 +437,23 @@ mod tests {
 
         assert!(matches!(error, ModelError::Account(_)), "{error}");
         assert_eq!(session.profile().key, "claude-opus-5.5");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_request_stays_on_the_model_that_rejected_it() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut session = chain_failing(&["kimi-k3.1-pro"], malformed, &log);
+
+        let Err(error) = session.next(ask()).await else {
+            panic!("the request was rejected");
+        };
+
+        assert!(
+            matches!(error, ModelError::Http { status: 400, .. }),
+            "{error}"
+        );
+        assert_eq!(session.profile().key, "kimi-k3.1-pro");
+        assert_eq!(*log.lock().unwrap(), ["ask kimi-k3.1-pro"]);
     }
 
     #[test]

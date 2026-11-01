@@ -251,6 +251,14 @@ impl ModelSession for Box<dyn ModelSession> {
 pub enum ModelError {
     #[error("model transport failed: {0}")]
     Transport(String),
+    /// The provider answered with a failing status before anything streamed.
+    #[error("{provider} returned {}: {body}", status_line(*status))]
+    Http {
+        provider: &'static str,
+        status: u16,
+        /// The start of the response body.
+        body: String,
+    },
     #[error("provider protocol failed: {0}")]
     Protocol(String),
     #[error("model configuration is invalid: {0}")]
@@ -259,6 +267,125 @@ pub enum ModelError {
     /// authorised. Retrying will not help; another provider might.
     #[error("the provider refused the account: {0}")]
     Account(String),
+}
+
+impl ModelError {
+    /// Whether the same request, sent again, could succeed.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            // A proxy in front of the server answers 404 with nothing while the
+            // server is away; the server's own 404, for a model it does not
+            // have, says so and will not change.
+            Self::Http { status, body, .. } => {
+                matches!(status, 408 | 429 | 500..=599)
+                    || (*status == 404 && body.trim().is_empty())
+            }
+            Self::Protocol(_) | Self::Configuration(_) | Self::Account(_) => false,
+        }
+    }
+
+    /// Whether the provider turned the request down as it stands: a client
+    /// error that sending it again will not change.
+    #[must_use]
+    pub fn rejects_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Http {
+                status: 400..=499,
+                ..
+            }
+        ) && !self.is_transient()
+    }
+}
+
+fn status_line(status: u16) -> String {
+    match reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|status| status.canonical_reason())
+    {
+        Some(reason) => format!("{status} {reason}"),
+        None => status.to_string(),
+    }
+}
+
+const ERROR_BODY_LIMIT: usize = 4_096;
+
+/// Reads a failing response into [`ModelError::Http`].
+pub(crate) async fn http_error(provider: &'static str, response: reqwest::Response) -> ModelError {
+    let status = response.status().as_u16();
+    let mut body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("could not read response body: {error}"));
+    if body.len() > ERROR_BODY_LIMIT {
+        let mut boundary = ERROR_BODY_LIMIT;
+        while !body.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        body.truncate(boundary);
+    }
+    ModelError::Http {
+        provider,
+        status,
+        body,
+    }
+}
+
+/// A request that could not be sent. A builder error is our own request at
+/// fault, which no number of attempts will send.
+pub(crate) fn send_error(error: &reqwest::Error) -> ModelError {
+    if error.is_builder() {
+        ModelError::Configuration(format!("request could not be built: {error}"))
+    } else {
+        ModelError::Transport(error.to_string())
+    }
+}
+
+/// How often a request that never reached the model is tried again.
+///
+/// Only before anything has streamed: a request that failed there produced
+/// nothing, so sending it again cannot duplicate a turn.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Total attempts, the first included.
+    pub attempts: u32,
+    /// Doubled after each failure.
+    pub first_delay: std::time::Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: 5,
+            first_delay: std::time::Duration::from_secs(2),
+        }
+    }
+}
+
+/// Runs `attempt` until it succeeds, fails with an error that is not
+/// [transient](ModelError::is_transient), or the policy runs out.
+pub(crate) async fn send_with_retry<F, Fut>(
+    policy: RetryPolicy,
+    mut attempt: F,
+) -> Result<reqwest::Response, ModelError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<reqwest::Response, ModelError>>,
+{
+    let mut delay = policy.first_delay;
+    let mut tried = 1;
+    loop {
+        match attempt().await {
+            Err(error) if error.is_transient() && tried < policy.attempts => {
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2);
+                tried += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// One HTTP client for every provider. Alibaba's Coding Plan refuses a request
@@ -874,5 +1001,85 @@ mod tests {
         assert_eq!(qwen[4].reasoning, ReasoningSupport::Toggle);
         assert_eq!(qwen[3].reasoning_parser.as_deref(), Some("qwen3"));
         assert_eq!(qwen[4].reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn only_what_can_succeed_on_a_repeat_is_transient() {
+        let http = |status, body: &str| ModelError::Http {
+            provider: "Anthropic",
+            status,
+            body: body.into(),
+        };
+        for status in [408, 429, 500, 502, 503, 504, 529] {
+            assert!(http(status, "x").is_transient(), "{status}");
+            assert!(!http(status, "x").rejects_request(), "{status}");
+        }
+        assert!(http(404, " ").is_transient());
+        assert!(ModelError::Transport("connection reset".into()).is_transient());
+        for status in [400, 404, 413, 422] {
+            assert!(!http(status, "x").is_transient(), "{status}");
+            assert!(http(status, "x").rejects_request(), "{status}");
+        }
+        let account = ModelError::Account("Qwen endpoint returned 401 Unauthorized: x".into());
+        assert!(!account.is_transient());
+        assert!(!account.rejects_request());
+        assert_eq!(
+            http(400, "tool_use ids must be unique").to_string(),
+            "Anthropic returned 400 Bad Request: tool_use ids must be unique"
+        );
+    }
+}
+
+/// A local server for the adapters' request tests.
+#[cfg(test)]
+pub(crate) mod test_server {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// Answers one connection per response, in order, and counts the requests.
+    pub(crate) async fn serve_in_turn(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut served = 0;
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4_096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+                served += 1;
+            }
+            served
+        });
+        (base, server)
+    }
+
+    /// A complete response with `status` and `body`.
+    pub(crate) fn status(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A 200 that streams each of `events` as one server-sent event.
+    pub(crate) fn sse(events: &[&str]) -> String {
+        let mut response = String::from(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        );
+        for event in events {
+            response.push_str("data: ");
+            response.push_str(event);
+            response.push_str("\n\n");
+        }
+        response
     }
 }

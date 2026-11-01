@@ -32,12 +32,11 @@ use crate::ModelError;
 use crate::ModelEventStream;
 use crate::ModelFuture;
 use crate::ModelSession;
+use crate::RetryPolicy;
 use crate::SessionState;
 use crate::elide_arguments;
 use crate::elided_marker;
 use crate::sse::SseDecoder;
-
-const ERROR_BODY_LIMIT: usize = 4_096;
 
 /// Bump when the persisted history shape changes. RFC-0014 section 3.
 pub(crate) const STATE_VERSION: u32 = 1;
@@ -65,27 +64,6 @@ pub struct QwenConfig {
     /// Mark the system prompt and the newest message for `DashScope`'s explicit
     /// context cache, which replaces its implicit one for the request.
     pub explicit_cache: bool,
-}
-
-/// How often a request that never reached the model is tried again.
-///
-/// Only before anything has streamed: a request that failed there produced
-/// nothing, so sending it again cannot duplicate a turn.
-#[derive(Debug, Clone, Copy)]
-pub struct RetryPolicy {
-    /// Total attempts, the first included.
-    pub attempts: u32,
-    /// Doubled after each failure.
-    pub first_delay: Duration,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            attempts: 5,
-            first_delay: Duration::from_secs(2),
-        }
-    }
 }
 
 impl QwenConfig {
@@ -188,9 +166,7 @@ impl QwenSession {
         &self,
         body: &serde_json::Map<String, Value>,
     ) -> Result<reqwest::Response, ModelError> {
-        let mut delay = self.config.retry.first_delay;
-        let mut attempt = 1;
-        loop {
+        crate::send_with_retry(self.config.retry, || async {
             let mut request = self.client.post(self.endpoint.clone()).json(body);
             if self.explicit_cache() {
                 request = request.header("X-DashScope-CacheControl", "enable");
@@ -198,42 +174,22 @@ impl QwenSession {
             if let Some(api_key) = &self.config.api_key {
                 request = request.bearer_auth(api_key);
             }
-            let (error, retryable) = match request.send().await {
-                Ok(response) if response.status().is_success() => return Ok(response),
-                Ok(response) => {
-                    let status = response.status();
-                    let response_body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|error| format!("could not read response body: {error}"));
-                    // A proxy in front of the server answers 404 with nothing
-                    // while the server is away; the server's own 404, for a
-                    // model it does not have, says so and will not change.
-                    let retryable = matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
-                        || (status.as_u16() == 404 && response_body.trim().is_empty());
-                    let message = format!(
-                        "Qwen endpoint returned {status}: {}",
-                        truncate_for_error(&response_body)
-                    );
-                    if refuses_account(status.as_u16(), &response_body) {
-                        return Err(ModelError::Account(message));
-                    }
-                    (message, retryable)
-                }
-                // A connection dropped before the response is `is_request`, not
-                // `is_connect`; nothing streamed, so sending again is safe.
-                Err(error) => (
-                    error.to_string(),
-                    error.is_connect() || error.is_timeout() || error.is_request(),
-                ),
-            };
-            if !retryable || attempt >= self.config.retry.attempts {
-                return Err(ModelError::Transport(error));
+            let response = request
+                .send()
+                .await
+                .map_err(|error| crate::send_error(&error))?;
+            if response.status().is_success() {
+                return Ok(response);
             }
-            tokio::time::sleep(delay).await;
-            delay = delay.saturating_mul(2);
-            attempt += 1;
-        }
+            let error = crate::http_error("Qwen endpoint", response).await;
+            match &error {
+                ModelError::Http { status, body, .. } if refuses_account(*status, body) => {
+                    Err(ModelError::Account(error.to_string()))
+                }
+                _ => Err(error),
+            }
+        })
+        .await
     }
 
     fn explicit_cache(&self) -> bool {
@@ -562,17 +518,6 @@ fn refuses_account(status: u16, body: &str) -> bool {
     ];
     let body = body.to_ascii_lowercase();
     matches!(status, 401..=403) || MARKERS.iter().any(|marker| body.contains(marker))
-}
-
-fn truncate_for_error(body: &str) -> &str {
-    if body.len() <= ERROR_BODY_LIMIT {
-        return body;
-    }
-    let mut boundary = ERROR_BODY_LIMIT;
-    while !body.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    &body[..boundary]
 }
 
 /// A closed set rather than a string, for the same reason as Anthropic's.
@@ -999,6 +944,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::test_server::serve_in_turn;
+    use crate::test_server::status;
 
     #[test]
     fn a_spent_quota_is_an_account_refusal_and_a_rate_limit_is_not() {
@@ -1674,29 +1621,6 @@ mod tests {
 
     const SSE_HELLO: &str = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
-    /// Answers one connection per response, in order, and counts the requests.
-    async fn serve_in_turn(responses: Vec<String>) -> (String, tokio::task::JoinHandle<usize>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}/v1", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let mut served = 0;
-            for response in responses {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4_096];
-                while find_bytes(&request, b"\r\n\r\n").is_none() {
-                    let read = socket.read(&mut buffer).await.unwrap();
-                    assert_ne!(read, 0);
-                    request.extend_from_slice(&buffer[..read]);
-                }
-                socket.write_all(response.as_bytes()).await.unwrap();
-                served += 1;
-            }
-            served
-        });
-        (base, server)
-    }
-
     fn quick_retries(base: String) -> QwenSession {
         let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
         let mut config = QwenConfig::new(base, profile);
@@ -1863,6 +1787,57 @@ mod tests {
 
         assert!(error.to_string().contains("does not exist"), "{error}");
         assert_eq!(server.await.unwrap(), 1);
+    }
+
+    async fn first_error(responses: Vec<String>) -> (ModelError, usize) {
+        let (base, server) = serve_in_turn(responses).await;
+        let error = quick_retries(base)
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .err()
+            .unwrap();
+        (error, server.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_rejected_request_is_typed_and_not_retried() {
+        let (error, served) = first_error(vec![status(
+            "400 Bad Request",
+            r#"{"error":{"message":"invalid tool schema"}}"#,
+        )])
+        .await;
+        assert!(
+            matches!(&error, ModelError::Http { status: 400, body, .. } if body.contains("invalid tool schema")),
+            "{error}"
+        );
+        assert_eq!(served, 1);
+    }
+
+    #[tokio::test]
+    async fn a_spent_quota_stays_an_account_refusal_and_is_not_retried() {
+        let (error, served) = first_error(vec![status(
+            "429 Too Many Requests",
+            r#"{"error":{"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}}"#,
+        )])
+        .await;
+        assert!(
+            matches!(&error, ModelError::Account(message) if message.starts_with("Qwen endpoint returned 429 Too Many Requests: ")),
+            "{error}"
+        );
+        assert_eq!(served, 1);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_is_retried_and_its_last_status_reported() {
+        let limited = || status("429 Too Many Requests", "slow down");
+        let (error, served) = first_error(vec![limited(), limited(), limited()]).await;
+        assert!(
+            matches!(error, ModelError::Http { status: 429, .. }),
+            "{error}"
+        );
+        assert_eq!(served, 3);
     }
 
     #[tokio::test]
