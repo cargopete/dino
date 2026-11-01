@@ -111,7 +111,7 @@ pub struct RunSettings {
     /// in charge, which is every run except a probe comparing the two.
     pub enable_thinking: Option<bool>,
     /// Set on every model in the chain that offers it. `None` keeps each
-    /// adapter's own default.
+    /// profile's default effort, else the adapter's.
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Emit no terminal colour. Resolved like everything else, so a config file
     /// can ask for it.
@@ -273,38 +273,51 @@ fn build_provider(
             Ok(Box::new(OpenAiSession::new(config)?))
         }
         ProviderKind::Qwen => {
-            // A model with an endpoint of its own never takes the Qwen one,
-            // so its key cannot be sent to another provider.
-            let hosted = dino_model::hosted_endpoint(&profile.key);
-            let api_base = match (hosted, &settings.api_base) {
-                (Some(hosted), _) => hosted.api_base.to_owned(),
-                (None, Some(api_base)) => api_base.clone(),
-                (None, None) => require_env(env, "QWEN_API_BASE", profile, is_fallback)?,
-            };
-            let mut config = QwenConfig::new(api_base, profile.clone());
-            config.enable_thinking = match (settings.enable_thinking, settings.disable_thinking) {
-                (Some(enabled), _) => Some(enabled),
-                (None, true) => Some(false),
-                (None, false) => None,
-            };
-            config.reasoning_effort = effort;
-            config.api_key = match hosted {
-                Some(hosted) => Some(require_env(env, hosted.key_variable, profile, is_fallback)?),
-                None => env("QWEN_API_KEY").filter(|key| !key.is_empty()),
-            };
-            config.thinking_budget = Some(thinking_budget(settings.thinking_budget));
-            // Experimental until measured on the Token Plan: #135.
-            config.explicit_cache = env("DINO_EXPLICIT_CACHE").is_some_and(|value| value == "1");
-            config.system_prompt = system_prompt;
-            config.tools = tools;
-            config.max_output_tokens = profile.max_output_tokens;
-            // Deliberately not copying the profile's sampling here. The adapter
-            // already falls back to it, and an explicit copy overrides the
-            // adapter's own non-thinking sampling profile, which is a quieter
-            // way of ignoring --no-thinking than one would like.
+            let config = qwen_config(settings, profile, effort, system_prompt, tools, env)?;
             Ok(Box::new(QwenSession::new(config)?))
         }
     }
+}
+
+fn qwen_config(
+    settings: &RunSettings,
+    profile: &ModelProfile,
+    effort: Option<ReasoningEffort>,
+    system_prompt: String,
+    tools: Vec<ToolDefinition>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<QwenConfig> {
+    let is_fallback = settings.profile.key != profile.key;
+    // A model with an endpoint of its own never takes the Qwen one,
+    // so its key cannot be sent to another provider.
+    let hosted = dino_model::hosted_endpoint(&profile.key);
+    let api_base = match (hosted, &settings.api_base) {
+        (Some(hosted), _) => hosted.api_base.to_owned(),
+        (None, Some(api_base)) => api_base.clone(),
+        (None, None) => require_env(env, "QWEN_API_BASE", profile, is_fallback)?,
+    };
+    let mut config = QwenConfig::new(api_base, profile.clone());
+    config.enable_thinking = match (settings.enable_thinking, settings.disable_thinking) {
+        (Some(enabled), _) => Some(enabled),
+        (None, true) => Some(false),
+        (None, false) => None,
+    };
+    config.reasoning_effort = effort;
+    config.api_key = match hosted {
+        Some(hosted) => Some(require_env(env, hosted.key_variable, profile, is_fallback)?),
+        None => env("QWEN_API_KEY").filter(|key| !key.is_empty()),
+    };
+    config.thinking_budget = Some(thinking_budget(settings.thinking_budget));
+    // Experimental until measured on the Token Plan: #135.
+    config.explicit_cache = env("DINO_EXPLICIT_CACHE").is_some_and(|value| value == "1");
+    config.system_prompt = system_prompt;
+    config.tools = tools;
+    config.max_output_tokens = profile.max_output_tokens;
+    // Deliberately not copying the profile's sampling here. The adapter
+    // already falls back to it, and an explicit copy overrides the
+    // adapter's own non-thinking sampling profile, which is a quieter
+    // way of ignoring --no-thinking than one would like.
+    Ok(config)
 }
 
 /// Refuses an effort the profile does not list, naming the ones it does.
@@ -324,19 +337,19 @@ pub fn check_effort(profile: &ModelProfile, effort: ReasoningEffort) -> Result<(
     }
 }
 
-/// The effort a model in the chain is built with: the primary must offer it,
-/// a fallback that does not keeps its default.
+/// The effort a model in the chain is built with: the primary must offer the
+/// one set, a fallback that does not keeps its profile's default.
 fn effort_for(
     settings: &RunSettings,
     profile: &ModelProfile,
     is_fallback: bool,
 ) -> Result<Option<ReasoningEffort>> {
     let Some(effort) = settings.reasoning_effort else {
-        return Ok(None);
+        return Ok(profile.default_effort);
     };
     match check_effort(profile, effort) {
         Ok(()) => Ok(Some(effort)),
-        Err(_) if is_fallback => Ok(None),
+        Err(_) if is_fallback => Ok(profile.default_effort),
         Err(error) => Err(error),
     }
 }
@@ -577,6 +590,110 @@ mod tests {
             Some(format!("{name}-value"))
         })
         .expect("Sonnet has no none effort, so it keeps its own");
+    }
+
+    /// The body Kimi's session sends for `settings`, caught on a local listener.
+    async fn moonshot_body(settings: &RunSettings) -> serde_json::Value {
+        use futures_util::TryStreamExt;
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let effort = effort_for(settings, &settings.profile, false).unwrap();
+        let env = |name: &str| Some(format!("{name}-value"));
+        let mut config = qwen_config(
+            settings,
+            &settings.profile,
+            effort,
+            String::new(),
+            Vec::new(),
+            &env,
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        config.api_base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4_096];
+            let body = loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0, "request ended before its body");
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if body.len() >= length {
+                    break serde_json::from_str::<serde_json::Value>(body).unwrap();
+                }
+            };
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
+                      data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n\
+                      data: [DONE]\n\n",
+                )
+                .await
+                .unwrap();
+            body
+        });
+
+        let mut session = QwenSession::new(config).unwrap();
+        let stream = session
+            .next(dino_protocol::TurnInput::User {
+                content: "hello".into(),
+            })
+            .await
+            .unwrap();
+        stream.try_collect::<Vec<_>>().await.unwrap();
+        server.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn kimi_asks_for_low_effort_unless_told_otherwise() {
+        let mut settings = settings(builtin_profile("kimi-k3.1-pro").expect("built-in profile"));
+        assert_eq!(moonshot_body(&settings).await["reasoning_effort"], "low");
+
+        settings.reasoning_effort = Some(ReasoningEffort::High);
+        assert_eq!(moonshot_body(&settings).await["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn only_kimi_has_a_default_effort() {
+        for profile in builtin_profiles() {
+            let expected = (profile.key == "kimi-k3.1-pro").then_some(ReasoningEffort::Low);
+            assert_eq!(profile.default_effort, expected, "{}", profile.key);
+            let built = effort_for(&settings(profile.clone()), &profile, false).unwrap();
+            assert_eq!(built, expected, "{}", profile.key);
+        }
+    }
+
+    #[test]
+    fn a_model_switched_to_takes_its_own_default_unless_the_setting_fits() {
+        let kimi = builtin_profile("kimi-k3.1-pro").expect("built-in profile");
+        let mut chain = settings(builtin_profile("claude-sonnet-5.5").expect("built-in profile"));
+        assert_eq!(
+            effort_for(&chain, &kimi, true).unwrap(),
+            Some(ReasoningEffort::Low)
+        );
+        chain.reasoning_effort = Some(ReasoningEffort::Max);
+        assert_eq!(
+            effort_for(&chain, &kimi, true).unwrap(),
+            Some(ReasoningEffort::Low)
+        );
+        chain.reasoning_effort = Some(ReasoningEffort::Medium);
+        assert_eq!(
+            effort_for(&chain, &kimi, true).unwrap(),
+            Some(ReasoningEffort::Medium)
+        );
     }
 
     #[test]

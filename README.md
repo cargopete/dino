@@ -180,8 +180,8 @@ CI and evals.
   config file, or `--effort` on a session or `dino eval`, sets `none`, `low`,
   `medium`, `high`, `xhigh` or `max` on Kimi, Claude and GPT. A level the model
   does not list is an error naming those it does; a fallback without it keeps
-  its own default. Unset leaves each default as it was, and an eval records the
-  effort with every run.
+  its own default. Unset leaves each model's default, which is the provider's
+  except Kimi's, and an eval records the effort used with every run.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `dino replay` renders a past session through the same renderer the live one
@@ -381,6 +381,9 @@ which also says when Sonnet 5.5 is the better choice. It has an endpoint of its 
 `https://api.moonshot.ai/v1`, and its key in `MOONSHOT_API_KEY`; `grok-4.7`
 likewise has `https://api.x.ai/v1` and `XAI_API_KEY`. `api_base` and
 `QWEN_API_KEY` never apply to them, so neither key can reach another provider.
+Kimi runs at low effort unless something sets another, having matched the
+provider's default score at half the cost per passed task (#195); `--effort high`
+gives the old behaviour back.
 
 `qwen3.8-27b` is the open-weight choice: anyone can serve exactly the model
 the corpus measured. It has no endpoint of its own. Give it

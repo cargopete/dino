@@ -135,6 +135,10 @@ pub struct ModelProfile {
     pub context_window_tokens: Option<u32>,
     pub max_output_tokens: Option<u32>,
     pub reasoning: ReasoningSupport,
+    /// The effort sent when nothing else sets one. Absent leaves it to the
+    /// provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<ReasoningEffort>,
     pub parallel_tool_calls: bool,
     pub image_input: bool,
     pub tool_call_parser: Option<String>,
