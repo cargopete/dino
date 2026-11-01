@@ -833,6 +833,7 @@ pub async fn run_external(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     fn invocation(program: &str, arguments: &[&str]) -> Invocation {
         Invocation {
             program: program.to_owned(),
