@@ -1,0 +1,11 @@
+name: eff-baseline
+started: 2026-10-31T15:04:18Z
+commit: b0e993ab50fa3dd7f61906f36a4919fcb103fd66
+dino: /Users/pepe/dino-bench-results/bin-baseline/dino sha256 dc49058732087699
+trials: 2
+args: --model kimi-k3.1-pro --jobs 3 --case add-a-field --case rename-across-files --case fix-failing-test --case answer-from-the-file --case diagnose-the-panic --case make-it-thread-safe --case pratt-expression-parser --case zero-copy-tokenizer --case interval-set --case semver-ranges --case toml-1-values --case large-workspace-find-the-cause
+codex: codex-cli 0.165.0
+grok: grok 1.0.70 (f50904eaee6c) [stable]
+claude: 2.1.316 (Claude Code)
+host: Darwin arm64, 18 cpus
+finished: 2026-10-31T17:07:47Z, exit 0

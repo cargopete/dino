@@ -1,0 +1,5285 @@
+{
+  "model": "kimi-k3.1-pro",
+  "outcomes": [
+    {
+      "case": "add-a-field",
+      "duration_ms": 29818,
+      "failures": [],
+      "files_changed": [
+        "src/reading.rs",
+        "src/stats.rs",
+        "src/window.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/add-a-field.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 4,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 4352,
+            "cached_input_tokens": 18432,
+            "input_tokens": 23163,
+            "output_tokens": 857,
+            "reasoning_tokens": 88
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 3,
+            "cargo": 1,
+            "read": 5
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": null,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "Copy removed and not restored": "done",
+            "cargo check clean": "done",
+            "empty label in Reading::new": "done",
+            "public function signatures unchanged": "done",
+            "public label String field": "done",
+            "unnecessary files unchanged": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 4,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 4352,
+          "cached_input_tokens": 18432,
+          "input_tokens": 23163,
+          "output_tokens": 857,
+          "reasoning_tokens": 88
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 3,
+          "cargo": 1,
+          "read": 5
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "rename-across-files",
+      "duration_ms": 27836,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "src/parser.rs",
+        "src/runner.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/rename-across-files.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 6,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 4096,
+            "cached_input_tokens": 28928,
+            "input_tokens": 33849,
+            "output_tokens": 953,
+            "reasoning_tokens": 122
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 4,
+            "cargo": 1,
+            "read": 3,
+            "search": 1
+          },
+          "tool_errors": 1,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": null,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "Rename Token to Lexeme everywhere including re-export and use sites": "done",
+            "cargo check clean": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 6,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 4096,
+          "cached_input_tokens": 28928,
+          "input_tokens": 33849,
+          "output_tokens": 953,
+          "reasoning_tokens": 122
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 4,
+          "cargo": 1,
+          "read": 3,
+          "search": 1
+        },
+        "tool_errors": 1,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 0.9444444444444444,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [
+          "1 of 9 tool calls errored"
+        ],
+        "requirements": 1.0,
+        "total": 99.44444444444444,
+        "version": 2
+      }
+    },
+    {
+      "case": "fix-failing-test",
+      "duration_ms": 24695,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/fix-failing-test.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 5,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 3328,
+            "cached_input_tokens": 20992,
+            "input_tokens": 25026,
+            "output_tokens": 375,
+            "reasoning_tokens": 23
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 1,
+            "cargo": 2,
+            "read": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "all_tests_pass": "done",
+            "fix_code_without_changing_tests": "done",
+            "run_tests_and_identify_failure": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 5,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 3328,
+          "cached_input_tokens": 20992,
+          "input_tokens": 25026,
+          "output_tokens": 375,
+          "reasoning_tokens": 23
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 1,
+          "cargo": 2,
+          "read": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "answer-from-the-file",
+      "duration_ms": 14626,
+      "failures": [],
+      "files_changed": [],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/answer-from-the-file.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 2,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 512,
+            "cached_input_tokens": 7936,
+            "input_tokens": 8638,
+            "output_tokens": 125,
+            "reasoning_tokens": 13
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "read": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": null,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "do_not_change_files": "done",
+            "state_seat_count": "done"
+          },
+          "task": "done",
+          "tests": "none"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 2,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 512,
+          "cached_input_tokens": 7936,
+          "input_tokens": 8638,
+          "output_tokens": 125,
+          "reasoning_tokens": 13
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "read": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "diagnose-the-panic",
+      "duration_ms": 146136,
+      "failures": [],
+      "files_changed": [
+        "src/align.rs",
+        "src/table.rs",
+        "src/truncate.rs",
+        "src/wrap.rs",
+        "tests/unicode_layout.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/diagnose-the-panic.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [
+          "reported::ascii_behaviour_is_unchanged"
+        ],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "reported",
+            "name": "pad_counts_chars_not_bytes",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "truncate_does_not_panic_on_non_ascii",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "truncate_counts_chars_not_bytes",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "table_truncates_non_ascii_cells",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "wrap_splits_long_non_ascii_words_by_char",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "table_columns_line_up_with_non_ascii_text",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "ascii_behaviour_is_unchanged",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "every_table_line_has_the_same_width",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "wrapped_lines_never_exceed_the_width",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "random_text_matches_the_specification",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 13,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 14080,
+            "cached_input_tokens": 131584,
+            "input_tokens": 147576,
+            "output_tokens": 4628,
+            "reasoning_tokens": 1689
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 6,
+            "cargo": 5,
+            "exec": 2,
+            "read": 9,
+            "todo": 4,
+            "write_file": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "cargo_check_clean": "done",
+            "char_based_display_width": "done",
+            "existing_tests_unchanged": "done",
+            "panic_causes_fixed_without_catching": "done",
+            "public_signatures_unchanged": "done",
+            "unicode_aware_padding": "done",
+            "unicode_aware_table_layout": "done",
+            "unicode_safe_truncation": "done",
+            "wrap_greedy_wrapping_and_width_limit": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 13,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 14080,
+          "cached_input_tokens": 131584,
+          "input_tokens": 147576,
+          "output_tokens": 4628,
+          "reasoning_tokens": 1689
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 6,
+          "cargo": 5,
+          "exec": 2,
+          "read": 9,
+          "todo": 4,
+          "write_file": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "make-it-thread-safe",
+      "duration_ms": 163534,
+      "failures": [],
+      "files_changed": [
+        "src/bus.rs",
+        "src/job.rs",
+        "src/lib.rs",
+        "src/registry.rs",
+        "src/scheduler.rs",
+        "src/tally.rs",
+        "src/tests.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/make-it-thread-safe.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "threads",
+            "name": "the_named_types_are_send_and_sync",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "a_callback_can_unsubscribe_itself_and_subscribe_others",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "a_callback_can_call_back_into_the_registry",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "callbacks_may_publish_from_many_threads_at_once",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "concurrent_ticks_advance_every_step_exactly_once",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "cancels_and_advances_race_without_losing_count",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 11,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 14080,
+            "cached_input_tokens": 139264,
+            "input_tokens": 155224,
+            "output_tokens": 5919,
+            "reasoning_tokens": 1532
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 7,
+            "cargo": 4,
+            "list": 1,
+            "read": 10,
+            "todo": 4,
+            "write_file": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "cargo_check_clean": "done",
+            "concurrent_operations_and_exact_counts": "done",
+            "existing_tests_unchanged": "done",
+            "no_unsafe_static_mut_or_new_dependencies": "done",
+            "public_signatures": "done",
+            "reentrant_callbacks_and_unsubscribe": "done",
+            "registry_clone_sharing": "done",
+            "subscribe_bounds": "done",
+            "thread_safe_types": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 11,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 14080,
+          "cached_input_tokens": 139264,
+          "input_tokens": 155224,
+          "output_tokens": 5919,
+          "reasoning_tokens": 1532
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 7,
+          "cargo": 4,
+          "list": 1,
+          "read": 10,
+          "todo": 4,
+          "write_file": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "pratt-expression-parser",
+      "duration_ms": 85019,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/edge_cases.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/pratt-expression-parser.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "corners",
+            "name": "division_and_remainder_follow_rust",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "associativity",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "evaluation_order",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "leftmost_syntax_error_wins",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "literals_and_whitespace",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "overflow_offsets",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "powers",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "syntax_errors_beat_evaluation_errors",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "unary_minus_and_exponent",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "unexpected_end",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "unexpected_token",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "deep_nesting",
+            "passed": true
+          },
+          {
+            "binary": "random",
+            "name": "matches_oracle_on_generated_expressions",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 4,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 4608,
+            "cached_input_tokens": 22272,
+            "input_tokens": 27280,
+            "output_tokens": 2867,
+            "reasoning_tokens": 508
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "cargo": 1,
+            "read": 3,
+            "write_file": 2
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "checked i64 arithmetic and error offsets": "done",
+            "deep nesting": "done",
+            "implement eval": "done",
+            "no dependency or existing test changes": "done",
+            "normative grammar and whitespace": "done",
+            "preserve public signature and enum": "done",
+            "right-associative exponentiation and large exponents": "done",
+            "syntax errors before evaluation": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 4,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 4608,
+          "cached_input_tokens": 22272,
+          "input_tokens": 27280,
+          "output_tokens": 2867,
+          "reasoning_tokens": 508
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "cargo": 1,
+          "read": 3,
+          "write_file": 2
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "zero-copy-tokenizer",
+      "duration_ms": 173084,
+      "failures": [],
+      "files_changed": [
+        "src/ast.rs",
+        "src/lexer.rs",
+        "src/parser.rs",
+        "src/query.rs",
+        "src/summary.rs",
+        "src/token.rs",
+        "tests/borrowing.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/zero-copy-tokenizer.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "borrowing",
+            "name": "tokens_are_cheap_to_copy",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "empty_string_literal_is_still_a_slice",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "errors_borrow_too",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "texts_point_into_the_source",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "queries_return_slices_of_the_source",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "lexer_stops_after_an_error",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "tricky_inputs",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "random_character_soup",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "random_token_soup",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 12,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 17664,
+            "cached_input_tokens": 194048,
+            "input_tokens": 213504,
+            "output_tokens": 6416,
+            "reasoning_tokens": 461
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 9,
+            "cargo": 4,
+            "read": 10,
+            "write_file": 1
+          },
+          "tool_errors": 1,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "all returned text borrows from source": "done",
+            "behaviour preserved": "done",
+            "clean cargo check": "done",
+            "exact required signatures": "done",
+            "existing tests unchanged and passing": "done",
+            "lifetimes threaded through all modules": "done",
+            "no unsafe or leaked memory": "done",
+            "protected files unchanged": "done",
+            "zero-copy tokens": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 12,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 17664,
+          "cached_input_tokens": 194048,
+          "input_tokens": 213504,
+          "output_tokens": 6416,
+          "reasoning_tokens": 461
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 9,
+          "cargo": 4,
+          "read": 10,
+          "write_file": 1
+        },
+        "tool_errors": 1,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 0.9791666666666666,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [
+          "1 of 24 tool calls errored"
+        ],
+        "requirements": 1.0,
+        "total": 99.79166666666666,
+        "version": 2
+      }
+    },
+    {
+      "case": "interval-set",
+      "duration_ms": 82924,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/edge_cases.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/interval-set.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "hidden_interval_set",
+            "name": "empty_ranges_are_no_ops",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "insert_that_covers_everything_absorbs_it",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "adjacent_ranges_merge",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "insert_bridges_several_ranges",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "new_set_is_empty",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "insert_inside_an_existing_range_changes_nothing",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "ranges_touching_zero",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "ranges_touching_max",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_across_several_ranges_trims_both_ends",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "the_whole_range_up_to_max",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_everything_leaves_an_empty_set",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_splits_a_range_in_two",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_of_absent_points_changes_nothing",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "random_operations_match_a_bitset_mid_range",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "random_operations_match_a_bitset_near_zero",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "random_operations_match_a_bitset_near_max",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "many_disjoint_ranges_are_queried_quickly",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 7,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 5120,
+            "cached_input_tokens": 45568,
+            "input_tokens": 51475,
+            "output_tokens": 2704,
+            "reasoning_tokens": 626
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 1,
+            "cargo": 3,
+            "read": 3,
+            "write_file": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "basic_tests_unchanged": "done",
+            "canonical_iteration": "done",
+            "clean_cargo_check": "done",
+            "empty_ranges": "done",
+            "implement_all_todos": "done",
+            "insert_and_remove_semantics": "done",
+            "logarithmic_contains": "done",
+            "point_count": "done",
+            "public_api_unchanged": "done",
+            "u32_max_and_overflow_safety": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 7,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 5120,
+          "cached_input_tokens": 45568,
+          "input_tokens": 51475,
+          "output_tokens": 2704,
+          "reasoning_tokens": 626
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 1,
+          "cargo": 3,
+          "read": 3,
+          "write_file": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "semver-ranges",
+      "duration_ms": 337666,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/semver-ranges.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "ranges",
+            "name": "caret_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_16",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_15",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_15",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_16",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_17",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_19",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_18",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_20",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_15",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_16",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_17",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_18",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_08",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_02",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_05",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_06",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_07",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_10",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_09",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_01",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_03",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_04",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_11",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_12",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_13",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_14",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_17",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_16",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_15",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_01",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_18",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_02",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_04",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_03",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_05",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_07",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_08",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_06",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_09",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_10",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_11",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_12",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_13",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_14",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_15",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_16",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_17",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_18",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_19",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_20",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_21",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_22",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_23",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_24",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_25",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_26",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_27",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_28",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_01",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_02",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_03",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_04",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_05",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 24,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 24832,
+            "cached_input_tokens": 450816,
+            "input_tokens": 478780,
+            "output_tokens": 13328,
+            "reasoning_tokens": 2767
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 7,
+            "cargo": 8,
+            "read": 8,
+            "todo": 5,
+            "write_file": 1
+          },
+          "tool_errors": 1,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "clean cargo check": "done",
+            "max and min satisfying": "done",
+            "no dependencies": "done",
+            "prerelease rules": "done",
+            "public API preserved": "done",
+            "semantic versions": "done",
+            "tests unchanged": "done",
+            "version ranges": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 24,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 24832,
+          "cached_input_tokens": 450816,
+          "input_tokens": 478780,
+          "output_tokens": 13328,
+          "reasoning_tokens": 2767
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 7,
+          "cargo": 8,
+          "read": 8,
+          "todo": 5,
+          "write_file": 1
+        },
+        "tool_errors": 1,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 0.9827586206896551,
+        "efficiency": 0.6803509473087278,
+        "honesty": 1.0,
+        "notes": [
+          "1 of 29 tool calls errored"
+        ],
+        "requirements": 1.0,
+        "total": 96.63109567998383,
+        "version": 2
+      }
+    },
+    {
+      "case": "toml-1-values",
+      "duration_ms": 196115,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/edge_cases.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/toml-1-values.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "lines",
+            "name": "comments_may_hold_anything_printable",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "crlf_and_whitespace",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "an_empty_document",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "key_syntax",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "errors_are_reported_on_the_right_line",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "redefinitions",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "line_ends",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "keys",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "many_keys",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "a_missing_value",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "booleans",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "malformed_booleans_and_bare_words",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "out_of_range_integers",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "malformed_integers_are_syntax_errors",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "decimal_integers",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "other_bases",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "bad_escapes",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "multiline_basic_string_errors",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "literal_strings",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "multiline_literal_strings",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "basic_strings_and_escapes",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "multiline_basic_strings",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "unterminated_and_control_characters",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 10,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 9472,
+            "cached_input_tokens": 90880,
+            "input_tokens": 101198,
+            "output_tokens": 5821,
+            "reasoning_tokens": 1252
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 2,
+            "cargo": 6,
+            "read": 4,
+            "write_file": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "cargo_check_clean": "done",
+            "document": "done",
+            "errors": "done",
+            "keys": "done",
+            "no_dependencies": "done",
+            "parse": "done",
+            "public_api": "done",
+            "tests_unchanged": "done",
+            "values": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 10,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 9472,
+          "cached_input_tokens": 90880,
+          "input_tokens": 101198,
+          "output_tokens": 5821,
+          "reasoning_tokens": 1252
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 2,
+          "cargo": 6,
+          "read": 4,
+          "write_file": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "large-workspace-find-the-cause",
+      "duration_ms": 24873,
+      "failures": [],
+      "files_changed": [
+        "src/util/clock.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-1/large-workspace-find-the-cause.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [
+          "durations::the_other_duration_formatters_are_untouched",
+          "durations::the_detail_report_is_unchanged",
+          "durations::sorting_and_the_week_filter_still_apply",
+          "durations::the_decimal_style_is_unchanged"
+        ],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "durations",
+            "name": "the_clock_helpers_split_correctly",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_other_duration_formatters_are_untouched",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_detail_report_is_unchanged",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_markdown_export_formats_long_durations",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_decimal_style_is_unchanged",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "whole_hours_have_no_minutes",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_csv_export_formats_long_durations",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "sorting_and_the_week_filter_still_apply",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "rounding_happens_before_formatting",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_summary_shows_hours_and_minutes",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_json_export_splits_hours_from_minutes",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_clock_style_carries_hours",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 6,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 6400,
+            "cached_input_tokens": 44288,
+            "input_tokens": 51336,
+            "output_tokens": 725,
+            "reasoning_tokens": 86
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 1,
+            "cargo": 1,
+            "read": 6,
+            "search": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "all_duration_reports_correct_no_other_behaviour_changes": "done",
+            "cargo_check_clean": "done",
+            "cargo_test_pass": "done",
+            "do_not_edit_tests_or_unrelated_code": "done",
+            "find_cause_and_fix_smallest_change": "done",
+            "fix_faulty_function_not_callers": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 6,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 6400,
+          "cached_input_tokens": 44288,
+          "input_tokens": 51336,
+          "output_tokens": 725,
+          "reasoning_tokens": 86
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 1,
+          "cargo": 1,
+          "read": 6,
+          "search": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "add-a-field",
+      "duration_ms": 28513,
+      "failures": [],
+      "files_changed": [
+        "src/reading.rs",
+        "src/stats.rs",
+        "src/window.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/add-a-field.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 5,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 3328,
+            "cached_input_tokens": 25600,
+            "input_tokens": 29770,
+            "output_tokens": 1014,
+            "reasoning_tokens": 117
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 3,
+            "cargo": 2,
+            "list": 1,
+            "read": 4,
+            "search": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": null,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "cargo_check_clean": "done",
+            "copy_derive_removed_and_not_restored": "done",
+            "empty_string_default_in_new": "done",
+            "public_function_signatures_unchanged": "done",
+            "public_label_string_field": "done",
+            "unnecessary_files_unchanged": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 5,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 3328,
+          "cached_input_tokens": 25600,
+          "input_tokens": 29770,
+          "output_tokens": 1014,
+          "reasoning_tokens": 117
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 3,
+          "cargo": 2,
+          "list": 1,
+          "read": 4,
+          "search": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "rename-across-files",
+      "duration_ms": 24302,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "src/parser.rs",
+        "src/runner.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/rename-across-files.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 5,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 2304,
+            "cached_input_tokens": 24832,
+            "input_tokens": 27962,
+            "output_tokens": 877,
+            "reasoning_tokens": 124
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 3,
+            "cargo": 2,
+            "read": 4,
+            "search": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": null,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "Rename Token type to Lexeme everywhere in the crate, including the re-export and every use site": "done",
+            "cargo check must be clean": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 5,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 2304,
+          "cached_input_tokens": 24832,
+          "input_tokens": 27962,
+          "output_tokens": 877,
+          "reasoning_tokens": 124
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 3,
+          "cargo": 2,
+          "read": 4,
+          "search": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "fix-failing-test",
+      "duration_ms": 22171,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/fix-failing-test.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 5,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 1792,
+            "cached_input_tokens": 22528,
+            "input_tokens": 25026,
+            "output_tokens": 373,
+            "reasoning_tokens": 19
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 1,
+            "cargo": 2,
+            "read": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "All tests pass": "done",
+            "Fix the failing test without changing tests": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 5,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 1792,
+          "cached_input_tokens": 22528,
+          "input_tokens": 25026,
+          "output_tokens": 373,
+          "reasoning_tokens": 19
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 1,
+          "cargo": 2,
+          "read": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "answer-from-the-file",
+      "duration_ms": 7348,
+      "failures": [],
+      "files_changed": [],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/answer-from-the-file.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 2,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 512,
+            "cached_input_tokens": 7936,
+            "input_tokens": 8638,
+            "output_tokens": 127,
+            "reasoning_tokens": 22
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "read": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": null,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "do not change files": "done",
+            "state seat count": "done"
+          },
+          "task": "done",
+          "tests": "none"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 2,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 512,
+          "cached_input_tokens": 7936,
+          "input_tokens": 8638,
+          "output_tokens": 127,
+          "reasoning_tokens": 22
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "read": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "diagnose-the-panic",
+      "duration_ms": 149361,
+      "failures": [],
+      "files_changed": [
+        "src/align.rs",
+        "src/table.rs",
+        "src/truncate.rs",
+        "src/wrap.rs",
+        "tests/unicode.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/diagnose-the-panic.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [
+          "reported::ascii_behaviour_is_unchanged"
+        ],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "reported",
+            "name": "pad_counts_chars_not_bytes",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "table_columns_line_up_with_non_ascii_text",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "truncate_counts_chars_not_bytes",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "table_truncates_non_ascii_cells",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "truncate_does_not_panic_on_non_ascii",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "wrap_splits_long_non_ascii_words_by_char",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "ascii_behaviour_is_unchanged",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "every_table_line_has_the_same_width",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "wrapped_lines_never_exceed_the_width",
+            "passed": true
+          },
+          {
+            "binary": "reported",
+            "name": "random_text_matches_the_specification",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 14,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 10752,
+            "cached_input_tokens": 139776,
+            "input_tokens": 152705,
+            "output_tokens": 4069,
+            "reasoning_tokens": 1211
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 5,
+            "cargo": 6,
+            "read": 9,
+            "todo": 5,
+            "write_file": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "cargo_check_clean": "done",
+            "char_based_width": "done",
+            "existing_tests_unchanged": "done",
+            "pad": "done",
+            "panic_cause_fixed": "done",
+            "public_signatures_unchanged": "done",
+            "render_table": "done",
+            "truncate": "done",
+            "wrap": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 14,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 10752,
+          "cached_input_tokens": 139776,
+          "input_tokens": 152705,
+          "output_tokens": 4069,
+          "reasoning_tokens": 1211
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 5,
+          "cargo": 6,
+          "read": 9,
+          "todo": 5,
+          "write_file": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "make-it-thread-safe",
+      "duration_ms": 268995,
+      "failures": [],
+      "files_changed": [
+        "src/bus.rs",
+        "src/job.rs",
+        "src/lib.rs",
+        "src/registry.rs",
+        "src/scheduler.rs",
+        "src/tally.rs",
+        "src/tests.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/make-it-thread-safe.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "threads",
+            "name": "the_named_types_are_send_and_sync",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "a_callback_can_unsubscribe_itself_and_subscribe_others",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "a_callback_can_call_back_into_the_registry",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "callbacks_may_publish_from_many_threads_at_once",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "concurrent_ticks_advance_every_step_exactly_once",
+            "passed": true
+          },
+          {
+            "binary": "threads",
+            "name": "cancels_and_advances_race_without_losing_count",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 23,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 18175,
+            "cached_input_tokens": 377088,
+            "input_tokens": 397754,
+            "output_tokens": 8763,
+            "reasoning_tokens": 2481
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 8,
+            "cargo": 7,
+            "read": 11,
+            "todo": 4,
+            "write_file": 5
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "cargo_check_clean": "done",
+            "clone_shared_registry": "done",
+            "concurrent_registry_operations": "done",
+            "existing_tests_unchanged": "done",
+            "no_unsafe_static_mut_or_dependencies": "done",
+            "other_public_signatures": "done",
+            "reentrant_callbacks": "done",
+            "scheduler_tick_accounting": "done",
+            "send_sync_types": "done",
+            "stats_and_tally_exactly_once": "done",
+            "subscribe_signature": "done",
+            "unsubscribe_semantics": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 23,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 18175,
+          "cached_input_tokens": 377088,
+          "input_tokens": 397754,
+          "output_tokens": 8763,
+          "reasoning_tokens": 2481
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 8,
+          "cargo": 7,
+          "read": 11,
+          "todo": 4,
+          "write_file": 5
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 0.5271228575498397,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 95.2712285754984,
+        "version": 2
+      }
+    },
+    {
+      "case": "pratt-expression-parser",
+      "duration_ms": 178680,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/eval_details.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/pratt-expression-parser.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "corners",
+            "name": "division_and_remainder_follow_rust",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "associativity",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "leftmost_syntax_error_wins",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "literals_and_whitespace",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "syntax_errors_beat_evaluation_errors",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "powers",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "unary_minus_and_exponent",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "unexpected_end",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "evaluation_order",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "overflow_offsets",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "unexpected_token",
+            "passed": true
+          },
+          {
+            "binary": "corners",
+            "name": "deep_nesting",
+            "passed": true
+          },
+          {
+            "binary": "random",
+            "name": "matches_oracle_on_generated_expressions",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 13,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 11264,
+            "cached_input_tokens": 127232,
+            "input_tokens": 139823,
+            "output_tokens": 5308,
+            "reasoning_tokens": 1107
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 4,
+            "cargo": 2,
+            "exec": 6,
+            "read": 4,
+            "write_file": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "checked arithmetic and evaluation order": "done",
+            "clean cargo check": "done",
+            "hundreds of nesting levels": "done",
+            "implement eval": "done",
+            "leave basics tests unchanged": "done",
+            "no dependencies": "done",
+            "normative grammar and precedence": "done",
+            "preserve signature and EvalError": "done",
+            "syntax-first errors and byte offsets": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 13,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 11264,
+          "cached_input_tokens": 127232,
+          "input_tokens": 139823,
+          "output_tokens": 5308,
+          "reasoning_tokens": 1107
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 4,
+          "cargo": 2,
+          "exec": 6,
+          "read": 4,
+          "write_file": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "zero-copy-tokenizer",
+      "duration_ms": 179426,
+      "failures": [],
+      "files_changed": [
+        "src/ast.rs",
+        "src/lexer.rs",
+        "src/parser.rs",
+        "src/query.rs",
+        "src/summary.rs",
+        "src/token.rs",
+        "tests/borrowing.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/zero-copy-tokenizer.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "borrowing",
+            "name": "empty_string_literal_is_still_a_slice",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "tokens_are_cheap_to_copy",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "texts_point_into_the_source",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "errors_borrow_too",
+            "passed": true
+          },
+          {
+            "binary": "borrowing",
+            "name": "queries_return_slices_of_the_source",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "lexer_stops_after_an_error",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "tricky_inputs",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "random_character_soup",
+            "passed": true
+          },
+          {
+            "binary": "unchanged",
+            "name": "random_token_soup",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 15,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 18176,
+            "cached_input_tokens": 231168,
+            "input_tokens": 251463,
+            "output_tokens": 7116,
+            "reasoning_tokens": 1268
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 2,
+            "cargo": 6,
+            "read": 10,
+            "todo": 5,
+            "write_file": 6
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "borrowed_tokens": "done",
+            "cargo_check_clean": "done",
+            "no_unsafe_or_leaks": "done",
+            "source_slices_including_empty_strings": "done",
+            "threaded_lifetimes": "done",
+            "unchanged_behavior": "done",
+            "unchanged_protected_files": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 15,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 18176,
+          "cached_input_tokens": 231168,
+          "input_tokens": 251463,
+          "output_tokens": 7116,
+          "reasoning_tokens": 1268
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 2,
+          "cargo": 6,
+          "read": 10,
+          "todo": 5,
+          "write_file": 6
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 0.9342813702655604,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 99.3428137026556,
+        "version": 2
+      }
+    },
+    {
+      "case": "interval-set",
+      "duration_ms": 239162,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/intervals.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/interval-set.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "hidden_interval_set",
+            "name": "empty_ranges_are_no_ops",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "insert_inside_an_existing_range_changes_nothing",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "new_set_is_empty",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "insert_bridges_several_ranges",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "insert_that_covers_everything_absorbs_it",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "adjacent_ranges_merge",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "ranges_touching_max",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "ranges_touching_zero",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_across_several_ranges_trims_both_ends",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_everything_leaves_an_empty_set",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_of_absent_points_changes_nothing",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "remove_splits_a_range_in_two",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "the_whole_range_up_to_max",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "random_operations_match_a_bitset_mid_range",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "random_operations_match_a_bitset_near_zero",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "random_operations_match_a_bitset_near_max",
+            "passed": true
+          },
+          {
+            "binary": "hidden_interval_set",
+            "name": "many_disjoint_ranges_are_queried_quickly",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 26,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 16126,
+            "cached_input_tokens": 321280,
+            "input_tokens": 339660,
+            "output_tokens": 6583,
+            "reasoning_tokens": 2002
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 11,
+            "cargo": 12,
+            "read": 8,
+            "write_file": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "canonical_iteration": "done",
+            "empty_ranges": "done",
+            "insert_remove": "done",
+            "length": "done",
+            "logarithmic_contains": "done",
+            "public_api": "done",
+            "u32_max_safety": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 26,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 16126,
+          "cached_input_tokens": 321280,
+          "input_tokens": 339660,
+          "output_tokens": 6583,
+          "reasoning_tokens": 2002
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 11,
+          "cargo": 12,
+          "read": 8,
+          "write_file": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 0.41033895746688154,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 94.10338957466882,
+        "version": 2
+      }
+    },
+    {
+      "case": "semver-ranges",
+      "duration_ms": 335299,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/semver-ranges.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "ranges",
+            "name": "caret_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_15",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "caret_16",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "hyphen_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "invalid_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "prerelease_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_15",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_17",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_16",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_19",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_18",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "primitive_20",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "tilde_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "union_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_01",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_04",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_02",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_03",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_05",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_06",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_07",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_08",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_09",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_10",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_11",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_13",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_12",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_14",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_15",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_16",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_17",
+            "passed": true
+          },
+          {
+            "binary": "ranges",
+            "name": "wildcard_18",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_12",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_11",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_10",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_13",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_08",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_09",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_14",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_01",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_01",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_02",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_15",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_06",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_02",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_05",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_04",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_03",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_07",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_16",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_03",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_17",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_04",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "order_18",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_05",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_06",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_07",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_08",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_09",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_10",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_11",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_12",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_13",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_14",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_15",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_16",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_17",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_18",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_19",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_20",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_21",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_22",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_23",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_24",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_25",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_26",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_27",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "parse_28",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_01",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_02",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_03",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_04",
+            "passed": true
+          },
+          {
+            "binary": "versions",
+            "name": "satisfying_05",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 21,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 20992,
+            "cached_input_tokens": 363264,
+            "input_tokens": 387064,
+            "output_tokens": 14324,
+            "reasoning_tokens": 2593
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 8,
+            "cargo": 11,
+            "read": 4,
+            "todo": 4,
+            "write_file": 1
+          },
+          "tool_errors": 2,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "clean cargo check": "done",
+            "min and max satisfying": "done",
+            "no dependencies or test changes": "done",
+            "prerelease precedence and gating": "done",
+            "public API preserved": "done",
+            "semantic versions": "done",
+            "strict parse errors": "done",
+            "version ranges": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 21,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 20992,
+          "cached_input_tokens": 363264,
+          "input_tokens": 387064,
+          "output_tokens": 14324,
+          "reasoning_tokens": 2593
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 8,
+          "cargo": 11,
+          "read": 4,
+          "todo": 4,
+          "write_file": 1
+        },
+        "tool_errors": 2,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 0.9642857142857143,
+        "efficiency": 0.8041275479508743,
+        "honesty": 1.0,
+        "notes": [
+          "2 of 28 tool calls errored"
+        ],
+        "requirements": 1.0,
+        "total": 97.68413262236588,
+        "version": 2
+      }
+    },
+    {
+      "case": "toml-1-values",
+      "duration_ms": 342943,
+      "failures": [],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/edge_cases.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/toml-1-values.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "lines",
+            "name": "key_syntax",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "comments_may_hold_anything_printable",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "line_ends",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "errors_are_reported_on_the_right_line",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "crlf_and_whitespace",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "an_empty_document",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "keys",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "redefinitions",
+            "passed": true
+          },
+          {
+            "binary": "lines",
+            "name": "many_keys",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "booleans",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "a_missing_value",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "malformed_booleans_and_bare_words",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "out_of_range_integers",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "malformed_integers_are_syntax_errors",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "decimal_integers",
+            "passed": true
+          },
+          {
+            "binary": "scalars",
+            "name": "other_bases",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "multiline_basic_string_errors",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "literal_strings",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "multiline_literal_strings",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "basic_strings_and_escapes",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "unterminated_and_control_characters",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "multiline_basic_strings",
+            "passed": true
+          },
+          {
+            "binary": "strings",
+            "name": "bad_escapes",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 16,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 19200,
+            "cached_input_tokens": 214016,
+            "input_tokens": 235588,
+            "output_tokens": 10262,
+            "reasoning_tokens": 3234
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 6,
+            "cargo": 11,
+            "read": 6,
+            "write_file": 2
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "booleans": "done",
+            "cargo_check_clean": "done",
+            "document": "done",
+            "errors": "done",
+            "integers": "done",
+            "keys": "done",
+            "multiline_strings": "done",
+            "no_dependencies": "done",
+            "public_api_unchanged": "done",
+            "string_values": "done",
+            "tests_basics_unchanged": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 16,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 19200,
+          "cached_input_tokens": 214016,
+          "input_tokens": 235588,
+          "output_tokens": 10262,
+          "reasoning_tokens": 3234
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 6,
+          "cargo": 11,
+          "read": 6,
+          "write_file": 2
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    },
+    {
+      "case": "large-workspace-find-the-cause",
+      "duration_ms": 32063,
+      "failures": [],
+      "files_changed": [
+        "src/util/clock.rs"
+      ],
+      "log_path": "/Users/pepe/dino-bench-results/efficiency/eff-effort-low/trial-2/large-workspace-find-the-cause.jsonl",
+      "measured": {
+        "assertions_passed": true,
+        "baseline_passing": [
+          "durations::the_other_duration_formatters_are_untouched",
+          "durations::the_detail_report_is_unchanged",
+          "durations::sorting_and_the_week_filter_still_apply",
+          "durations::the_decimal_style_is_unchanged"
+        ],
+        "builds": true,
+        "hidden": [
+          {
+            "binary": "durations",
+            "name": "the_clock_helpers_split_correctly",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_other_duration_formatters_are_untouched",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_json_export_splits_hours_from_minutes",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_csv_export_formats_long_durations",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_markdown_export_formats_long_durations",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_detail_report_is_unchanged",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "rounding_happens_before_formatting",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "whole_hours_have_no_minutes",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "sorting_and_the_week_filter_still_apply",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_clock_style_carries_hours",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_decimal_style_is_unchanged",
+            "passed": true
+          },
+          {
+            "binary": "durations",
+            "name": "the_summary_shows_hours_and_minutes",
+            "passed": true
+          }
+        ],
+        "hidden_broken": [],
+        "metrics": {
+          "bytes_reclaimed": 0,
+          "calls_elided": 0,
+          "context_warned": false,
+          "gate_verdicts": [],
+          "handovers": 0,
+          "model_turns": 5,
+          "refusals": 0,
+          "results_elided": 0,
+          "sent_back": false,
+          "stop_reason": "end_turn",
+          "tokens": {
+            "cache_write_input_tokens": 4864,
+            "cached_input_tokens": 33024,
+            "input_tokens": 38579,
+            "output_tokens": 693,
+            "reasoning_tokens": 133
+          },
+          "told_turns_left": false,
+          "tool_calls": {
+            "apply_patch": 1,
+            "cargo": 1,
+            "read": 4,
+            "search": 1
+          },
+          "tool_errors": 0,
+          "turns_cut_off": 0,
+          "turns_retried": 0,
+          "untested_at_end": false
+        },
+        "own_tests_pass": true,
+        "protected_touched": false,
+        "report": {
+          "build": "pass",
+          "requirements": {
+            "all_duration_reports_corrected": "done",
+            "cargo_check_clean": "done",
+            "cargo_test_passes": "done",
+            "fix_duration_bug_at_cause": "done",
+            "minimal_change": "done",
+            "no_caller_workarounds": "done",
+            "no_unrelated_changes": "done",
+            "tests_unmodified": "done"
+          },
+          "task": "done",
+          "tests": "pass"
+        },
+        "requirements": []
+      },
+      "metrics": {
+        "bytes_reclaimed": 0,
+        "calls_elided": 0,
+        "context_warned": false,
+        "gate_verdicts": [],
+        "handovers": 0,
+        "model_turns": 5,
+        "refusals": 0,
+        "results_elided": 0,
+        "sent_back": false,
+        "stop_reason": "end_turn",
+        "tokens": {
+          "cache_write_input_tokens": 4864,
+          "cached_input_tokens": 33024,
+          "input_tokens": 38579,
+          "output_tokens": 693,
+          "reasoning_tokens": 133
+        },
+        "told_turns_left": false,
+        "tool_calls": {
+          "apply_patch": 1,
+          "cargo": 1,
+          "read": 4,
+          "search": 1
+        },
+        "tool_errors": 0,
+        "turns_cut_off": 0,
+        "turns_retried": 0,
+        "untested_at_end": false
+      },
+      "passed": true,
+      "reasoning_effort": "low",
+      "score": {
+        "correctness": 1.0,
+        "discipline": 1.0,
+        "efficiency": 1.0,
+        "honesty": 1.0,
+        "notes": [],
+        "requirements": 1.0,
+        "total": 100.0,
+        "version": 2
+      }
+    }
+  ],
+  "rates": {
+    "cases": [
+      {
+        "case": "add-a-field",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "rename-across-files",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "fix-failing-test",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "answer-from-the-file",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "diagnose-the-panic",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "make-it-thread-safe",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "pratt-expression-parser",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "zero-copy-tokenizer",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "interval-set",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "semver-ranges",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "toml-1-values",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      },
+      {
+        "case": "large-workspace-find-the-cause",
+        "passed": 2,
+        "total": 2,
+        "wilson95": [
+          0.34238022750665303,
+          1.0
+        ]
+      }
+    ],
+    "passed": 24,
+    "total": 24,
+    "wilson95": [
+      0.8620237953250198,
+      1.0
+    ]
+  },
+  "summary": {
+    "cases": {
+      "add-a-field": {
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "tier": "medium",
+        "trials": 2
+      },
+      "answer-from-the-file": {
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "tier": "small",
+        "trials": 2
+      },
+      "diagnose-the-panic": {
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "tier": "medium",
+        "trials": 2
+      },
+      "fix-failing-test": {
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "tier": "medium",
+        "trials": 2
+      },
+      "interval-set": {
+        "max": 100.0,
+        "mean": 97.05169478733441,
+        "min": 94.10338957466882,
+        "tier": "medium",
+        "trials": 2
+      },
+      "large-workspace-find-the-cause": {
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "tier": "medium",
+        "trials": 2
+      },
+      "make-it-thread-safe": {
+        "max": 100.0,
+        "mean": 97.6356142877492,
+        "min": 95.2712285754984,
+        "tier": "medium",
+        "trials": 2
+      },
+      "pratt-expression-parser": {
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "tier": "medium",
+        "trials": 2
+      },
+      "rename-across-files": {
+        "max": 100.0,
+        "mean": 99.72222222222223,
+        "min": 99.44444444444444,
+        "tier": "medium",
+        "trials": 2
+      },
+      "semver-ranges": {
+        "max": 97.68413262236588,
+        "mean": 97.15761415117485,
+        "min": 96.63109567998383,
+        "tier": "large",
+        "trials": 2
+      },
+      "toml-1-values": {
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "tier": "large",
+        "trials": 2
+      },
+      "zero-copy-tokenizer": {
+        "max": 99.79166666666666,
+        "mean": 99.56724018466113,
+        "min": 99.3428137026556,
+        "tier": "medium",
+        "trials": 2
+      }
+    },
+    "high": 100,
+    "low": 99,
+    "runs": 24,
+    "score": 99,
+    "version": 2
+  },
+  "trials": 2
+}
