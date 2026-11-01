@@ -14,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use dino_protocol::ReasoningEffort;
@@ -22,16 +23,20 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::Case;
+use crate::EarlyStop;
 use crate::EvalError;
 use crate::Metrics;
 use crate::Outcome;
 use crate::Variant;
 use crate::case::fingerprint_tree;
 use crate::runner::Finished;
+use crate::runner::Tripwire;
 use crate::runner::conclude;
 use crate::runner::prompt_for;
+use crate::runner::protected_failure;
 use crate::runner::wall_outcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -788,7 +793,17 @@ fn copy_logins(harness: Harness, logins: &[(PathBuf, PathBuf)]) -> Result<Logins
     Ok(copied)
 }
 
-/// Runs one case through `harness` with `model` and scores the result.
+/// How often a watched harness's workspace is compared with how it began.
+const TRIPWIRE_POLL: Duration = Duration::from_secs(2);
+
+enum Ended {
+    Exited,
+    Wall,
+    Tripped,
+}
+
+/// Runs one case through `harness` with `model` and scores the result,
+/// stopping the harness once it changes a protected path when `early_stop`.
 ///
 /// # Errors
 ///
@@ -801,9 +816,13 @@ pub async fn run_external(
     harness: Harness,
     model: &str,
     provider: Option<Provider>,
+    early_stop: bool,
 ) -> Result<Outcome, EvalError> {
     let workspace = case.materialise(scratch)?;
     let before = fingerprint_tree(&workspace)?;
+    let tripwire = early_stop
+        .then(|| Tripwire::new(case, &workspace, &before, CancellationToken::new()))
+        .flatten();
     let (invocation, logins) = prepare(case, scratch, &workspace, harness, model, provider)?;
     let invocation = harness.contained(invocation, &workspace, sandbox.confines_writes())?;
     // Model names such as `kimi-code/k3.1-pro` would otherwise name a directory.
@@ -817,7 +836,7 @@ pub async fn run_external(
     for variable in &invocation.removed {
         command.env_remove(variable);
     }
-    let mut child = command
+    let child = command
         .current_dir(&workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -827,27 +846,14 @@ pub async fn run_external(
         .map_err(|error| {
             EvalError::Setup(format!("cannot start {}: {error}", invocation.program))
         })?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| EvalError::Setup("the harness had no stdout".into()))?;
     // The case's own clock. A turn budget is not enforceable on another
     // harness, and it would not stop one turn that never returns.
     let limit = case.wall_limit()?;
-    let mut stream = String::new();
-    let timed_out = tokio::time::timeout(limit, async {
-        let _ = stdout.read_to_string(&mut stream).await;
-        let _ = child.wait().await;
-    })
-    .await
-    .is_err();
+    let (ended, stream) = await_harness(child, limit, tripwire.as_ref()).await?;
     let duration_ms = started.elapsed().as_millis();
-    if timed_out {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-    }
     drop(logins);
     let _ = std::fs::write(&log_path, &stream);
+    let stream = String::from_utf8_lossy(&stream);
 
     let parsed = match harness {
         Harness::ClaudeCode => parse_claude_code(&stream),
@@ -859,9 +865,10 @@ pub async fn run_external(
     let variant = Variant {
         score: true,
         reasoning_effort: harness.effort(provider),
+        early_stop,
         ..Variant::default()
     };
-    if timed_out {
+    if matches!(ended, Ended::Wall) {
         return wall_outcome(
             case,
             &variant,
@@ -878,10 +885,12 @@ pub async fn run_external(
         );
     }
     let mut failures = Vec::new();
-    if !parsed.completed {
-        failures.push("the harness did not complete the run".to_owned());
+    match tripwire.as_ref().and_then(Tripwire::tripped) {
+        Some(path) if matches!(ended, Ended::Tripped) => failures.push(protected_failure(path)),
+        _ if !parsed.completed => failures.push("the harness did not complete the run".to_owned()),
+        _ => {}
     }
-    conclude(
+    let mut outcome = conclude(
         case,
         scratch,
         sandbox,
@@ -896,7 +905,48 @@ pub async fn run_external(
             log_path,
         },
     )
-    .await
+    .await?;
+    if matches!(ended, Ended::Tripped) {
+        outcome.stopped = Some(EarlyStop::ProtectedPath);
+    }
+    Ok(outcome)
+}
+
+/// The harness's event stream, once it exits or is stopped.
+async fn await_harness(
+    mut child: tokio::process::Child,
+    limit: Duration,
+    tripwire: Option<&Tripwire>,
+) -> Result<(Ended, Vec<u8>), EvalError> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| EvalError::Setup("the harness had no stdout".into()))?;
+    // Bytes, not a String: a dropped `read_to_string` keeps nothing it read.
+    let mut stream = Vec::new();
+    let ended = tokio::select! {
+        finished = tokio::time::timeout(limit, async {
+            let _ = stdout.read_to_end(&mut stream).await;
+            let _ = child.wait().await;
+        }) => if finished.is_ok() { Ended::Exited } else { Ended::Wall },
+        () = tripped(tripwire) => Ended::Tripped,
+    };
+    if !matches!(ended, Ended::Exited) {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    Ok((ended, stream))
+}
+
+/// Resolves once the harness has changed a protected path; never without a
+/// tripwire.
+async fn tripped(tripwire: Option<&Tripwire>) {
+    let Some(tripwire) = tripwire else {
+        return std::future::pending().await;
+    };
+    while tripwire.check().is_none() {
+        tokio::time::sleep(TRIPWIRE_POLL).await;
+    }
 }
 
 #[cfg(test)]
@@ -910,6 +960,37 @@ mod tests {
             arguments: arguments.iter().map(|part| (*part).to_owned()).collect(),
             ..Invocation::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_watched_harness_trips_on_its_case_tests_and_nothing_else() {
+        let case = Case::load(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/contradictory-tests"),
+        )
+        .unwrap();
+        let scratch = std::env::temp_dir().join(format!("dino-tripwire-{}", std::process::id()));
+        let workspace = case.materialise(&scratch).unwrap();
+        let before = fingerprint_tree(&workspace).unwrap();
+        let cancel = CancellationToken::new();
+        let wire = Tripwire::new(&case, &workspace, &before, cancel.clone()).unwrap();
+
+        std::fs::write(workspace.join("src/lib.rs"), "pub fn round_half() {}").unwrap();
+        let unprotected =
+            tokio::time::timeout(Duration::from_millis(100), tripped(Some(&wire))).await;
+        let rounding = workspace.join("tests/rounding.rs");
+        let original = std::fs::read(&rounding).unwrap();
+        std::fs::write(&rounding, "").unwrap();
+        let protected = tokio::time::timeout(Duration::from_secs(1), tripped(Some(&wire))).await;
+        std::fs::write(&rounding, original).unwrap();
+        let after_restore = wire.check().map(str::to_owned);
+        let unwatched = tokio::time::timeout(Duration::from_millis(50), tripped(None)).await;
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        assert!(unprotected.is_err(), "tripped on src/lib.rs");
+        assert!(protected.is_ok(), "did not trip on the case's tests");
+        assert!(cancel.is_cancelled());
+        assert_eq!(after_restore.as_deref(), Some("tests/rounding.rs"));
+        assert!(unwatched.is_err());
     }
 
     fn setting<'a>(arguments: &'a [String], prefix: &str) -> Option<&'a str> {

@@ -884,3 +884,100 @@ async fn a_reread_does_not_pass_until_the_range_is_withheld() {
     assert_eq!(outcome.metrics.model_turns, 3);
     assert!(outcome.passed, "failures: {:?}", outcome.failures);
 }
+
+async fn run_with(
+    case: &Case,
+    scratch: &Scratch,
+    variant: &dino_eval::Variant,
+    turns: Vec<Vec<ModelEvent>>,
+) -> dino_eval::Outcome {
+    let build = |_prompt: String, _tools: Vec<dino_protocol::ToolDefinition>| {
+        Ok(Box::new(Scripted {
+            profile: dino_model::builtin_profiles().remove(0),
+            turns: VecDeque::from(turns.clone()),
+        }) as Box<dyn ModelSession>)
+    };
+    run_case(case, &scratch.path, Arc::new(Unconfined), variant, &build)
+        .await
+        .unwrap()
+}
+
+/// A shell write outside the protected path, one into it, then turns a
+/// stopped run never reaches. The shell, because the file tools refuse it.
+fn into_the_guarded_path() -> Vec<Vec<ModelEvent>> {
+    vec![
+        tool_turn("c1", "shell", json!({"command": "echo x > src/notes.txt"})),
+        tool_turn(
+            "c2",
+            "shell",
+            json!({"command": "mkdir -p guarded && echo x > guarded/kept.txt"}),
+        ),
+        tool_turn("c3", "read", json!({"path": "src/lib.rs"})),
+        text_turn("Done."),
+        text_turn("Done."),
+    ]
+}
+
+fn guarded_case() -> Case {
+    let mut case = Case::load(corpus().join("add-a-function")).unwrap();
+    case.protected = vec![PathBuf::from("guarded")];
+    case
+}
+
+#[tokio::test]
+async fn early_stop_ends_the_run_at_its_first_change_to_a_protected_path() {
+    let scratch = Scratch::new();
+    let variant = dino_eval::Variant {
+        early_stop: true,
+        score: true,
+        ..dino_eval::Variant::default()
+    };
+
+    let outcome = run_with(&guarded_case(), &scratch, &variant, into_the_guarded_path()).await;
+
+    assert!(!outcome.passed);
+    assert_eq!(outcome.stopped, Some(dino_eval::EarlyStop::ProtectedPath));
+    assert_eq!(outcome.metrics.model_turns, 2);
+    assert_eq!(
+        outcome.failures[0],
+        "stopped early: the run changed guarded/kept.txt, a protected path"
+    );
+    let score = outcome.score.as_ref().unwrap();
+    assert!(score.total.abs() < f64::EPSILON, "scored {}", score.total);
+    let record = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(record["stopped"], "protected_path");
+    assert_eq!(record["early_stop"], true);
+}
+
+#[tokio::test]
+async fn without_early_stop_the_same_run_goes_on_to_the_same_score() {
+    let scratch = Scratch::new();
+    let variant = dino_eval::Variant {
+        score: true,
+        ..dino_eval::Variant::default()
+    };
+
+    let outcome = run_with(&guarded_case(), &scratch, &variant, into_the_guarded_path()).await;
+
+    assert_eq!(outcome.stopped, None);
+    assert!(outcome.metrics.model_turns >= 4, "{:?}", outcome.metrics);
+    let score = outcome.score.as_ref().unwrap();
+    assert!(score.total.abs() < f64::EPSILON, "scored {}", score.total);
+    let record = serde_json::to_value(&outcome).unwrap();
+    assert!(record.get("early_stop").is_none());
+}
+
+#[tokio::test]
+async fn early_stop_leaves_a_case_that_protects_nothing_alone() {
+    let scratch = Scratch::new();
+    let case = Case::load(corpus().join("add-a-function")).unwrap();
+    let variant = dino_eval::Variant {
+        early_stop: true,
+        ..dino_eval::Variant::default()
+    };
+
+    let outcome = run_with(&case, &scratch, &variant, into_the_guarded_path()).await;
+
+    assert_eq!(outcome.stopped, None);
+    assert!(outcome.metrics.model_turns >= 4, "{:?}", outcome.metrics);
+}

@@ -129,6 +129,11 @@ pub struct EvalArgs {
     /// At low effort where the model offers it.
     #[arg(long, value_name = "KEY", conflicts_with = "harness")]
     pub review_model: Option<String>,
+    /// Stop a run as soon as it changes a protected path, which scores 0
+    /// however the run goes on, and judge it as it was left. Recorded with
+    /// each run; off by default, so records stay comparable.
+    #[arg(long)]
+    pub early_stop: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -332,6 +337,7 @@ fn variant(args: &EvalArgs) -> dino_eval::Variant {
         reasoning_effort: args.effort,
         score: args.score,
         review_model: args.review_model.clone(),
+        early_stop: args.early_stop,
     }
 }
 
@@ -344,7 +350,7 @@ fn header(
     scratch: &Path,
 ) -> String {
     format!(
-        "{model}{}{} · {cases} case(s){} · scratch {}",
+        "{model}{}{} · {cases} case(s){}{} · scratch {}",
         args.effort
             .map(|effort| format!(" · {effort} effort"))
             .unwrap_or_default(),
@@ -355,6 +361,11 @@ fn header(
             String::new()
         } else {
             format!(" · without {}", args.without.join(", "))
+        },
+        if args.early_stop {
+            " · early stop"
+        } else {
+            ""
         },
         scratch.display()
     )
@@ -397,6 +408,7 @@ async fn run_one(
             harness.into(),
             model,
             args.harness_provider.map(Into::into),
+            args.early_stop,
         )
         .await?);
     }
@@ -734,6 +746,7 @@ fn print_case(outcome: &Outcome) {
     let (colour, mark) = match (outcome.passed, outcome.stopped) {
         (true, _) => (OK, "pass"),
         (_, Some(EarlyStop::WallTime)) => (WARN, "wall"),
+        (_, Some(EarlyStop::ProtectedPath)) => (WARN, "stop"),
         _ => (WARN, "fail"),
     };
     println!(

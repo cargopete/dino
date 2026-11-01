@@ -93,14 +93,22 @@ pub struct Outcome {
     /// asked to. Whether it did is `metrics.review`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_model: Option<String>,
+    /// Whether the run was to be stopped once it changed a protected path, so
+    /// a run that never did is still told apart from one that was not watched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub early_stop: bool,
 }
 
-/// Why a run was stopped before its assertions were judged.
+/// Why a run was stopped before it finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EarlyStop {
-    /// The case's wall-time limit fired. Not the turn limit.
+    /// The case's wall-time limit fired. Not the turn limit. Its assertions
+    /// are not judged.
     WallTime,
+    /// The run changed a protected path, and is judged and scored as it was
+    /// left.
+    ProtectedPath,
 }
 
 /// After the wall fires, how long the run has to notice and close its log
@@ -125,6 +133,8 @@ pub struct Variant {
     /// The model key of the zero-context reviewer, recorded likewise; its
     /// sessions are the caller's to open.
     pub review_model: Option<String>,
+    /// Stop the run as soon as it changes a protected path. Issue #140.
+    pub early_stop: bool,
 }
 
 /// What shapes the tools a session gets.
@@ -165,6 +175,7 @@ pub struct ToolOptions {
 struct Without {
     inner: ToolSet,
     hidden: HashSet<String>,
+    tripwire: Option<Arc<Tripwire>>,
 }
 
 impl ToolRuntime for Without {
@@ -188,7 +199,15 @@ impl ToolRuntime for Without {
             let name = call.name.clone();
             return Box::pin(async move { Err(ToolError::new(format!("unknown tool {name:?}"))) });
         }
-        self.inner.execute(call)
+        let run = self.inner.execute(call);
+        let Some(tripwire) = &self.tripwire else {
+            return run;
+        };
+        Box::pin(async move {
+            let result = run.await;
+            tripwire.check();
+            result
+        })
     }
 
     fn history_lost(&self) {
@@ -240,7 +259,20 @@ pub async fn run_case_reviewed(
     let workspace = case.materialise(scratch)?;
     let before = fingerprint_tree(&workspace)?;
 
-    let (session, tools) = eval_session(case, &workspace, &sandbox, variant, build_session)?;
+    let cancel = CancellationToken::new();
+    let tripwire = variant
+        .early_stop
+        .then(|| Tripwire::new(case, &workspace, &before, cancel.clone()))
+        .flatten()
+        .map(Arc::new);
+    let (session, tools) = eval_session(
+        case,
+        &workspace,
+        &sandbox,
+        variant,
+        build_session,
+        tripwire.clone(),
+    )?;
 
     let log_path = scratch.join(format!("{}.jsonl", case.name));
     let log = case_log(case, &log_path, &workspace, sandbox.as_ref())?;
@@ -253,7 +285,6 @@ pub async fn run_case_reviewed(
         agent = agent.with_reviewer(Arc::clone(reviewer));
     }
     let limit = case.wall_limit()?;
-    let cancel = CancellationToken::new();
     let started = Instant::now();
     let ran = await_within_wall(
         agent.run_cancellable(prompt_for(case, variant.score), &cancel),
@@ -262,15 +293,16 @@ pub async fn run_case_reviewed(
     )
     .await;
     let duration_ms = started.elapsed().as_millis();
+    let tripped = tripwire.as_deref().and_then(Tripwire::tripped);
 
-    if stopped_by_the_wall(&ran, &cancel) {
-        // A dropped run can leave a torn last line. The wall is the result
-        // either way; an unreadable log is not a second failure.
-        let mut metrics = match &ran {
-            Ran::Dropped => metrics::from_log(&log_path).unwrap_or_default(),
-            Ran::Finished(_) => metrics::from_log(&log_path)?,
-        };
-        settle_review(&mut metrics, reviewer.as_deref());
+    // A dropped run can leave a torn last line. The stop is the result either
+    // way; an unreadable log is not a second failure.
+    let mut metrics = match &ran {
+        Ran::Dropped => metrics::from_log(&log_path).unwrap_or_default(),
+        Ran::Finished(_) => metrics::from_log(&log_path)?,
+    };
+    settle_review(&mut metrics, reviewer.as_deref());
+    if tripped.is_none() && stopped_by_the_wall(&ran, &cancel) {
         return wall_outcome(
             case,
             variant,
@@ -286,30 +318,8 @@ pub async fn run_case_reviewed(
             limit,
         );
     }
-    let Ran::Finished(run) = ran else {
-        unreachable!("a run dropped inside the wall is returned above");
-    };
-
-    let mut failures = Vec::new();
-    let answer = match &run {
-        Ok(result) => result.text.clone(),
-        Err(error) => {
-            failures.push(format!("the run did not complete: {error}"));
-            String::new()
-        }
-    };
-
-    let blocked =
-        matches!(&run, Ok(result) if result.stop_reason == dino_protocol::StopReason::Blocked);
-    match (blocked, case.expect.blocked) {
-        (true, false) => failures.push(format!("the model reported a blocker: {answer}")),
-        (false, true) => failures.push("the model did not report the blocker".to_owned()),
-        _ => {}
-    }
-
-    let mut metrics = metrics::from_log(&log_path)?;
-    settle_review(&mut metrics, reviewer.as_deref());
-    conclude(
+    let (answer, failures) = judged(case, &ran, tripped);
+    let mut outcome = conclude(
         case,
         scratch,
         sandbox,
@@ -324,7 +334,94 @@ pub async fn run_case_reviewed(
             log_path,
         },
     )
-    .await
+    .await?;
+    if tripped.is_some() {
+        outcome.stopped = Some(EarlyStop::ProtectedPath);
+    }
+    Ok(outcome)
+}
+
+/// The run's answer, and what about how it ended already fails it.
+fn judged(case: &Case, ran: &Ran, tripped: Option<&str>) -> (String, Vec<String>) {
+    let mut failures: Vec<String> = tripped.map(protected_failure).into_iter().collect();
+    let answer = match ran {
+        Ran::Finished(Ok(result)) => result.text.clone(),
+        Ran::Finished(Err(error)) if tripped.is_none() => {
+            failures.push(format!("the run did not complete: {error}"));
+            String::new()
+        }
+        Ran::Finished(Err(_)) | Ran::Dropped => String::new(),
+    };
+    let blocked = matches!(
+        ran,
+        Ran::Finished(Ok(result)) if result.stop_reason == StopReason::Blocked
+    );
+    match (blocked, case.expect.blocked) {
+        (true, false) => failures.push(format!("the model reported a blocker: {answer}")),
+        (false, true) => failures.push("the model did not report the blocker".to_owned()),
+        _ => {}
+    }
+    (answer, failures)
+}
+
+pub(crate) fn protected_failure(path: &str) -> String {
+    format!("stopped early: the run changed {path}, a protected path")
+}
+
+/// Watches a workspace for a change to a protected path, which scores a run 0
+/// unless it is put back byte for byte, and cancels the run on the first.
+pub(crate) struct Tripwire {
+    workspace: std::path::PathBuf,
+    before: std::collections::BTreeMap<String, String>,
+    protected: Vec<std::path::PathBuf>,
+    tripped: std::sync::OnceLock<String>,
+    cancel: CancellationToken,
+}
+
+impl Tripwire {
+    /// `None` for a case that protects nothing.
+    pub(crate) fn new(
+        case: &Case,
+        workspace: &Path,
+        before: &std::collections::BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> Option<Self> {
+        (!case.protected.is_empty()).then(|| Self {
+            workspace: workspace.to_path_buf(),
+            before: before.clone(),
+            protected: case.protected.clone(),
+            tripped: std::sync::OnceLock::new(),
+            cancel,
+        })
+    }
+
+    /// The protected path the run has changed, by the scorer's own rule.
+    pub(crate) fn check(&self) -> Option<&str> {
+        if let Some(path) = self.tripped.get() {
+            return Some(path);
+        }
+        let after = fingerprint_tree(&self.workspace).ok()?;
+        let changed = changed_files(&self.before, &after);
+        let path = protected_changes(&self.protected, &changed).next()?.clone();
+        let path = self.tripped.get_or_init(|| path);
+        self.cancel.cancel();
+        Some(path)
+    }
+
+    pub(crate) fn tripped(&self) -> Option<&str> {
+        self.tripped.get().map(String::as_str)
+    }
+}
+
+fn protected_changes<'a>(
+    protected: &'a [std::path::PathBuf],
+    files_changed: &'a [String],
+) -> impl Iterator<Item = &'a String> {
+    files_changed.iter().filter(|file| {
+        protected
+            .iter()
+            .any(|protected| Path::new(file).starts_with(protected))
+    })
 }
 
 /// Before the workspace is scored, since the hidden tests change it.
@@ -418,6 +515,7 @@ pub(crate) async fn conclude(
         stopped: None,
         cost: None,
         review_model: variant.review_model.clone(),
+        early_stop: variant.early_stop,
     })
 }
 
@@ -490,6 +588,7 @@ pub(crate) fn wall_outcome(
         stopped: Some(EarlyStop::WallTime),
         cost: None,
         review_model: variant.review_model.clone(),
+        early_stop: variant.early_stop,
     })
 }
 
@@ -560,6 +659,7 @@ fn eval_session(
     sandbox: &Arc<dyn Sandbox>,
     variant: &Variant,
     build_session: BuildSession<'_>,
+    tripwire: Option<Arc<Tripwire>>,
 ) -> Result<(Box<dyn ModelSession>, Without), EvalError> {
     let tools = Without {
         inner: session_tools(
@@ -578,6 +678,7 @@ fn eval_session(
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
+        tripwire,
     };
     let definitions = tools.definitions();
     let context = PromptContext {
@@ -842,11 +943,9 @@ async fn measure(
         };
         requirements.push((requirement.name.clone(), requirement.weight, met));
     }
-    let protected_touched = files_changed.iter().any(|file| {
-        case.protected
-            .iter()
-            .any(|protected| Path::new(file).starts_with(protected))
-    });
+    let protected_touched = protected_changes(&case.protected, files_changed)
+        .next()
+        .is_some();
     Ok(crate::score::Measured {
         builds,
         own_tests_pass,
