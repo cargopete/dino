@@ -180,8 +180,9 @@ CI and evals.
   config file, or `--effort` on a session or `dino eval`, sets `none`, `low`,
   `medium`, `high`, `xhigh` or `max` on Kimi, Claude and GPT. A level the model
   does not list is an error naming those it does; a fallback without it keeps
-  its own default. Unset leaves each model's default, which is the provider's
-  except Kimi's, and an eval records the effort used with every run.
+  its own default. Unset leaves each model's default: low for Kimi and Haiku,
+  measured to keep their scores at about half the cost, the provider's for the
+  rest; an eval records the effort used with every run.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `dino replay` renders a past session through the same renderer the live one

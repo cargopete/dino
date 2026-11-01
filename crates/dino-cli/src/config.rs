@@ -667,9 +667,10 @@ mod tests {
     }
 
     #[test]
-    fn only_kimi_has_a_default_effort() {
+    fn only_kimi_and_haiku_have_a_default_effort() {
         for profile in builtin_profiles() {
-            let expected = (profile.key == "kimi-k3.1-pro").then_some(ReasoningEffort::Low);
+            let expected = matches!(profile.key.as_str(), "kimi-k3.1-pro" | "claude-haiku-5.5")
+                .then_some(ReasoningEffort::Low);
             assert_eq!(profile.default_effort, expected, "{}", profile.key);
             let built = effort_for(&settings(profile.clone()), &profile, false).unwrap();
             assert_eq!(built, expected, "{}", profile.key);
