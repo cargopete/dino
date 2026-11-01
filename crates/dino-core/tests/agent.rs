@@ -773,7 +773,8 @@ async fn calls_completed_before_the_window_filled_are_answered() {
     let TurnInput::ToolResults { results, .. } = &agent.session().inputs[1] else {
         panic!("expected tool results, got {:?}", agent.session().inputs[1]);
     };
-    assert!(results[0].output.content.contains("cut off"));
+    assert_eq!(results[0].output.content, "fn main() {}");
+    assert!(note_of(&agent.session().inputs[1]).contains("cut off"));
 }
 
 #[tokio::test]
@@ -963,6 +964,13 @@ fn last_result(input: &TurnInput) -> String {
     }
 }
 
+fn note_of(input: &TurnInput) -> String {
+    match input {
+        TurnInput::ToolResults { note, .. } => note.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 #[tokio::test]
 async fn the_last_turns_carry_a_countdown() {
     let mut agent = Agent::new(
@@ -983,17 +991,20 @@ async fn the_last_turns_carry_a_countdown() {
     let result = agent.run("read them").await.unwrap();
 
     let inputs = &agent.session().inputs;
-    assert!(!last_result(&inputs[1]).contains("turns left"));
+    assert!(!note_of(&inputs[1]).contains("turns left"));
     assert!(
-        last_result(&inputs[2]).contains("2 model turns left"),
+        note_of(&inputs[2]).contains("2 model turns left"),
         "{}",
-        last_result(&inputs[2])
+        note_of(&inputs[2])
     );
     assert!(
-        last_result(&inputs[3]).contains("your next response is the last"),
+        note_of(&inputs[3]).contains("your next response is the last"),
         "{}",
-        last_result(&inputs[3])
+        note_of(&inputs[3])
     );
+    for input in &inputs[1..4] {
+        assert_eq!(last_result(input), "fn main() {}");
+    }
     let notices: Vec<u32> = result
         .events
         .iter()
@@ -1111,9 +1122,9 @@ async fn the_countdown_says_what_is_unfinished() {
     agent.run("read them").await.unwrap();
 
     let inputs = &agent.session().inputs;
-    assert!(!last_result(&inputs[1]).contains("the build is broken"));
+    assert!(!note_of(&inputs[1]).contains("the build is broken"));
     for input in &inputs[2..4] {
-        let note = last_result(input);
+        let note = note_of(input);
         assert!(note.contains("right now the build is broken."), "{note}");
     }
     // Twice in the countdown; never on the last turn, which is not sent back.
@@ -1276,8 +1287,9 @@ async fn the_turn_count_rides_along_from_half_way() {
     agent.run("read them").await.unwrap();
 
     let inputs = &agent.session().inputs;
-    assert!(!last_result(&inputs[1]).contains("turns used"));
-    assert!(last_result(&inputs[2]).contains("2 of 4 model turns used"));
+    assert!(!note_of(&inputs[1]).contains("turns used"));
+    assert!(note_of(&inputs[2]).contains("2 of 4 model turns used"));
+    assert_eq!(last_result(&inputs[2]), "fn main() {}");
 }
 
 #[tokio::test]
@@ -1309,12 +1321,52 @@ async fn results_left_unsent_at_the_limit_open_the_next_run() {
         );
     };
     assert_eq!(results[0].call_id, "call-1");
+    assert_eq!(results[0].output.content, "fn main() {}");
+    let note = note_of(&inputs[1]);
     assert!(
-        results[0]
-            .output
-            .content
-            .ends_with("The person has since written:]\ncontinue")
+        note.starts_with("The person says:\ncontinue\n\n[dino: "),
+        "{note}"
     );
+}
+
+#[tokio::test]
+async fn what_the_person_types_mid_run_follows_the_results_as_theirs() {
+    let inbox = dino_core::Inbox::default();
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            text_turn("done"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(3).unwrap(),
+            turn_notice_at: 2,
+            ..AgentConfig::default()
+        },
+    )
+    .with_inbox(Arc::clone(&inbox));
+    inbox.lock().unwrap().push("also fix b.rs".into());
+
+    let result = agent.run("read them").await.unwrap();
+
+    let inputs = &agent.session().inputs;
+    assert_eq!(last_result(&inputs[1]), "fn main() {}");
+    let note = note_of(&inputs[1]);
+    assert!(
+        note.starts_with("The person says:\nalso fix b.rs\n\n[dino: 2 model turns left"),
+        "{note}"
+    );
+    assert!(!note_of(&inputs[2]).contains("The person says"));
+    let steered: Vec<&str> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Steered { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steered, ["also fix b.rs"]);
 }
 
 #[derive(Default, Clone)]
