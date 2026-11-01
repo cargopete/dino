@@ -1,9 +1,9 @@
 //! Noticing progress from what tests and lints report, where [`crate::loops`]
 //! sees only the calls.
 //!
-//! Two things are said, each once a run: that the suite passes and clippy is
-//! clean with nothing edited since, and that one test keeps failing however it
-//! is patched. Neither stops anything.
+//! Two things are said, each once a run: that the suite passes with nothing
+//! edited since, and that one test keeps failing however it is patched.
+//! Neither stops anything.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -45,10 +45,13 @@ const WHOLE: [&str; 9] = [
 
 #[derive(Debug, Default)]
 pub struct OutcomeWatch {
+    /// Something was edited this run, so a suite that passed before any work
+    /// is not taken for finished work.
+    edited: bool,
     /// A whole-workspace `cargo test` passed since the last edit.
     tested: bool,
-    /// A whole-workspace clippy, which checks as well, was clean since the last edit.
-    linted: bool,
+    /// Whether the last whole-workspace clippy since the last edit was clean.
+    linted: Option<bool>,
     said_verified: bool,
     failing: HashMap<String, Streak>,
     said_stuck: HashSet<String>,
@@ -66,7 +69,7 @@ struct Streak {
 enum Kind {
     Edit,
     Neutral,
-    Test { whole: bool },
+    Test { whole: bool, filter: Option<String> },
     Clippy { whole: bool },
 }
 
@@ -81,8 +84,9 @@ impl OutcomeWatch {
         let ran = Ran::parse(output);
         match kind(call) {
             Kind::Edit => {
+                self.edited = true;
                 self.tested = false;
-                self.linted = false;
+                self.linted = None;
                 for streak in self.failing.values_mut() {
                     streak.changed = true;
                 }
@@ -90,37 +94,47 @@ impl OutcomeWatch {
             }
             Kind::Neutral => None,
             Kind::Clippy { whole } => {
-                self.linted |= whole && ran.clean();
+                if whole {
+                    self.linted = Some(ran.clean());
+                }
                 self.verified()
             }
-            Kind::Test { whole } => {
+            Kind::Test { whole, filter } => {
                 let tests = Tests::parse(&ran.text);
                 self.tested |= whole && ran.exit_code == Some(0) && tests.all_passed();
-                self.stuck(&tests).or_else(|| self.verified())
+                let covered = if whole { Some("") } else { filter.as_deref() };
+                self.stuck(&tests, covered).or_else(|| self.verified())
             }
         }
     }
 
     fn verified(&mut self) -> Option<String> {
-        if !(self.tested && self.linted) || self.said_verified {
+        if !(self.edited && self.tested) || self.linted == Some(false) || self.said_verified {
             return None;
         }
         self.said_verified = true;
-        Some(
-            "[dino: the whole test suite passes and clippy is clean, with no edit since. The \
-             work is verified: finish now, unless something specific in the task is still \
-             undone.]"
-                .to_owned(),
-        )
+        let clippy = if self.linted.is_some() {
+            " and clippy is clean"
+        } else {
+            ""
+        };
+        Some(format!(
+            "[dino: the whole test suite passes{clippy}, with no edit since. The work is \
+             verified: finish now, unless something specific in the task is still undone.]"
+        ))
     }
 
-    fn stuck(&mut self, tests: &Tests) -> Option<String> {
+    /// `covered` is the filter the run was held to, empty for all of it. Passing
+    /// tests are trimmed from the output, so a covered name that did not fail passed.
+    fn stuck(&mut self, tests: &Tests, covered: Option<&str>) -> Option<String> {
         if tests.results == 0 {
             return None;
         }
-        for name in &tests.passed {
-            self.failing.remove(name);
-        }
+        self.failing.retain(|name, _| {
+            !tests.passed.contains(name)
+                && (tests.failed.contains(name)
+                    || covered.is_none_or(|filter| !name.contains(filter)))
+        });
         let mut stuck = Vec::new();
         for name in &tests.failed {
             let streak = self.failing.entry(name.clone()).or_default();
@@ -151,9 +165,14 @@ fn kind(call: &ToolCall) -> Kind {
             let field = |name: &str| call.arguments.get(name).and_then(Value::as_str);
             let whole = field("package").is_none() && field("filter").is_none();
             match field("command") {
-                Some("test") => Kind::Test { whole },
+                Some("test") => Kind::Test {
+                    whole,
+                    filter: field("filter")
+                        .filter(|_| field("package").is_none())
+                        .map(str::to_owned),
+                },
                 Some("clippy") => Kind::Clippy { whole },
-                Some("fmt" | "add") => Kind::Edit,
+                Some("add") => Kind::Edit,
                 _ => Kind::Neutral,
             }
         }
@@ -176,10 +195,20 @@ fn kind(call: &ToolCall) -> Kind {
     }
 }
 
-/// A `cargo test` or `cargo clippy` command line, or an edit for anything else.
+/// A `cargo test` or `cargo clippy` command line, one that cannot change what
+/// the tests see, or an edit for anything else.
+///
+/// Formatting is not an edit here: rustfmt keeps what the code means, and a
+/// format after the checks is the usual last step of a run.
 fn cargo_words(words: &[&str]) -> Kind {
     let (subcommand, rest) = match words {
         ["cargo", subcommand, rest @ ..] => (*subcommand, rest),
+        ["rustfmt", ..] => return Kind::Neutral,
+        ["git", "diff" | "status" | "log" | "show", rest @ ..]
+            if !rest.iter().any(|word| word.starts_with("--output")) =>
+        {
+            return Kind::Neutral;
+        }
         _ => return Kind::Edit,
     };
     let mut sides = rest.splitn(2, |word| *word == "--");
@@ -195,10 +224,12 @@ fn cargo_words(words: &[&str]) -> Kind {
                         || word.starts_with("--test-threads")
                         || word.starts_with("--color")
                 }),
+            filter: None,
         },
         "clippy" if !before.contains(&"--fix") => Kind::Clippy {
             whole: whole && before.contains(&"--all-targets"),
         },
+        "fmt" | "check" | "build" | "metadata" | "tree" | "--version" => Kind::Neutral,
         _ => Kind::Edit,
     }
 }
@@ -339,34 +370,64 @@ mod tests {
         json!({"exit_code": 0, "counts": {"errors": 0, "warnings": 0}, "output": ""}).to_string()
     }
 
+    /// What the cargo tool returns by default, with the passing lines left out.
+    fn trimmed_passing() -> String {
+        tests_output(0, &["test result: ok. 2 passed; 0 failed; 0 ignored"])
+    }
+
+    fn warned() -> String {
+        json!({"exit_code": 0, "counts": {"errors": 0, "warnings": 1}}).to_string()
+    }
+
     #[test]
-    fn green_tests_and_clippy_are_said_once() {
+    fn green_tests_after_an_edit_are_said_once() {
         let mut watch = OutcomeWatch::default();
-        assert_eq!(watch.record(&patch(), "{}"), None);
         assert_eq!(watch.record(&cargo("test"), &passing()), None);
-        let note = watch.record(&cargo("clippy"), &clean()).unwrap();
-        assert!(note.contains("verified"), "{note}");
+        assert_eq!(watch.record(&patch(), "{}"), None);
+        let note = watch.record(&cargo("test"), &passing()).unwrap();
+        assert!(note.contains("suite passes, with no edit since"), "{note}");
+        watch.record(&patch(), "{}");
         assert_eq!(watch.record(&cargo("test"), &passing()), None);
     }
 
     #[test]
-    fn an_edit_after_the_tests_passed_undoes_it() {
+    fn a_clean_clippy_is_mentioned_and_a_dirty_one_waits() {
         let mut watch = OutcomeWatch::default();
+        watch.record(&patch(), "{}");
+        assert_eq!(watch.record(&cargo("clippy"), &warned()), None);
+        assert_eq!(watch.record(&cargo("test"), &passing()), None);
+        let note = watch.record(&cargo("clippy"), &clean()).unwrap();
+        assert!(note.contains("passes and clippy is clean"), "{note}");
+    }
+
+    #[test]
+    fn an_edit_after_the_tests_passed_undoes_it_and_formatting_does_not() {
+        let mut watch = OutcomeWatch::default();
+        watch.record(&patch(), "{}");
+        watch.record(&cargo("clippy"), &warned());
         watch.record(&cargo("test"), &passing());
         watch.record(&patch(), "{}");
         assert_eq!(watch.record(&cargo("clippy"), &clean()), None);
-        watch.record(&cargo("fmt"), "{}");
-        assert_eq!(watch.record(&cargo("test"), &passing()), None);
+        watch.record(&cargo("clippy"), &warned());
+        watch.record(&cargo("test"), &passing());
         watch.record(
             &call("shell", json!({"command": "sed -i s/a/b/ src/lib.rs"})),
             "{}",
         );
         assert_eq!(watch.record(&cargo("clippy"), &clean()), None);
+        watch.record(&cargo("clippy"), &warned());
+        watch.record(&cargo("test"), &passing());
+        watch.record(&cargo("fmt"), "{}");
+        let rustfmt = call("exec", json!({"command": ["rustfmt", "src/lib.rs"]}));
+        watch.record(&rustfmt, "{}");
+        watch.record(&call("exec", json!({"command": ["git", "diff"]})), "{}");
+        assert!(watch.record(&cargo("clippy"), &clean()).is_some());
     }
 
     #[test]
     fn nothing_is_said_without_a_whole_passing_test_run() {
         let mut watch = OutcomeWatch::default();
+        watch.record(&patch(), "{}");
         assert_eq!(watch.record(&cargo("clippy"), &clean()), None);
         assert_eq!(watch.record(&cargo("check"), &clean()), None);
         let filtered = call("cargo", json!({"command": "test", "filter": "a"}));
@@ -386,9 +447,9 @@ mod tests {
     #[test]
     fn clippy_with_warnings_is_not_clean() {
         let mut watch = OutcomeWatch::default();
-        watch.record(&cargo("test"), &passing());
-        let warned = json!({"exit_code": 0, "counts": {"errors": 0, "warnings": 1}}).to_string();
-        assert_eq!(watch.record(&cargo("clippy"), &warned), None);
+        watch.record(&patch(), "{}");
+        assert_eq!(watch.record(&cargo("clippy"), &warned()), None);
+        assert_eq!(watch.record(&cargo("test"), &passing()), None);
         let by_hand = call(
             "exec",
             json!({"command": ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]}),
@@ -421,7 +482,20 @@ mod tests {
         watch.record(&patch(), "{}");
         watch.record(&cargo("test"), &failing("tests::b"));
         watch.record(&patch(), "{}");
-        watch.record(&cargo("test"), &passing());
+        watch.record(&cargo("test"), &trimmed_passing());
+        watch.record(&patch(), "{}");
+        assert_eq!(watch.record(&cargo("test"), &failing("tests::b")), None);
+    }
+
+    #[test]
+    fn a_filtered_run_that_passes_clears_the_names_it_covers() {
+        let mut watch = OutcomeWatch::default();
+        let only_b = call("cargo", json!({"command": "test", "filter": "b"}));
+        watch.record(&cargo("test"), &failing("tests::b"));
+        watch.record(&patch(), "{}");
+        watch.record(&cargo("test"), &failing("tests::b"));
+        watch.record(&patch(), "{}");
+        watch.record(&only_b, &trimmed_passing());
         watch.record(&patch(), "{}");
         assert_eq!(watch.record(&cargo("test"), &failing("tests::b")), None);
     }

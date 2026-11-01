@@ -1624,24 +1624,25 @@ fn noted(agent: &Agent<ScriptedSession, Reporting>, text: &str) -> Vec<usize> {
 const PASSING: &str =
     r#"{"exit_code":0,"output":"test tests::a ... ok\ntest result: ok. 1 passed; 0 failed"}"#;
 const FAILING: &str = r#"{"exit_code":101,"output":"test tests::strings ... FAILED\ntest result: FAILED. 0 passed; 1 failed"}"#;
-const CLEAN: &str = r#"{"exit_code":0,"counts":{"errors":0,"warnings":0}}"#;
+const WARNED: &str = r#"{"exit_code":0,"counts":{"errors":0,"warnings":1}}"#;
 
 #[tokio::test]
 async fn green_work_is_called_verified_once_and_only_with_no_edit_since() {
     let mut agent = outcome_run(&[
-        ("patch", "{}"),
         ("test", PASSING),
         ("patch", "{}"),
-        ("clippy", CLEAN),
+        ("clippy", WARNED),
         ("test", PASSING),
         ("patch", "{}"),
-        ("clippy", CLEAN),
+        ("fmt", "{}"),
+        ("test", PASSING),
+        ("patch", "{}"),
         ("test", PASSING),
     ]);
 
     agent.run("build it").await.unwrap();
 
-    assert_eq!(noted(&agent, "The work is verified"), vec![5]);
+    assert_eq!(noted(&agent, "The work is verified"), vec![7]);
 }
 
 #[tokio::test]
