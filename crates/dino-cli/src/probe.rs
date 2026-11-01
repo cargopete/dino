@@ -547,7 +547,7 @@ async fn attempt(session: &mut dyn ModelSession, input: TurnInput) -> Verdict {
     let started = Instant::now();
     let mut stream = match session.next(input).await {
         Ok(stream) => stream,
-        Err(error) if refused(&error) => return Verdict::Refused(error.to_string()),
+        Err(error) if error.rejects_request() => return Verdict::Refused(error.to_string()),
         Err(error) => return Verdict::Broken(error.to_string()),
     };
     let mut transcript = Transcript::default();
@@ -566,18 +566,6 @@ async fn attempt(session: &mut dyn ModelSession, input: TurnInput) -> Verdict {
     } else {
         Verdict::Broken("the stream ended without finishing".to_owned())
     }
-}
-
-/// A client error other than a timeout or a rate limit. Every adapter words a
-/// status it was refused with as `... returned <status>: <body>`.
-fn refused(error: &ModelError) -> bool {
-    let ModelError::Transport(message) = error else {
-        return false;
-    };
-    message
-        .split_once(" returned ")
-        .and_then(|(_, rest)| rest.get(..3)?.parse::<u16>().ok())
-        .is_some_and(|status| (400..500).contains(&status) && status != 408 && status != 429)
 }
 
 fn excerpt(text: &str) -> String {
@@ -1095,9 +1083,11 @@ mod tests {
             let events = match &input {
                 TurnInput::ToolResults { .. } if self.fault == Fault::RefusesHistory => {
                     return Box::pin(async {
-                        Err(ModelError::Transport(
-                            "Qwen endpoint returned 400 Bad Request: invalid messages".into(),
-                        ))
+                        Err(ModelError::Http {
+                            provider: "Qwen endpoint",
+                            status: 400,
+                            body: "invalid messages".into(),
+                        })
                     });
                 }
                 TurnInput::ToolResults { .. } => self.history_events(&user),
@@ -1762,26 +1752,5 @@ mod tests {
         let record = host.snapshot();
         assert!(record.restored.is_empty());
         assert!(record.results.is_empty());
-    }
-
-    #[test]
-    fn only_a_client_error_counts_as_a_refusal() {
-        let transport = |message: &str| ModelError::Transport(message.into());
-        assert!(refused(&transport(
-            "Anthropic returned 400 Bad Request: tool_use ids must be unique"
-        )));
-        assert!(refused(&transport(
-            "Qwen endpoint returned 422 Unprocessable Entity: x"
-        )));
-        assert!(!refused(&transport(
-            "Qwen endpoint returned 429 Too Many Requests: x"
-        )));
-        assert!(!refused(&transport(
-            "OpenAI returned 500 Internal Server Error: x"
-        )));
-        assert!(!refused(&transport("connection reset")));
-        assert!(!refused(&ModelError::Account(
-            "Qwen endpoint returned 401 Unauthorized: x".into()
-        )));
     }
 }

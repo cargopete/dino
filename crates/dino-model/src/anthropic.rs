@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use async_stream::try_stream;
 use dino_protocol::ModelEvent;
@@ -28,6 +30,7 @@ use crate::ModelError;
 use crate::ModelEventStream;
 use crate::ModelFuture;
 use crate::ModelSession;
+use crate::RetryPolicy;
 use crate::SessionState;
 use crate::elide_arguments;
 use crate::elided_marker;
@@ -37,7 +40,6 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Bump when the persisted history shape changes. RFC-0014 section 3.
 pub(crate) const STATE_VERSION: u32 = 1;
-const ERROR_BODY_LIMIT: usize = 4_096;
 const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +62,7 @@ pub struct AnthropicConfig {
     /// Fast mode: the same model at up to 2.5 times the output speed, at twice
     /// the price. Opus 5 and 5.5 only.
     pub fast: bool,
+    pub retry: RetryPolicy,
 }
 
 impl AnthropicConfig {
@@ -75,6 +78,7 @@ impl AnthropicConfig {
             effort: ReasoningEffort::High,
             thinking: ThinkingMode::AdaptiveSummarized,
             fast: false,
+            retry: RetryPolicy::default(),
         }
     }
 }
@@ -128,7 +132,42 @@ impl AnthropicSession {
         request
             .send()
             .await
-            .map_err(|error| ModelError::Transport(error.to_string()))
+            .map_err(|error| crate::send_error(&error))
+    }
+
+    /// One attempt at a request. Once fast mode is refused, `fast` is cleared
+    /// and the turn's later attempts go at standard speed.
+    async fn attempt(
+        &self,
+        body: &Value,
+        fast: &AtomicBool,
+    ) -> Result<reqwest::Response, ModelError> {
+        let slow = || {
+            let mut slow = body.clone();
+            if let Some(fields) = slow.as_object_mut() {
+                fields.remove("speed");
+            }
+            slow
+        };
+        let fast_asked = body.get("speed").is_some();
+        let mut response = if fast_asked && !fast.load(Ordering::Relaxed) {
+            self.send(&slow()).await?
+        } else {
+            self.send(body).await?
+        };
+        // Fast mode has a rate limit of its own; standard speed may still
+        // have room, and switching only costs the prompt cache.
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            && fast_asked
+            && fast.swap(false, Ordering::Relaxed)
+        {
+            response = self.send(&slow()).await?;
+        }
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(crate::http_error("Anthropic", response).await)
+        }
     }
 
     fn pending_message(input: TurnInput) -> AnthropicMessage {
@@ -310,29 +349,10 @@ impl ModelSession for AnthropicSession {
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
             let pending = Self::pending_message(input);
-            let mut body = self.request_body(&pending)?;
-            let mut response = self.send(&body).await?;
-            // Fast mode has a rate limit of its own; standard speed may still
-            // have room, and switching only costs the prompt cache.
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                && body.get("speed").is_some()
-            {
-                if let Some(fields) = body.as_object_mut() {
-                    fields.remove("speed");
-                }
-                response = self.send(&body).await?;
-            }
-            let status = response.status();
-            if !status.is_success() {
-                let body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|error| format!("could not read response body: {error}"));
-                return Err(ModelError::Transport(format!(
-                    "Anthropic returned {status}: {}",
-                    truncate_for_error(&body)
-                )));
-            }
+            let body = self.request_body(&pending)?;
+            let fast = AtomicBool::new(true);
+            let response =
+                crate::send_with_retry(self.config.retry, || self.attempt(&body, &fast)).await?;
 
             let history = Arc::clone(&self.history);
             let stream = try_stream! {
@@ -446,17 +466,6 @@ fn commit_history(
     history.push(pending.clone());
     history.push(assistant);
     Ok(())
-}
-
-fn truncate_for_error(body: &str) -> &str {
-    if body.len() <= ERROR_BODY_LIMIT {
-        return body;
-    }
-    let mut boundary = ERROR_BODY_LIMIT;
-    while !body.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    &body[..boundary]
 }
 
 /// A closed set rather than a string, so a history read back from disk is
@@ -1420,6 +1429,67 @@ mod tests {
                 reason: StopReason::EndTurn
             })
         );
+    }
+
+    fn quick_retries(base: String) -> AnthropicSession {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let mut config = AnthropicConfig::new("test-key", profile);
+        config.api_base = base;
+        config.retry = RetryPolicy {
+            attempts: 3,
+            first_delay: std::time::Duration::from_millis(1),
+        };
+        AnthropicSession::new(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_rejected_request_is_typed_and_not_retried() {
+        let (base, server) = crate::test_server::serve_in_turn(vec![crate::test_server::status(
+            "400 Bad Request",
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"tool_use ids must be unique"}}"#,
+        )])
+        .await;
+        let error = quick_retries(base)
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&error, ModelError::Http { provider: "Anthropic", status: 400, body } if body.contains("must be unique")),
+            "{error}"
+        );
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_server_is_retried() {
+        let (base, server) = crate::test_server::serve_in_turn(vec![
+            crate::test_server::status("503 Service Unavailable", ""),
+            crate::test_server::sse(&[
+                r#"{"type":"message_start","message":{"id":"msg-1","usage":{"input_tokens":4,"output_tokens":1}}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#,
+                r#"{"type":"content_block_stop","index":0}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+                r#"{"type":"message_stop"}"#,
+            ]),
+        ])
+        .await;
+        let events: Vec<_> = quick_retries(base)
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(events.contains(&ModelEvent::TextDelta {
+            text: "hello".into()
+        }));
+        assert_eq!(server.await.unwrap(), 2);
     }
 
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

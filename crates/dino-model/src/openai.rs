@@ -25,10 +25,9 @@ use crate::ModelError;
 use crate::ModelEventStream;
 use crate::ModelFuture;
 use crate::ModelSession;
+use crate::RetryPolicy;
 use crate::SessionState;
 use crate::sse::SseDecoder;
-
-const ERROR_BODY_LIMIT: usize = 4_096;
 
 /// Bump when the persisted state shape changes. RFC-0014 section 3.
 const STATE_VERSION: u32 = 1;
@@ -44,6 +43,7 @@ pub struct OpenAiConfig {
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: Option<u32>,
     pub reasoning_effort: ReasoningEffort,
+    pub retry: RetryPolicy,
 }
 
 impl OpenAiConfig {
@@ -59,6 +59,7 @@ impl OpenAiConfig {
             tools: Vec::new(),
             max_output_tokens: None,
             reasoning_effort: ReasoningEffort::High,
+            retry: RetryPolicy::default(),
         }
     }
 }
@@ -229,32 +230,28 @@ impl ModelSession for OpenAiSession {
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
             let body = self.request_body(input)?;
-            let mut request = self.client.post(self.endpoint.clone()).json(&body);
-            if let Some(api_key) = &self.config.api_key {
-                request = request.bearer_auth(api_key);
-            }
-            if let Some(organization) = &self.config.organization {
-                request = request.header("OpenAI-Organization", organization);
-            }
-            if let Some(project) = &self.config.project {
-                request = request.header("OpenAI-Project", project);
-            }
-
-            let response = request
-                .send()
-                .await
-                .map_err(|error| ModelError::Transport(error.to_string()))?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response
-                    .text()
+            let response = crate::send_with_retry(self.config.retry, || async {
+                let mut request = self.client.post(self.endpoint.clone()).json(&body);
+                if let Some(api_key) = &self.config.api_key {
+                    request = request.bearer_auth(api_key);
+                }
+                if let Some(organization) = &self.config.organization {
+                    request = request.header("OpenAI-Organization", organization);
+                }
+                if let Some(project) = &self.config.project {
+                    request = request.header("OpenAI-Project", project);
+                }
+                let response = request
+                    .send()
                     .await
-                    .unwrap_or_else(|error| format!("could not read response body: {error}"));
-                return Err(ModelError::Transport(format!(
-                    "OpenAI returned {status}: {}",
-                    truncate_for_error(&body)
-                )));
-            }
+                    .map_err(|error| crate::send_error(&error))?;
+                if response.status().is_success() {
+                    Ok(response)
+                } else {
+                    Err(crate::http_error("OpenAI", response).await)
+                }
+            })
+            .await?;
 
             let response_state = Arc::clone(&self.previous_response_id);
             let stream = try_stream! {
@@ -307,17 +304,6 @@ fn set_response_id(state: &Mutex<Option<String>>, response_id: String) -> Result
         .map_err(|_| ModelError::Protocol("OpenAI response ID lock was poisoned".into()))?;
     *state = Some(response_id);
     Ok(())
-}
-
-fn truncate_for_error(body: &str) -> &str {
-    if body.len() <= ERROR_BODY_LIMIT {
-        return body;
-    }
-    let mut boundary = ERROR_BODY_LIMIT;
-    while !body.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    &body[..boundary]
 }
 
 #[derive(Debug, Default)]
@@ -723,5 +709,65 @@ mod tests {
     fn malformed_stream_json_is_not_silently_discarded() {
         let mut parser = ResponsesStreamParser::default();
         assert!(parser.consume("{not json").is_err());
+    }
+
+    fn quick_retries(base: String) -> OpenAiSession {
+        let profile = crate::builtin_profile("terra").unwrap();
+        let mut config = OpenAiConfig::new("test-key", profile);
+        config.api_base = base;
+        config.retry = RetryPolicy {
+            attempts: 3,
+            first_delay: std::time::Duration::from_millis(1),
+        };
+        OpenAiSession::new(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_rejected_request_is_typed_and_not_retried() {
+        let (base, server) = crate::test_server::serve_in_turn(vec![crate::test_server::status(
+            "400 Bad Request",
+            r#"{"error":{"message":"Unsupported parameter: 'temperature'","type":"invalid_request_error"}}"#,
+        )])
+        .await;
+        let error = quick_retries(base)
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&error, ModelError::Http { provider: "OpenAI", status: 400, body } if body.contains("Unsupported parameter")),
+            "{error}"
+        );
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_server_is_retried() {
+        use futures_util::TryStreamExt;
+
+        let (base, server) = crate::test_server::serve_in_turn(vec![
+            crate::test_server::status("503 Service Unavailable", ""),
+            crate::test_server::sse(&[
+                r#"{"type":"response.created","response":{"id":"r1"}}"#,
+                r#"{"type":"response.output_text.delta","delta":"hello"}"#,
+                r#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ]),
+        ])
+        .await;
+        let events: Vec<_> = quick_retries(base)
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(events.contains(&ModelEvent::TextDelta {
+            text: "hello".into()
+        }));
+        assert_eq!(server.await.unwrap(), 2);
     }
 }
