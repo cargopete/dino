@@ -144,10 +144,14 @@ pub fn holds_elided_marker(arguments: &serde_json::Value) -> bool {
 /// A long task's history fills with the model's own writes: whole files in
 /// `write_file`, both sides of every `apply_patch`. The call has run and its
 /// effect is on disk, so a `read` gets back anything the marker removes. Short
-/// strings, such as a path, are kept so the call still says what it did.
+/// strings, such as a path, are kept so the call still says what it did, and so
+/// are identifiers without whitespace up to [`IDENTIFIER_CEILING`]: a model that
+/// wants a percent-encoded URL again copies the marker into the call instead.
 pub(crate) fn elide_arguments(arguments: &mut serde_json::Value) -> usize {
     match arguments {
-        serde_json::Value::String(text) if text.len() > ELIDED_MARKER_FLOOR => {
+        serde_json::Value::String(text)
+            if text.len() > ELIDED_MARKER_FLOOR && !is_identifier(text) =>
+        {
             let bytes = text.len();
             let marker = format!(
                 "{ELIDED_PREFIX}{bytes}{ELIDED_INFIX} argument. The call ran as sent; read the \
@@ -161,6 +165,13 @@ pub(crate) fn elide_arguments(arguments: &mut serde_json::Value) -> usize {
         serde_json::Value::Object(fields) => fields.values_mut().map(elide_arguments).sum(),
         _ => 0,
     }
+}
+
+/// The longest whitespace-free string elision keeps, about a browser's URL limit.
+pub(crate) const IDENTIFIER_CEILING: usize = 2048;
+
+fn is_identifier(text: &str) -> bool {
+    text.len() <= IDENTIFIER_CEILING && !text.contains(char::is_whitespace)
 }
 
 /// One adapter's native history, as bytes the core stores and never reads.
@@ -886,8 +897,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_long_url_or_path_survives_elision_but_file_content_does_not() {
+        let url = format!("https://example.bg/{}", "%D0%B4".repeat(50));
+        let mut arguments = serde_json::json!({
+            "url": url,
+            "content": "fn main() {}\n".repeat(40),
+            "blob": "x".repeat(IDENTIFIER_CEILING + 1),
+        });
+        elide_arguments(&mut arguments);
+        assert_eq!(arguments["url"], url);
+        assert!(holds_elided_marker(&arguments["content"]));
+        assert!(holds_elided_marker(&arguments["blob"]));
+    }
+
+    #[test]
     fn a_copied_elision_marker_is_recognised_and_ordinary_text_is_not() {
-        let mut arguments = serde_json::json!({"path": "src/lib.rs", "old_text": "x".repeat(400)});
+        let mut arguments =
+            serde_json::json!({"path": "src/lib.rs", "old_text": "x = 1;\n".repeat(60)});
         elide_arguments(&mut arguments);
         assert!(holds_elided_marker(&arguments));
         assert!(holds_elided_marker(&serde_json::json!([elided_marker(9)])));

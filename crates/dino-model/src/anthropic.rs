@@ -1145,8 +1145,7 @@ mod tests {
     fn elision_hollows_long_inputs_of_old_tool_uses() {
         let profile = crate::builtin_profile("claude-opus").unwrap();
         let mut session = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
-        let patch =
-            json!({"path": "src/lib.rs", "old_text": "a".repeat(800), "new_text": "b".repeat(900)});
+        let patch = json!({"path": "src/lib.rs", "old_text": "a a\n".repeat(200), "new_text": "b b\n".repeat(225)});
         session.history.lock().unwrap().extend([
             AnthropicMessage {
                 role: Role::Assistant,
