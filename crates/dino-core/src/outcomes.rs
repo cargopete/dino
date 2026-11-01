@@ -500,6 +500,24 @@ mod tests {
         assert_eq!(watch.record(&cargo("test"), &failing("tests::b")), None);
     }
 
+    /// The settled calls of a live Haiku run, as its session log has them.
+    #[test]
+    fn a_logged_run_is_called_verified_at_its_first_green_suite_after_an_edit() {
+        let mut watch = OutcomeWatch::default();
+        let notes: Vec<(u64, String)> = include_str!("../tests/fixtures/interval-set.jsonl")
+            .lines()
+            .filter_map(|line| {
+                let step: Value = serde_json::from_str(line).unwrap();
+                let call = serde_json::from_value(step["call"].clone()).unwrap();
+                let note = watch.record(&call, step["content"].as_str().unwrap())?;
+                Some((step["model_turn"].as_u64().unwrap(), note))
+            })
+            .collect();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes[0].0, 4);
+        assert!(notes[0].1.contains("The work is verified"), "{notes:?}");
+    }
+
     #[test]
     fn a_build_failure_or_another_test_s_run_neither_counts_nor_breaks_it() {
         let mut watch = OutcomeWatch::default();

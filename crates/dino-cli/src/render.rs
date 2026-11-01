@@ -281,6 +281,12 @@ impl Renderer {
         self.break_stream()
     }
 
+    /// A faint line of its own, for what dino did rather than the model.
+    fn aside(&mut self, text: &str) -> Result<(), SinkError> {
+        self.break_stream()?;
+        write_out(&style::paint(FAINT, &format!("  {text}\n")))
+    }
+
     /// Closes any open streaming line before printing a structured one.
     fn break_stream(&mut self) -> Result<(), SinkError> {
         if self.open_call.take().is_some() {
@@ -542,12 +548,9 @@ impl EventSink for Renderer {
                 elided(*results_elided, *calls_elided, *bytes_reclaimed)
             }
             AgentEvent::TurnsRunningOut { turns_left, .. } => {
-                self.break_stream()?;
-                write_out(&style::paint(
-                    FAINT,
-                    &format!("  told the model it has {turns_left} turn(s) left\n"),
-                ))
+                self.aside(&format!("told the model it has {turns_left} turn(s) left"))
             }
+            AgentEvent::Noted { note, .. } => self.aside(note),
             AgentEvent::TurnCutOff {
                 input_tokens,
                 output_tokens,

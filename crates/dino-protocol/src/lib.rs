@@ -550,6 +550,14 @@ pub enum AgentEvent {
         model_turn: u32,
         turns_left: u32,
     },
+    /// A note dino added to a call's result after it finished, such as a loop
+    /// noticed or the work verified. Its own event because the finished result
+    /// is kept as the tool returned it, for the readers that parse it.
+    Noted {
+        model_turn: u32,
+        call_id: String,
+        note: String,
+    },
     /// The model ended its turn, a check found the work unfinished, and the
     /// model was told why and given another turn. Once per run.
     SentBack {

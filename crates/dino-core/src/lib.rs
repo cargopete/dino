@@ -774,6 +774,14 @@ where
             for note in [note, progress].into_iter().flatten() {
                 result.output.content.push_str("\n\n");
                 result.output.content.push_str(&note);
+                self.emit(
+                    AgentEvent::Noted {
+                        model_turn,
+                        call_id: result.call_id.clone(),
+                        note,
+                    },
+                    events,
+                )?;
             }
             // Only a call that went through counts: a refused one is a refusal.
             if !result.output.is_error {

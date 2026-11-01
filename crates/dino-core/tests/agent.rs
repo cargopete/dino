@@ -1640,9 +1640,25 @@ async fn green_work_is_called_verified_once_and_only_with_no_edit_since() {
         ("test", PASSING),
     ]);
 
-    agent.run("build it").await.unwrap();
+    let run = agent.run("build it").await.unwrap();
 
     assert_eq!(noted(&agent, "The work is verified"), vec![7]);
+    let logged: Vec<&str> = run
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Noted { call_id, note, .. } if note.contains("The work is verified") => {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logged, ["call-6"]);
+    let finished = run.events.iter().find_map(|event| match event {
+        AgentEvent::ToolFinished { result, .. } if result.call_id == "call-6" => Some(result),
+        _ => None,
+    });
+    assert_eq!(finished.unwrap().output.content, PASSING);
 }
 
 #[tokio::test]
