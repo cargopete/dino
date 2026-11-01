@@ -532,7 +532,10 @@ async fn every_adapter_returns_a_tool_result_under_its_own_call_id() {
             },
         ];
         let second = session
-            .next(TurnInput::ToolResults { results })
+            .next(TurnInput::ToolResults {
+                results,
+                note: None,
+            })
             .await
             .unwrap();
         let _ = second.try_collect::<Vec<_>>().await.unwrap();

@@ -39,7 +39,7 @@ impl LoopWatch {
         })
     }
 
-    /// Records a call that ran, and returns a note for its result when the
+    /// Records a call that ran, and returns a note for the model when the
     /// recent calls look like a loop.
     pub fn record(&mut self, call: &ToolCall) -> Option<String> {
         let signature = signature(call);

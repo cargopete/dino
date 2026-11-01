@@ -102,6 +102,7 @@ async fn completes_a_tool_round_trip() {
                     call_id: "call-1".into(),
                     output: ToolOutput::success("fn main() {}"),
                 }],
+                note: None,
             },
         ]
     );
@@ -180,6 +181,7 @@ async fn a_refusal_reaches_the_model_as_an_ordinary_tool_result() {
     assert!(
         agent.session().inputs.contains(&TurnInput::ToolResults {
             results: results.clone(),
+            note: None,
         }),
         "the refusal must be sent back to the provider under its own call ID"
     );
@@ -768,7 +770,7 @@ async fn calls_completed_before_the_window_filled_are_answered() {
 
     assert_eq!(result.stop_reason, StopReason::EndTurn);
     assert_eq!(agent.tools().executed_names(), vec!["read".to_owned()]);
-    let TurnInput::ToolResults { results } = &agent.session().inputs[1] else {
+    let TurnInput::ToolResults { results, .. } = &agent.session().inputs[1] else {
         panic!("expected tool results, got {:?}", agent.session().inputs[1]);
     };
     assert!(results[0].output.content.contains("cut off"));
@@ -956,7 +958,7 @@ async fn a_stream_that_keeps_breaking_fails_the_run() {
 
 fn last_result(input: &TurnInput) -> String {
     match input {
-        TurnInput::ToolResults { results } => results.last().unwrap().output.content.clone(),
+        TurnInput::ToolResults { results, .. } => results.last().unwrap().output.content.clone(),
         TurnInput::User { content } | TurnInput::UserWithImages { content, .. } => content.clone(),
     }
 }
@@ -1236,7 +1238,7 @@ async fn a_turn_of_several_calls_runs_them_in_order_and_answers_every_one() {
         .map(|call| call.id.clone())
         .collect();
     assert_eq!(executed, ["call-1", "call-3", "call-4"]);
-    let TurnInput::ToolResults { results } = &agent.session().inputs[1] else {
+    let TurnInput::ToolResults { results, .. } = &agent.session().inputs[1] else {
         panic!("one input carries the whole turn's results");
     };
     let answered: Vec<(&str, bool)> = results
@@ -1300,7 +1302,7 @@ async fn results_left_unsent_at_the_limit_open_the_next_run() {
 
     agent.run("continue").await.unwrap();
     let inputs = &agent.session().inputs;
-    let TurnInput::ToolResults { results } = &inputs[1] else {
+    let TurnInput::ToolResults { results, .. } = &inputs[1] else {
         panic!(
             "the next run must open with the unsent results: {:?}",
             inputs[1]
@@ -1552,4 +1554,152 @@ async fn a_finished_checklist_lets_the_model_stop() {
             .iter()
             .any(|event| matches!(event, AgentEvent::SentBack { .. }))
     );
+}
+
+/// Answers each call with the output scripted for its id.
+struct Reporting(std::collections::HashMap<String, String>);
+
+impl ToolRuntime for Reporting {
+    fn definitions(&self) -> Vec<dino_protocol::ToolDefinition> {
+        ["apply_patch", "cargo"]
+            .into_iter()
+            .map(|name| dino_protocol::ToolDefinition {
+                name: name.into(),
+                description: name.into(),
+                input_schema: json!({"type": "object"}),
+            })
+            .collect()
+    }
+
+    fn classify(
+        &self,
+        call: &dino_protocol::ToolCall,
+    ) -> Result<dino_protocol::ToolAction, dino_core::ToolError> {
+        Ok(dino_protocol::ToolAction::process(call.name.clone()))
+    }
+
+    fn execute(&self, call: &dino_protocol::ToolCall) -> dino_core::ToolFuture<'_> {
+        let output = self.0.get(&call.id).cloned().unwrap_or_else(|| "{}".into());
+        Box::pin(async move { Ok(ToolOutput::success(output)) })
+    }
+}
+
+/// A turn per step, each a patch or a cargo command with its scripted output.
+fn outcome_run(steps: &[(&str, &str)]) -> Agent<ScriptedSession, Reporting> {
+    let mut turns = Vec::new();
+    let mut outputs = std::collections::HashMap::new();
+    for (index, (command, output)) in steps.iter().enumerate() {
+        let id = format!("call-{index}");
+        let call = if *command == "patch" {
+            tool_call(&id, "apply_patch", "src/lib.rs")
+        } else {
+            dino_protocol::ToolCall {
+                id: id.clone(),
+                name: "cargo".into(),
+                arguments: json!({"command": command}),
+            }
+        };
+        outputs.insert(id, (*output).to_owned());
+        turns.push(tool_turn(call));
+    }
+    turns.push(text_turn("done"));
+    turns.push(text_turn("done, and it stays failing"));
+    Agent::new(
+        ScriptedSession::new(turns),
+        Reporting(outputs),
+        AgentConfig::default(),
+    )
+    .with_policy(AllowAll)
+}
+
+fn noted(agent: &Agent<ScriptedSession, Reporting>, text: &str) -> Vec<usize> {
+    agent
+        .session()
+        .inputs
+        .iter()
+        .enumerate()
+        .filter(|(_, input)| match input {
+            TurnInput::ToolResults { note, .. } => {
+                note.as_deref().is_some_and(|n| n.contains(text))
+            }
+            _ => false,
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+const PASSING: &str =
+    r#"{"exit_code":0,"output":"test tests::a ... ok\ntest result: ok. 1 passed; 0 failed"}"#;
+const FAILING: &str = r#"{"exit_code":101,"output":"test tests::strings ... FAILED\ntest result: FAILED. 0 passed; 1 failed"}"#;
+const WARNED: &str = r#"{"exit_code":0,"counts":{"errors":0,"warnings":1}}"#;
+
+#[tokio::test]
+async fn green_work_is_called_verified_once_and_only_with_no_edit_since() {
+    let mut agent = outcome_run(&[
+        ("test", PASSING),
+        ("patch", "{}"),
+        ("clippy", WARNED),
+        ("test", PASSING),
+        ("patch", "{}"),
+        ("fmt", "{}"),
+        ("test", PASSING),
+        ("patch", "{}"),
+        ("test", PASSING),
+    ]);
+
+    let run = agent.run("build it").await.unwrap();
+
+    assert_eq!(noted(&agent, "The work is verified"), vec![7]);
+    let logged: Vec<&str> = run
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Noted { call_id, note, .. } if note.contains("The work is verified") => {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logged, ["call-6"]);
+    let finished = run.events.iter().find_map(|event| match event {
+        AgentEvent::ToolFinished { result, .. } if result.call_id == "call-6" => Some(result),
+        _ => None,
+    });
+    assert_eq!(finished.unwrap().output.content, PASSING);
+    let TurnInput::ToolResults { results, .. } = &agent.session().inputs[7] else {
+        panic!("the note rides with the turn's results");
+    };
+    assert_eq!(results[0].output.content, PASSING);
+}
+
+#[tokio::test]
+async fn a_test_failing_three_runs_after_changes_suggests_stepping_back_once() {
+    let mut agent = outcome_run(&[
+        ("patch", "{}"),
+        ("test", FAILING),
+        ("patch", "{}"),
+        ("test", FAILING),
+        ("patch", "{}"),
+        ("test", FAILING),
+        ("patch", "{}"),
+        ("test", FAILING),
+    ]);
+
+    agent.run("fix it").await.unwrap();
+
+    assert_eq!(
+        noted(&agent, "`tests::strings` failed in 3 test runs"),
+        vec![6]
+    );
+    assert!(noted(&agent, "verified").is_empty());
+}
+
+#[tokio::test]
+async fn a_loop_is_noted_beside_the_result_it_follows() {
+    let mut agent = outcome_run(&[("check", "{}"), ("check", "{}"), ("check", "{}")]);
+
+    agent.run("check it").await.unwrap();
+
+    assert_eq!(noted(&agent, "called 3 times in a row"), vec![3]);
+    assert_eq!(last_result(&agent.session().inputs[3]), "{}");
 }

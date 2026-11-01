@@ -450,6 +450,32 @@ mod tests {
     }
 
     #[test]
+    fn a_note_after_tool_results_keeps_its_place_across_providers() {
+        let messages = json!([
+            {"role": "user", "content": [{"type": "text", "text": "fix it"}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "cargo", "input": {"command": "test"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "{\"exit_code\":0}", "is_error": false},
+                {"type": "text", "text": "[dino: verified]"},
+            ]},
+        ]);
+
+        let chat = messages_to_chat(&messages).unwrap();
+
+        assert_eq!(
+            chat[2],
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "{\"exit_code\":0}"})
+        );
+        assert_eq!(
+            chat[3],
+            json!({"role": "user", "content": "[dino: verified]"})
+        );
+        assert_eq!(chat_to_messages(&chat).unwrap(), messages);
+    }
+
+    #[test]
     fn a_chat_history_becomes_alternating_messages() {
         let history = json!([
             {"role": "user", "content": "fix it", "images": ["data:image/png;base64,AAAA"]},

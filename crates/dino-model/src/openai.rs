@@ -111,7 +111,7 @@ impl OpenAiSession {
                     ));
                     json!([{"role": "user", "content": parts}])
                 }
-                TurnInput::ToolResults { results } => Value::Array(
+                TurnInput::ToolResults { results, note } => Value::Array(
                     results
                         .into_iter()
                         .map(|result| {
@@ -126,6 +126,12 @@ impl OpenAiSession {
                                 "output": output,
                             })
                         })
+                        .chain(note.map(|note| {
+                            json!({
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": note}],
+                            })
+                        }))
                         .collect(),
                 ),
             };
@@ -647,13 +653,19 @@ mod tests {
                     call_id: "call-1".into(),
                     output: dino_protocol::ToolOutput::success("file contents"),
                 }],
+                note: Some("[dino: verified]".into()),
             })
             .unwrap();
 
         assert_eq!(body["previous_response_id"], "resp-1");
         assert_eq!(body["instructions"], "Work carefully.");
-        assert_eq!(body["input"][0]["type"], "function_call_output");
-        assert_eq!(body["input"][0]["call_id"], "call-1");
+        assert_eq!(
+            body["input"],
+            json!([
+                {"type": "function_call_output", "call_id": "call-1", "output": "file contents"},
+                {"role": "user", "content": [{"type": "input_text", "text": "[dino: verified]"}]},
+            ])
+        );
         assert_eq!(body["reasoning"]["effort"], "high");
     }
 

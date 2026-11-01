@@ -207,6 +207,7 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, ToolCall>, event: &
         // metric itself.
         AgentEvent::Submitted { .. }
         | AgentEvent::Steered { .. }
+        | AgentEvent::Noted { .. }
         | AgentEvent::Model { .. }
         | AgentEvent::ToolDecided { .. } => {}
     }
