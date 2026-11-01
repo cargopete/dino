@@ -884,3 +884,61 @@ async fn a_reread_does_not_pass_until_the_range_is_withheld() {
     assert_eq!(outcome.metrics.model_turns, 3);
     assert!(outcome.passed, "failures: {:?}", outcome.failures);
 }
+
+#[tokio::test]
+async fn a_rust_case_states_containment_once_and_is_not_offered_packages() {
+    let scratch = Scratch::new();
+    let case = Case::load(corpus().join("answer-from-the-file")).unwrap();
+    let seen = std::sync::Mutex::new(None);
+    let build = |prompt: String, tools: Vec<dino_protocol::ToolDefinition>| {
+        *seen.lock().unwrap() = Some((prompt, tools));
+        Ok(Box::new(Scripted {
+            profile: profile(),
+            turns: VecDeque::from([text_turn("done")]),
+        }) as Box<dyn ModelSession>)
+    };
+
+    run_case(
+        &case,
+        &scratch.path,
+        Arc::new(Unconfined),
+        &dino_eval::Variant::default(),
+        &build,
+    )
+    .await
+    .unwrap();
+
+    let (prompt, tools) = seen.into_inner().unwrap().unwrap();
+    assert!(prompt.contains("every process a tool starts: unconfined"));
+    assert!(
+        tools
+            .iter()
+            .all(|tool| !tool.description.contains("unconfined"))
+    );
+    assert!(tools.iter().all(|tool| tool.name != "packages"));
+}
+
+#[test]
+fn packages_is_offered_where_there_is_something_to_fetch() {
+    use dino_core::ToolRuntime as _;
+    let offered = |files: &[&str]| {
+        let scratch = Scratch::new();
+        for file in files {
+            fs::write(scratch.path.join(file), "").unwrap();
+        }
+        dino_eval::session_tools(
+            &scratch.path,
+            Arc::new(Unconfined),
+            &dino_eval::ToolOptions::default(),
+        )
+        .unwrap()
+        .definitions()
+        .iter()
+        .any(|tool| tool.name == "packages")
+    };
+
+    assert!(offered(&[]));
+    assert!(offered(&["Cargo.toml", "package.json"]));
+    assert!(offered(&["go.mod"]));
+    assert!(!offered(&["Cargo.toml"]));
+}

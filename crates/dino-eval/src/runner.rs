@@ -587,6 +587,7 @@ fn eval_session(
             .map(|definition| definition.name.clone())
             .collect(),
         approval_mode: "eval (unattended, everything allowed, sandbox enforcing)".to_owned(),
+        containment: sandbox.label(),
         max_model_turns: Some(case.max_turns),
         git: None,
         outline: dino_rust::outline::outline(workspace),
@@ -1008,12 +1009,14 @@ pub fn session_tools_with(
                 shell
             })
         },
-        Box::new(
-            dino_exec::PackagesTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
-                .map_err(setup)?,
-        ),
         Box::new(dino_exec::BackgroundTool::new(workspace, Arc::clone(&sandbox)).map_err(setup)?),
     ];
+    if offers_packages(workspace) {
+        runtimes.push(Box::new(
+            dino_exec::PackagesTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
+                .map_err(setup)?,
+        ));
+    }
     if !options.skills.is_empty() {
         runtimes.push(Box::new(dino_core::skills::SkillTool::new(
             options.skills.clone(),
@@ -1048,6 +1051,15 @@ pub fn session_tools_with(
     }
     runtimes.extend(extra);
     ToolSet::new(runtimes).map_err(setup)
+}
+
+/// Whether `packages` has anything to fetch for: a JavaScript or Go manifest,
+/// or no Cargo manifest, as in a project not yet begun.
+fn offers_packages(workspace: &Path) -> bool {
+    ["package.json", "go.mod"]
+        .iter()
+        .any(|manifest| workspace.join(manifest).is_file())
+        || !workspace.join("Cargo.toml").is_file()
 }
 
 /// The file tools, wrapped in the user's after-edit hooks when there are any.

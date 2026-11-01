@@ -149,11 +149,9 @@ impl ToolRuntime for ShellTool {
             name: NAME.into(),
             description: format!(
                 "Run one command line through `sh -c`, for when you need a pipe, a \
-                 redirect, a glob or `&&`. Prefer `exec` for a single program and the \
-                 read and search tools over cat and grep. Each distinct line needs its own \
-                 approval. Anything the line starts, `&` included, is stopped when it \
-                 finishes, so start a server, use it and stop it in one line. Containment: {}.{}",
-                self.sandbox.label(),
+                 redirect, a glob or `&&`. Prefer `exec` for a single program. Each distinct \
+                 line needs its own approval. Anything the line starts, `&` included, is \
+                 stopped when it finishes; use `background` for a server.{}",
                 if self.escalation {
                     crate::escalation::DESCRIPTION
                 } else {

@@ -383,12 +383,11 @@ impl ToolRuntime for BackgroundTool {
         vec![ToolDefinition {
             name: NAME.into(),
             description: format!(
-                "Run a command line that keeps going across calls, such as a development \
-                 server or a watcher, in the same containment as shell: {}. op start runs it \
-                 and returns an id and its first output; output returns what it printed since \
-                 you last looked; stop ends it and everything it started; list shows them all. \
-                 At most {MAX_RUNNING} at once, and all are stopped when the session ends.",
-                self.sandbox.label()
+                "Run a command line that keeps going across calls, such as a server or a \
+                 watcher, contained as shell is. start returns an id and its first output; \
+                 output returns what it printed since you last looked; stop ends it and all \
+                 it started; list shows them. At most {MAX_RUNNING} at once, all stopped when \
+                 the session ends."
             ),
             input_schema: json!({
                 "type": "object",

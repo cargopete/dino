@@ -104,12 +104,10 @@ impl ToolRuntime for TodoTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: TODO.into(),
-            description: "Keep a short checklist for a task with several steps. Send the whole \
-                          list every time, with each item pending, in_progress, done or blocked. Mark \
-                          one in_progress while you work on it and done once it is finished. \
-                          Send an update with the calls of the next step, or of the last check, \
-                          rather than on its own. Mark an item blocked, with a reason, only when \
-                          it cannot be done here. The person sees the list as it changes."
+            description: "A checklist, which the person sees, for a task of several steps. \
+                          Send the whole list each time, with one item in_progress. Send it \
+                          with the next step's calls, not on its own. Mark an item blocked, \
+                          with a reason, only when it cannot be done here."
                 .into(),
             input_schema: json!({
                 "type": "object",

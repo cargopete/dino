@@ -177,11 +177,8 @@ impl ToolRuntime for ExecTool {
             name: "exec".into(),
             description: format!(
                 "Run one program with one argument vector. There is no shell: no pipes, no \
-                 redirection, no globbing and no &&. Use a program's own flags instead, and \
-                 prefer the read and search tools over cat and grep. Run Cargo through the \
-                 cargo tool, which can fetch dependencies when nothing else can. \
-                 Containment: {}.{}",
-                self.sandbox.label(),
+                 redirection, no globbing and no &&; use the program's own flags. Prefer \
+                 read and search over cat and grep, and the cargo tool for Cargo.{}",
                 if self.escalation {
                     crate::escalation::DESCRIPTION
                 } else {

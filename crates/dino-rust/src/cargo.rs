@@ -532,19 +532,14 @@ impl ToolRuntime for CargoTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "cargo".into(),
-            description: format!(
-                "Run one of a fixed set of Cargo commands in the workspace and return parsed \
-                 diagnostics. No subcommand is read-only: check, build and clippy run build scripts, \
-                 and test runs test code. Everything runs offline except fetch, which \
-                 downloads the locked dependencies, and add, which adds crates to Cargo.toml; \
-                 use those when a build fails for a missing dependency. fmt formats every file \
-                 in the workspace, existing tests included, unless files names the ones to \
-                 format; read a file again after it. fmt_check only reports. run is for programs that exit \
-                 and is stopped after two minutes. Output leaves out progress lines and passing \
-                 tests and shortens repeated diagnostics, trimmed says what went, and full \
-                 returns all of it. Containment: {}.",
-                self.sandbox.label()
-            ),
+            description: "Run a Cargo command and return parsed diagnostics. None is read-only: \
+                 they run build scripts and test code. All run offline except fetch, which \
+                 downloads the locked dependencies, and add, which adds crates to Cargo.toml. \
+                 fmt formats the whole workspace, existing tests included, unless files names \
+                 the files to format; fmt_check only reports. run is for programs that exit, \
+                 and stops them after two minutes. Output leaves out progress, passing tests \
+                 and repeated diagnostics; trimmed says what went, and full returns it all."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

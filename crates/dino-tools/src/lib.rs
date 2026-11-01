@@ -203,9 +203,8 @@ impl WorkspaceTools {
                               old_text with new_text, or several replacements at once in edits. \
                               Each old_text must occur exactly once in the file as it was before \
                               the call, unless the same edit is given once for each occurrence, \
-                              and edits may not overlap. Related changes to other files go in \
-                              the same response, one call per file, and the test that checks \
-                              them can follow in it too: calls run in the order sent."
+                              and edits may not overlap. Edits to other files, and the test \
+                              that checks them, can follow in the same response."
                     .into(),
                 input_schema: json!({
                     "type": "object",

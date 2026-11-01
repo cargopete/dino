@@ -280,6 +280,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let profile = config::resolve_profile(args.model.as_deref())?;
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let sandbox = config::build_sandbox(args.sandbox, &workspace, &[])?;
+    let containment = sandbox.label();
     let tools = tool_set(
         &workspace,
         sandbox,
@@ -289,6 +290,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let context = prompt_context(
         &workspace,
         ApprovalMode::Interactive,
+        &containment,
         &tools.definitions(),
         None,
     );
@@ -425,6 +427,7 @@ fn connect_mcp(
 fn prompt_context(
     workspace: &Path,
     mode: ApprovalMode,
+    containment: &str,
     definitions: &[ToolDefinition],
     max_model_turns: Option<u32>,
 ) -> PromptContext {
@@ -435,6 +438,7 @@ fn prompt_context(
             .map(|definition| definition.name.clone())
             .collect(),
         approval_mode: mode.label().to_owned(),
+        containment: containment.to_owned(),
         max_model_turns,
         git: dino_core::git::GitSnapshot::take(workspace),
         outline: dino_rust::outline::outline(workspace),
@@ -626,6 +630,7 @@ fn prepare(
     let mut context = prompt_context(
         &settings.workspace,
         settings.mode,
+        &sandbox_label,
         &definitions,
         Some(settings.max_turns.get()),
     );
