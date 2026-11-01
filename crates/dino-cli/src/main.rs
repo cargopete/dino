@@ -147,7 +147,7 @@ struct CommonArgs {
     #[arg(long)]
     no_thinking: bool,
     /// Reasoning effort for a model that offers a choice: none, low, medium,
-    /// high, xhigh or max. Leaves the provider's default when absent.
+    /// high, xhigh or max. Leaves the model's default when absent.
     #[arg(long)]
     effort: Option<dino_protocol::ReasoningEffort>,
     /// Continue a previous session. Bare, the most recent in this workspace.
@@ -1180,6 +1180,19 @@ fn file_named(path: Option<&PathBuf>) -> String {
     path.map_or_else(|| "none".to_owned(), |path| path.display().to_string())
 }
 
+fn effort_row(
+    (effort, source): (Option<dino_protocol::ReasoningEffort>, Source),
+    model: Option<&str>,
+) -> String {
+    if let Some(effort) = effort {
+        return format!("{effort}  ({})", source.label());
+    }
+    match config::resolve_profile(model).map(|profile| profile.default_effort) {
+        Ok(Some(effort)) => format!("{effort}  (model default)"),
+        _ => format!("provider default  ({})", source.label()),
+    }
+}
+
 fn print_config(args: &PromptArgs) -> Result<()> {
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     let common = CommonArgs {
@@ -1244,13 +1257,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         ("thinking off", switch(resolved.no_thinking)),
         (
             "reasoning effort",
-            show(
-                resolved.reasoning_effort.0.map_or_else(
-                    || "provider default".to_owned(),
-                    |effort| effort.to_string(),
-                ),
-                resolved.reasoning_effort.1,
-            ),
+            effort_row(resolved.reasoning_effort, resolved.model.0.as_deref()),
         ),
         ("plain", switch(resolved.plain)),
         ("greeting", switch(resolved.greeting)),
@@ -1358,4 +1365,31 @@ fn request_text(argument: Option<String>) -> Result<String> {
         bail!("the request read from standard input was empty");
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use dino_protocol::ReasoningEffort;
+
+    use super::*;
+
+    #[test]
+    fn config_names_where_the_effort_came_from() {
+        let unset = (None, Source::Default);
+        assert_eq!(
+            effort_row(unset, Some("kimi-k3.1-pro")),
+            "low  (model default)"
+        );
+        assert_eq!(
+            effort_row(unset, Some("claude-sonnet-5.5")),
+            "provider default  (default)"
+        );
+        assert_eq!(
+            effort_row(
+                (Some(ReasoningEffort::High), Source::Flag),
+                Some("kimi-k3.1-pro")
+            ),
+            "high  (flag)"
+        );
+    }
 }

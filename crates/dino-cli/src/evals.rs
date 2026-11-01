@@ -59,7 +59,7 @@ pub struct EvalArgs {
     #[arg(long)]
     pub thinking_budget: Option<u32>,
     /// Reasoning effort for a model that offers a choice, recorded with each
-    /// run. Leaves the provider's default when absent; no config file sets it.
+    /// run. Leaves the model's default when absent; no config file sets it.
     #[arg(long)]
     pub effort: Option<dino_protocol::ReasoningEffort>,
     /// Emit the whole record, metrics included, as JSON.
@@ -205,7 +205,7 @@ async fn stopped() -> ExitCode {
     }
 }
 
-async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
+async fn run_corpus(mut args: EvalArgs) -> Result<ExitCode> {
     style::enable(args.plain);
     if args.calibrate {
         return calibrate(&args).await;
@@ -220,8 +220,8 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
         }
         Some(_) => None,
     };
-    if let (Some(profile), Some(effort)) = (&profile, args.effort) {
-        config::check_effort(profile, effort)?;
+    if let Some(profile) = &profile {
+        args.effort = effort(&args, profile)?;
     }
     let label = match (&profile, args.harness, &args.model) {
         (Some(profile), _, _) => profile.key.clone(),
@@ -309,6 +309,29 @@ async fn run_corpus(args: EvalArgs) -> Result<ExitCode> {
     })
 }
 
+/// The effort every run is built with and recorded at: the flag's, else the
+/// model's default.
+fn effort(
+    args: &EvalArgs,
+    profile: &dino_protocol::ModelProfile,
+) -> Result<Option<dino_protocol::ReasoningEffort>> {
+    match args.effort {
+        Some(effort) => config::check_effort(profile, effort).map(|()| Some(effort)),
+        None => Ok(profile.default_effort),
+    }
+}
+
+fn variant(args: &EvalArgs) -> dino_eval::Variant {
+    dino_eval::Variant {
+        without: args.without.clone(),
+        max_diagnostics: args.max_diagnostics,
+        thinking_budget: args.thinking_budget,
+        reasoning_effort: args.effort,
+        score: args.score,
+        review_model: args.review_model.clone(),
+    }
+}
+
 /// The line a corpus run opens with.
 fn header(
     args: &EvalArgs,
@@ -388,19 +411,11 @@ async fn run_one(
         .map(|review| review_sessions(&settings, review))
         .transpose()?;
 
-    let variant = dino_eval::Variant {
-        without: args.without.clone(),
-        max_diagnostics: args.max_diagnostics,
-        thinking_budget: args.thinking_budget,
-        reasoning_effort: args.effort,
-        score: args.score,
-        review_model: args.review_model.clone(),
-    };
     Ok(run_case_reviewed(
         case,
         &scratch,
         Arc::clone(&sandbox),
-        &variant,
+        &variant(args),
         &build,
         review,
     )
@@ -1001,6 +1016,34 @@ mod tests {
         );
         assert!(ceiling(&["--max-usd", "0"], "kimi-k3.1-pro").is_err());
         assert!(ceiling(&["--max-usd", "5"], "qwen3-8b").is_err());
+    }
+
+    #[test]
+    fn a_run_records_the_effort_it_was_built_with() {
+        #[derive(clap::Parser)]
+        struct Line {
+            #[command(flatten)]
+            args: super::EvalArgs,
+        }
+        let recorded = |flags: &[&str], model: &str| {
+            let mut line = <Line as clap::Parser>::try_parse_from(
+                std::iter::once("eval").chain(flags.iter().copied()),
+            )
+            .unwrap();
+            let profile = dino_model::builtin_profile(model).unwrap();
+            line.args.effort = super::effort(&line.args, &profile).unwrap();
+            super::variant(&line.args).reasoning_effort
+        };
+
+        assert_eq!(
+            recorded(&[], "kimi-k3.1-pro"),
+            Some(dino_protocol::ReasoningEffort::Low)
+        );
+        assert_eq!(
+            recorded(&["--effort", "high"], "kimi-k3.1-pro"),
+            Some(dino_protocol::ReasoningEffort::High)
+        );
+        assert_eq!(recorded(&[], "claude-sonnet-5.5"), None);
     }
 
     #[tokio::test]
