@@ -1,0 +1,11 @@
+name: kimi-low-full
+started: 2026-11-01T02:14:59Z
+commit: 84e7ec3a2258403fbef396404f0861b52af5a83b
+dino: /Users/pepe/dino-bench-results/bin-combined/dino sha256 461277a8aaca1f70
+trials: 5
+args: --model kimi-k3.1-pro --effort low --jobs 3
+codex: codex-cli 0.165.0
+grok: grok 1.0.70 (f50904eaee6c) [stable]
+claude: 2.1.316 (Claude Code)
+host: Darwin arm64, 18 cpus
+finished: 2026-11-01T04:57:40Z, exit 1

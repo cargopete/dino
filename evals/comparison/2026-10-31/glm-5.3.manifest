@@ -1,0 +1,10 @@
+name: glm-5.3
+started: 2026-10-31T12:27:50Z
+commit: 331e6fefcfa9790a064bd8863929f0603b274140
+dino: /Users/pepe/.cargo/bin/dino sha256 dc49058732087699
+trials: 5
+args: --model glm-5.3 --jobs 3
+codex: codex-cli 0.165.0
+grok: grok 1.0.70 (f50904eaee6c) [stable]
+claude: 2.1.316 (Claude Code)
+host: Darwin arm64, 18 cpus
