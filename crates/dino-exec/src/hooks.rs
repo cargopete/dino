@@ -271,6 +271,71 @@ impl dino_core::FinishCheck for EndTurnHooks {
     }
 }
 
+/// How a run ended, as a task-end hook is told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEnd {
+    /// One word: `finished`, `failed`, `cancelled` or `stopped`.
+    pub status: String,
+    /// A sentence or two for a person to read where the ping lands.
+    pub message: String,
+}
+
+/// Runs each task-end hook once, with the outcome in `{status}` and `{message}`
+/// in its arguments and in `DINO_STATUS` and `DINO_MESSAGE`. Returns what went
+/// wrong with any, by program name only: an argument may be a webhook token.
+///
+/// Outside the sandbox, because a ping has to reach the network. The hook is
+/// from the user file, which a repository cannot write.
+pub async fn run_task_end_hooks(
+    hooks: &[Hook],
+    root: &std::path::Path,
+    ended: &TaskEnd,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for hook in hooks {
+        let argv: Vec<String> = hook
+            .command
+            .iter()
+            .map(|part| {
+                part.replace("{status}", &ended.status)
+                    .replace("{message}", &ended.message)
+            })
+            .collect();
+        let Some((program, arguments)) = argv.split_first() else {
+            continue;
+        };
+        let outcome = process::run_with(
+            program,
+            arguments,
+            root,
+            &dino_sandbox::Unconfined,
+            4 * 1_024,
+            Duration::from_secs(30),
+            &[
+                ("DINO_STATUS", ended.status.as_str()),
+                ("DINO_MESSAGE", ended.message.as_str()),
+            ],
+        )
+        .await;
+        match outcome {
+            Ok(execution) if execution.exit_code == Some(0) => {}
+            Ok(execution) if execution.timed_out => {
+                problems.push(format!("the task_end hook `{program}` timed out"));
+            }
+            Ok(execution) => problems.push(format!(
+                "the task_end hook `{program}` {}",
+                execution
+                    .exit_code
+                    .map_or_else(|| "was killed".to_owned(), |code| format!("exited {code}"))
+            )),
+            Err(error) => problems.push(format!(
+                "the task_end hook `{program}` did not run: {error}"
+            )),
+        }
+    }
+    problems
+}
+
 /// Runs each session-start hook once and returns what it printed, for the
 /// system prompt. A hook that fails says so in place of its output.
 pub async fn run_start_hooks(

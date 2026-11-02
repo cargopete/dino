@@ -133,6 +133,8 @@ Tool discipline:
 #[derive(Debug, Clone)]
 pub struct PromptContext {
     pub workspace_root: String,
+    /// The model key the session runs on, so it can say which model it is.
+    pub model: Option<String>,
     pub tools: Vec<String>,
     pub approval_mode: String,
     pub max_model_turns: Option<u32>,
@@ -250,6 +252,13 @@ pub fn system_prompt(context: &PromptContext) -> String {
         cap(&tools, MAX_TOOL_LIST_BYTES)
     );
 
+    if let Some(model) = &context.model {
+        let _ = writeln!(
+            &mut prompt,
+            "- Model: {model}. A person starts another with `dino --model <key>` or switches \
+             in a session with `/model <key>`; `/model` alone and `dino models` list the keys."
+        );
+    }
     let _ = writeln!(&mut prompt, "- Approval mode: {}", context.approval_mode);
     if let Some(turns) = context.max_model_turns {
         let _ = writeln!(
@@ -352,6 +361,7 @@ mod tests {
     fn caps_an_over_long_workspace_root() {
         let context = PromptContext {
             workspace_root: "/ø".repeat(400),
+            model: None,
             tools: vec!["read".into()],
             approval_mode: "interactive".into(),
             max_model_turns: None,
@@ -397,6 +407,7 @@ mod tests {
     fn instructions_are_rendered_under_their_source_and_below_the_rules() {
         let context = PromptContext {
             workspace_root: "/tmp/workspace".into(),
+            model: None,
             tools: vec!["read".into()],
             approval_mode: "interactive".into(),
             max_model_turns: None,
@@ -424,6 +435,7 @@ mod tests {
     fn records_the_tools_and_approval_mode_in_force() {
         let context = PromptContext {
             workspace_root: "/tmp/workspace".into(),
+            model: Some("claude-sonnet".into()),
             tools: vec!["read".into(), "search".into(), "apply_patch".into()],
             approval_mode: "read-only".into(),
             max_model_turns: Some(40),
@@ -442,5 +454,27 @@ mod tests {
         assert!(prompt.contains("belong in the same response"), "{prompt}");
         assert!(prompt.contains("not in a response of its own"), "{prompt}");
         assert!(prompt.contains("- Approval mode: read-only"));
+        assert!(prompt.contains("- Model: claude-sonnet."), "{prompt}");
+        assert!(prompt.contains("`dino --model <key>`"), "{prompt}");
+        assert!(prompt.contains("`/model <key>`"), "{prompt}");
+    }
+
+    #[test]
+    fn no_model_line_when_the_model_is_not_known() {
+        let mut context = PromptContext {
+            workspace_root: "/tmp/workspace".into(),
+            model: None,
+            tools: Vec::new(),
+            approval_mode: "interactive".into(),
+            max_model_turns: None,
+            git: None,
+            outline: None,
+            instructions: Vec::new(),
+            memory: Vec::new(),
+            skills: Vec::new(),
+        };
+        assert!(!system_prompt(&context).contains("- Model:"));
+        context.model = Some("qwen3-8b".into());
+        assert!(system_prompt(&context).contains("- Model: qwen3-8b."));
     }
 }

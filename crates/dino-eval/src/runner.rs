@@ -683,6 +683,8 @@ fn eval_session(
     let definitions = tools.definitions();
     let context = PromptContext {
         workspace_root: workspace.display().to_string(),
+        // None, like the instructions: a measurement does not depend on the model's name.
+        model: None,
         tools: definitions
             .iter()
             .map(|definition| definition.name.clone())

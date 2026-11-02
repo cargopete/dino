@@ -34,6 +34,8 @@ pub enum Ended {
     OutOfTurns,
     /// Sessions kept ending with items pending and nothing newly done.
     Stalled,
+    /// The task's budget ran out; this is why.
+    OverBudget(String),
 }
 
 /// Sent once, in the same session, when it ends its turn with items pending:
@@ -79,7 +81,12 @@ pub async fn run(
                 used += turns;
                 ("it reached its turn limit".to_owned(), None)
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                if let Some(ended) = stopped_by_budget(prepared, cancel).await? {
+                    return Ok(ended);
+                }
+                return Err(error.into());
+            }
         };
 
         let record = progress.snapshot();
@@ -130,6 +137,12 @@ pub async fn run(
         }
         last_done = record.done();
 
+        // No slice is started that the budget cannot pay for.
+        let spent = prepared.spending.meter.spent().usd;
+        if let Err(reason) = prepared.spending.meter.task().admit(spent) {
+            return Ok(Ended::OverBudget(reason));
+        }
+
         session += 1;
         prepared.agent.record(&AgentEvent::HandedOver {
             session,
@@ -152,6 +165,27 @@ pub async fn run(
 
 fn ended_early() -> String {
     "it ended its turn with items still pending".to_owned()
+}
+
+/// When a task limit ended the session, asks once what is left and ends the
+/// chain: a limit is a stop with an account, not a failure.
+async fn stopped_by_budget(
+    prepared: &mut Prepared,
+    cancel: &CancellationToken,
+) -> Result<Option<Ended>> {
+    let Some(reason) = prepared.spending.meter.task().stopped() else {
+        return Ok(None);
+    };
+    crate::task::wrap_up(
+        &mut prepared.agent,
+        &prepared.spending.meter,
+        &prepared.planning,
+        &reason,
+        cancel,
+    )
+    .await;
+    crate::save_state(&prepared.agent, &prepared.state_path)?;
+    Ok(Some(Ended::OverBudget(reason)))
 }
 
 /// The first message of a fresh session, built by the harness: the task, the

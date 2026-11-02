@@ -180,6 +180,60 @@ async fn start_hooks_report_their_output() {
 }
 
 #[tokio::test]
+async fn task_end_hooks_are_told_how_the_run_ended() {
+    let root = fixture("task-end");
+    let ended = dino_exec::TaskEnd {
+        status: "failed".into(),
+        message: "dino failed after 36m; boom".into(),
+    };
+    let hook = argv(&[
+        "sh",
+        "-c",
+        "printf '%s|%s|%s' \"$DINO_STATUS\" \"$DINO_MESSAGE\" \"$1\" > told.txt",
+        "sh",
+        "{status}:{message}",
+    ]);
+
+    let problems = dino_exec::run_task_end_hooks(&[hook], &root, &ended).await;
+
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(
+        fs::read_to_string(root.join("told.txt")).unwrap(),
+        "failed|dino failed after 36m; boom|failed:dino failed after 36m; boom"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_failing_task_end_hook_is_reported_without_its_arguments() {
+    let root = fixture("task-end-fails");
+    let ended = dino_exec::TaskEnd {
+        status: "finished".into(),
+        message: "done".into(),
+    };
+    let failing = argv(&[
+        "sh",
+        "-c",
+        "exit 22",
+        "sh",
+        "https://example.test/hook/SECRET",
+    ]);
+    let missing = argv(&["dino-no-such-program", "SECRET"]);
+    let passing = argv(&["true"]);
+
+    let problems = dino_exec::run_task_end_hooks(&[failing, missing, passing], &root, &ended).await;
+
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    assert!(problems[0].contains("`sh` exited 22"), "{problems:?}");
+    assert!(problems[1].contains("dino-no-such-program"), "{problems:?}");
+    assert!(
+        problems.iter().all(|problem| !problem.contains("SECRET")),
+        "{problems:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn hooks_wait_for_the_turns_last_edit_to_a_file() {
     let root = fixture("deferred");
     let tool = hooked(&root, vec![argv(&["sh", "-c", "echo ran >> runs.log"])]);

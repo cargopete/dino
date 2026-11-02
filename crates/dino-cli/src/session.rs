@@ -314,6 +314,8 @@ pub struct Session<S> {
     pub sandbox: String,
     pub approvals: String,
     pub log_path: String,
+    /// Pinged when a task ends, if it ran long enough.
+    pub end_hooks: Vec<crate::task::EndHook>,
     pub history_path: std::path::PathBuf,
     /// Where this conversation is persisted after each submission.
     pub state_path: std::path::PathBuf,
@@ -531,6 +533,23 @@ where
 
     /// Runs one submission, cancellable on its own for its own lifetime.
     async fn submit(&mut self, text: String) {
+        // Before attachments, which are file contents and name no limits.
+        let (limits, named) = self.meter.begin_task(&text);
+        if named {
+            println!(
+                "{}",
+                style::paint(FAINT, &format!("  task budget: {}", limits.describe()))
+            );
+        }
+        // Not while planning: a plan is where that run is meant to stop.
+        let finishing = crate::task::wants_to_finish(&text)
+            && !self.planning.load(std::sync::atomic::Ordering::Relaxed);
+        self.agent.set_keep_going(finishing);
+        let text = if finishing {
+            crate::task::note_if_behind(&self.workspace_root, text).await
+        } else {
+            text
+        };
         let text = self.with_attachments(text).await;
         // The person's words first, so the transcript shows what they typed.
         let text = match self.carried.take() {
@@ -602,6 +621,39 @@ where
 
         // Aborted so a stale handler cannot cancel the next submission.
         interrupt.abort();
+
+        // A limit stopped the task: ask once what is done and what is left.
+        let stopped = result
+            .is_err()
+            .then(|| self.meter.task().stopped())
+            .flatten();
+        let mut result = result;
+        if let Some(reason) = &stopped {
+            println!(
+                "{}",
+                style::paint(style::WARN, &format!("  stopped: {reason}"))
+            );
+            if let Some(run) = crate::task::wrap_up(
+                &mut self.agent,
+                &self.meter,
+                &self.planning,
+                reason,
+                &cancel,
+            )
+            .await
+            {
+                result = Ok(run);
+            }
+        }
+        crate::task::conclude(
+            &self.end_hooks,
+            &self.workspace_root,
+            &self.model_key,
+            &self.meter,
+            &result,
+            stopped,
+        )
+        .await;
 
         // After each submission rather than continuously: a submission is the
         // unit that either happened or did not.

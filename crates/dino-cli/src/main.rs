@@ -19,6 +19,7 @@ mod spend;
 mod spinner;
 mod style;
 mod summary;
+mod task;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -126,8 +127,9 @@ struct CommonArgs {
     /// Refuse every mutation and every process instead of asking.
     #[arg(long, conflicts_with = "dangerously_allow_all")]
     read_only: bool,
-    /// Approve everything without asking. Consider this carefully.
-    #[arg(long)]
+    /// Approve everything without asking. Consider this carefully. Also
+    /// spelled --dangerously-skip-permissions.
+    #[arg(long, alias = "dangerously-skip-permissions")]
     dangerously_allow_all: bool,
     /// Operating-system containment for processes this run starts. Default
     /// workspace.
@@ -291,6 +293,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
         ApprovalMode::Interactive,
         &tools.definitions(),
         None,
+        &profile.key,
     );
     let prompt = system_prompt(&context);
     eprintln!(
@@ -427,9 +430,11 @@ fn prompt_context(
     mode: ApprovalMode,
     definitions: &[ToolDefinition],
     max_model_turns: Option<u32>,
+    model: &str,
 ) -> PromptContext {
     PromptContext {
         workspace_root: workspace.display().to_string(),
+        model: Some(model.to_owned()),
         tools: definitions
             .iter()
             .map(|definition| definition.name.clone())
@@ -523,6 +528,7 @@ pub(crate) struct Prepared {
     sandbox_label: String,
     session_id: SessionId,
     system_prompt: String,
+    context: PromptContext,
     definitions: Vec<ToolDefinition>,
     requests: Arc<std::sync::atomic::AtomicU64>,
     planning: Arc<std::sync::atomic::AtomicBool>,
@@ -574,7 +580,12 @@ fn guarded(
             settings.workspace.clone(),
             review_sessions(settings, review, spending)?,
         ))),
-        None => agent,
+        // Without a review model, a task the person said to finish is reviewed
+        // by the model running it, which sees only the task and the diff.
+        None => agent.with_task_reviewer(Arc::new(dino_core::review::Reviewer::new(
+            settings.workspace.clone(),
+            review_sessions(settings, &settings.profile, spending)?,
+        ))),
     })
 }
 
@@ -628,6 +639,7 @@ fn prepare(
         settings.mode,
         &definitions,
         Some(settings.max_turns.get()),
+        &settings.profile.key,
     );
     context
         .instructions
@@ -635,7 +647,9 @@ fn prepare(
     announce_instructions(&context);
     let prompt = system_prompt(&context);
     let spending = spend::Spending {
-        meter: Arc::new(spend::Meter::for_session(session_id.as_str())),
+        meter: Arc::new(
+            spend::Meter::for_session(session_id.as_str()).with_limits(settings.task_limits),
+        ),
         cap: settings
             .budget
             .map(|budget| Arc::new(spend::Cap::new(budget, Box::new(approve::TerminalPurse)))),
@@ -704,6 +718,7 @@ fn prepare(
         sandbox_label,
         session_id,
         system_prompt: prompt,
+        context,
         definitions,
         requests,
         planning,
@@ -717,7 +732,7 @@ fn prepare(
 async fn session(common: CommonArgs) -> Result<ExitCode> {
     let prepared = prepare(&common, false, Vec::new())?;
     let base = prepared.settings.clone();
-    let prompt = prepared.system_prompt.clone();
+    let context = prepared.context.clone();
     let definitions = prepared.definitions.clone();
     let spending = prepared.spending.clone();
     let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
@@ -728,7 +743,11 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
             .reasoning_effort
             .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
         let name = settings.profile.display_name.clone();
-        let model = metered(&settings, prompt.clone(), definitions.clone(), &spending)?;
+        // The prompt names the model, so a new conversation gets its own.
+        let mut context = context.clone();
+        context.model = Some(key.to_owned());
+        let prompt = system_prompt(&context);
+        let model = metered(&settings, prompt, definitions.clone(), &spending)?;
         Ok((model, name))
     });
     let inbox = dino_core::Inbox::default();
@@ -756,6 +775,7 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         sandbox: prepared.sandbox_label,
         approvals: prepared.settings.mode.label().to_owned(),
         log_path: prepared.settings.log_path.display().to_string(),
+        end_hooks: prepared.settings.task_end_hooks.clone(),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
         state_path: prepared.state_path,
         greeting: greeting::shows(
@@ -839,6 +859,111 @@ async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
     .await
 }
 
+/// Starts the clock on a one-shot run's task, and says when the message set its
+/// limits. Returns the request, with a note added when the branch is behind.
+async fn begin_task(prepared: &mut Prepared, request: String) -> String {
+    let (limits, named) = prepared.spending.meter.begin_task(&request);
+    if named {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::FAINT,
+                &format!("  task budget: {}", limits.describe())
+            )
+        );
+    }
+    // A read-only run is a review or a question, not a task to see through.
+    let finishing = task::wants_to_finish(&request)
+        && !matches!(prepared.settings.mode, ApprovalMode::ReadOnly);
+    prepared.agent.set_keep_going(finishing);
+    if finishing {
+        task::note_if_behind(&prepared.settings.workspace, request).await
+    } else {
+        request
+    }
+}
+
+/// Ends the task a handover chain ran and pings for it.
+async fn conclude_handover(prepared: &Prepared, ended: &Result<handover::Ended>) {
+    let outcome = match ended {
+        Ok(handover::Ended::Stopped(StopReason::EndTurn)) => task::Outcome {
+            status: "finished",
+            detail: String::new(),
+        },
+        Ok(handover::Ended::Stopped(StopReason::Cancelled)) => task::Outcome {
+            status: "cancelled",
+            detail: String::new(),
+        },
+        Ok(handover::Ended::OverBudget(reason)) => task::Outcome {
+            status: "stopped",
+            detail: reason.clone(),
+        },
+        Ok(_) => task::Outcome {
+            status: "stopped",
+            detail: "the plan is unfinished".to_owned(),
+        },
+        Err(error) => task::Outcome {
+            status: "failed",
+            detail: error.to_string(),
+        },
+    };
+    if let Some(elapsed) = prepared.spending.meter.task().end() {
+        task::ping(
+            &prepared.settings.task_end_hooks,
+            elapsed,
+            &prepared.settings.workspace,
+            &prepared.settings.profile.key,
+            prepared.spending.meter.spent(),
+            &outcome,
+        )
+        .await;
+    }
+}
+
+/// Ends a one-shot run's task. When a limit stopped it, asks once what is left
+/// and returns that answer in place of the error, with the reason.
+async fn conclude_run(
+    prepared: &mut Prepared,
+    result: Result<dino_core::RunResult, dino_core::AgentError>,
+    cancel: &CancellationToken,
+) -> (
+    Result<dino_core::RunResult, dino_core::AgentError>,
+    Option<String>,
+) {
+    let stopped = result
+        .is_err()
+        .then(|| prepared.spending.meter.task().stopped())
+        .flatten();
+    let mut result = result;
+    if let Some(reason) = &stopped {
+        eprintln!(
+            "{}",
+            style::paint(style::WARN, &format!("  stopped: {reason}"))
+        );
+        if let Some(run) = task::wrap_up(
+            &mut prepared.agent,
+            &prepared.spending.meter,
+            &prepared.planning,
+            reason,
+            cancel,
+        )
+        .await
+        {
+            result = Ok(run);
+        }
+    }
+    task::conclude(
+        &prepared.settings.task_end_hooks,
+        &prepared.settings.workspace,
+        &prepared.settings.profile.key,
+        &prepared.spending.meter,
+        &result,
+        stopped.clone(),
+    )
+    .await;
+    (result, stopped)
+}
+
 async fn run(args: RunArgs) -> Result<ExitCode> {
     let workspace = config::resolve_workspace(args.common.workspace.as_deref())?;
     let progress = args.handover.then(|| {
@@ -877,6 +1002,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         }
     });
 
+    let request = begin_task(&mut prepared, request).await;
     if let Some(progress) = &progress {
         let ended = handover::run(
             &mut prepared,
@@ -886,6 +1012,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             &cancel,
         )
         .await;
+        conclude_handover(&prepared, &ended).await;
         eprintln!(
             "{}",
             style::paint(
@@ -906,10 +1033,18 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
                 );
                 ExitCode::FAILURE
             }
+            handover::Ended::OverBudget(reason) => {
+                eprintln!(
+                    "{}",
+                    style::paint(style::WARN, &format!("  stopped: {reason}"))
+                );
+                ExitCode::FAILURE
+            }
             _ => ExitCode::FAILURE,
         });
     }
     let result = prepared.agent.run_cancellable(request, &cancel).await;
+    let (result, stopped) = conclude_run(&mut prepared, result, &cancel).await;
     eprintln!(
         "{}",
         style::paint(
@@ -919,6 +1054,9 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     );
     let result = result?;
     save_state(&prepared.agent, &prepared.state_path)?;
+    if stopped.is_some() {
+        return Ok(ExitCode::FAILURE);
+    }
     Ok(match result.stop_reason {
         StopReason::EndTurn => ExitCode::SUCCESS,
         StopReason::Cancelled => ExitCode::from(130),
@@ -987,6 +1125,8 @@ struct Resolved {
     hooks: (Vec<dino_exec::Hook>, Source),
     end_turn_hooks: Vec<dino_exec::Hook>,
     start_hooks: Vec<dino_exec::Hook>,
+    task_end_hooks: Vec<task::EndHook>,
+    task_limits: task::Limits,
     mcp: Vec<dino_exec::McpServer>,
     layers: Layers,
 }
@@ -1006,6 +1146,20 @@ fn hooks_for(layers: &Layers, event: settings::HookEvent) -> Vec<dino_exec::Hook
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The user file's hooks for the end of a task, each with how long a task must
+/// have run before it fires.
+fn end_hooks(layers: &Layers) -> Vec<task::EndHook> {
+    let after = std::time::Duration::from_secs(
+        layers
+            .pick_user_only(|file| file.ping_after_seconds)
+            .map_or(300, |(seconds, _)| seconds),
+    );
+    hooks_for(layers, settings::HookEvent::TaskEnd)
+        .into_iter()
+        .map(|hook| task::EndHook { hook, after })
+        .collect()
 }
 
 /// Applies RFC-0015's precedence: flag, environment, project file, user file,
@@ -1107,6 +1261,8 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         ),
         end_turn_hooks: hooks_for(&layers, settings::HookEvent::BeforeEndTurn),
         start_hooks: hooks_for(&layers, settings::HookEvent::SessionStart),
+        task_end_hooks: end_hooks(&layers),
+        task_limits: layers.task_limits()?,
         mcp: mcp_servers(&layers),
         layers,
     })
@@ -1271,6 +1427,13 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         ),
         ("budget", budget_row(resolved.budget)),
         (
+            "task budget",
+            format!(
+                "{}  (when a message names none)",
+                resolved.task_limits.describe()
+            ),
+        ),
+        (
             "project file",
             file_named(resolved.layers.project_path.as_ref()),
         ),
@@ -1314,6 +1477,8 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         hooks: resolved.hooks.0,
         end_turn_hooks: resolved.end_turn_hooks,
         start_hooks: resolved.start_hooks,
+        task_end_hooks: resolved.task_end_hooks,
+        task_limits: resolved.task_limits,
         mcp: resolved.mcp,
         thinking_budget: resolved.thinking_budget.0,
         compaction: if resolved.auto_compact {
@@ -1372,6 +1537,24 @@ mod tests {
     use dino_protocol::ReasoningEffort;
 
     use super::*;
+
+    fn parsed(arguments: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(["dino"].into_iter().chain(arguments.iter().copied()))
+    }
+
+    #[test]
+    fn skip_permissions_is_the_same_flag_as_allow_all() {
+        for flag in ["--dangerously-allow-all", "--dangerously-skip-permissions"] {
+            let cli = parsed(&[flag]).unwrap();
+            assert!(cli.common.dangerously_allow_all, "{flag}");
+        }
+        assert!(!parsed(&[]).unwrap().common.dangerously_allow_all);
+    }
+
+    #[test]
+    fn skip_permissions_still_conflicts_with_read_only() {
+        assert!(parsed(&["--dangerously-skip-permissions", "--read-only"]).is_err());
+    }
 
     #[test]
     fn config_names_where_the_effort_came_from() {
