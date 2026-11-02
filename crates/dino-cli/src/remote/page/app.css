@@ -1,0 +1,30 @@
+:root { color-scheme: dark light; --bg: #14121a; --fg: #e8e4f0; --muted: #8b86a0; --line: #2c2838; --ember: #ff8a4c; --ok: #6fcf97; --warn: #f2c94c; --bad: #eb5757; }
+@media (prefers-color-scheme: light) { :root { --bg: #fbfaf8; --fg: #1d1a24; --muted: #6a657a; --line: #dedad2; } }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100dvh; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font: 15px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+header { display: flex; gap: .75rem; align-items: baseline; padding: .5rem .75rem; border-bottom: 1px solid var(--line); }
+header strong { color: var(--ember); }
+#info { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status { color: var(--muted); }
+#status.busy { color: var(--ember); }
+#status.bad { color: var(--bad); }
+main { flex: 1; overflow-y: auto; padding: .5rem .75rem; }
+main > div { white-space: pre-wrap; overflow-wrap: anywhere; margin: .2rem 0; }
+.you { color: var(--ember); }
+.you::before { content: "› "; }
+.tool { color: var(--muted); }
+.out { color: var(--muted); max-height: 12em; overflow: auto; border-left: 2px solid var(--line); padding-left: .5rem; }
+.err { color: var(--bad); }
+.note { color: var(--muted); font-style: italic; }
+#approvals:empty { display: none; }
+.approval { border: 1px solid var(--ember); margin: .5rem .75rem; padding: .5rem .75rem; border-radius: 6px; }
+.approval pre { margin: .4rem 0; max-height: 10em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.approval .warn { color: var(--bad); font-weight: bold; }
+.approval .choices { display: flex; flex-wrap: wrap; gap: .5rem; }
+form { padding: .5rem .75rem; border-top: 1px solid var(--line); }
+textarea { width: 100%; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: .5rem; font: inherit; resize: vertical; }
+.row { display: flex; gap: .5rem; margin-top: .4rem; }
+button { font: inherit; padding: .4rem .9rem; border-radius: 6px; border: 1px solid var(--line); background: var(--line); color: inherit; cursor: pointer; }
+button:disabled { opacity: .4; cursor: default; }
+button.primary, #send { background: var(--ember); border-color: var(--ember); color: #14121a; }
+button.reject { border-color: var(--bad); background: transparent; }

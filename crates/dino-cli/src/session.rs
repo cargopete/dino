@@ -321,6 +321,8 @@ pub struct Session<S> {
     pub state_path: std::path::PathBuf,
     /// Open with the dinosaur rather than the plain heading.
     pub greeting: bool,
+    /// Set when pages are watching and driving this session, as `dino serve`.
+    pub remote: Option<Arc<crate::remote::Hub>>,
 }
 
 impl<S> Session<S>
@@ -384,6 +386,45 @@ where
 
         let _ = editor.save_history(&self.history_path);
         Ok(())
+    }
+
+    /// Runs prompts from the pages until the person at the terminal interrupts
+    /// while it is idle. There is no line editor and no slash command: a page
+    /// sends prompts and answers approvals, and the rest stays at the terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this is not a remote session.
+    pub async fn serve(&mut self, mut prompts: tokio::sync::mpsc::Receiver<String>) -> Result<()> {
+        let hub = self
+            .remote
+            .clone()
+            .context("this session has no remote hub")?;
+        hub.describe(crate::remote::Info {
+            model: self.model.clone(),
+            workspace: self.workspace.clone(),
+            sandbox: self.sandbox.clone(),
+            approvals: self.approvals.clone(),
+        });
+        println!("{}", self.opening());
+        loop {
+            let prompt = tokio::select! {
+                prompt = prompts.recv() => prompt,
+                _ = tokio::signal::ctrl_c() => None,
+            };
+            let Some(prompt) = prompt else { break };
+            hub.set_busy(true);
+            self.submit(prompt).await;
+            hub.set_busy(false);
+        }
+        Ok(())
+    }
+
+    /// Says something to the pages, when there are any.
+    fn tell(&self, text: &str) {
+        if let Some(hub) = &self.remote {
+            hub.notice(text);
+        }
     }
 
     /// Acts on one input. Returns true when the session should end.
@@ -610,7 +651,18 @@ where
             Arc::clone(&self.inbox),
             Arc::clone(&self.status),
         );
+        // A page's stop is the terminal's ctrl-c.
+        let from_page = self.remote.clone().map(|hub| {
+            let signal = cancel.clone();
+            tokio::spawn(async move {
+                hub.cancelled().await;
+                signal.cancel();
+            })
+        });
         let result = self.agent.run_cancellable(text, &cancel).await;
+        if let Some(from_page) = from_page {
+            from_page.abort();
+        }
         self.typed_ahead = listener
             .map(crate::listen::Listener::stop)
             .unwrap_or_default();
@@ -629,6 +681,7 @@ where
             .flatten();
         let mut result = result;
         if let Some(reason) = &stopped {
+            self.tell(&format!("stopped: {reason}"));
             println!(
                 "{}",
                 style::paint(style::WARN, &format!("  stopped: {reason}"))
@@ -671,6 +724,7 @@ where
 
         match result {
             Ok(run) if run.stop_reason == StopReason::Cancelled => {
+                self.tell("cancelled; the conversation is intact");
                 println!(
                     "{}",
                     style::paint(FAINT, "  cancelled. The conversation is intact.")
@@ -679,6 +733,7 @@ where
             }
             Ok(run) => Some(run),
             Err(error) => {
+                self.tell(&error.to_string());
                 println!("{}", style::paint(style::WARN, &format!("  {error}")));
                 None
             }
@@ -923,7 +978,14 @@ where
                     crate::render::short_label(&self.sandbox)
                 )
             ),
-            style::paint(crate::style::FAINT, "/help for commands · ctrl-d to leave"),
+            style::paint(
+                crate::style::FAINT,
+                if self.remote.is_some() {
+                    "driven from a page · ctrl-c to stop"
+                } else {
+                    "/help for commands · ctrl-d to leave"
+                }
+            ),
         )
     }
 

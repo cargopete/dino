@@ -107,27 +107,36 @@ impl Approver for TerminalApprover {
     }
 }
 
-struct Asking<'a> {
-    summary: &'a str,
-    tool: &'a str,
-    subject: &'a str,
-    class: ToolClass,
-    context: &'a AskContext,
+pub(crate) struct Asking<'a> {
+    pub(crate) summary: &'a str,
+    pub(crate) tool: &'a str,
+    pub(crate) subject: &'a str,
+    pub(crate) class: ToolClass,
+    pub(crate) context: &'a AskContext,
     /// The diff of an edit, drawn and ready.
-    change: Option<&'a str>,
+    pub(crate) change: Option<&'a str>,
 }
 
 /// One answer the selector offers: its key, its label and what it means.
-struct Choice {
-    key: char,
-    label: String,
-    reply: ApprovalReply,
+pub(crate) struct Choice {
+    pub(crate) key: char,
+    pub(crate) label: String,
+    pub(crate) reply: ApprovalReply,
+}
+
+/// What the answer that keeps a rule for this session calls itself.
+pub(crate) fn always_label(class: ToolClass) -> &'static str {
+    match class {
+        ToolClass::Process => "always for this command",
+        ToolClass::Network => "always for this host",
+        _ => "always for this file",
+    }
 }
 
 /// How many of a turn's other pending calls are named in the prompt.
 const NAMED_PENDING: usize = 3;
 
-fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
+pub(crate) fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
     let choice = |key, label: &str, reply| Choice {
         key,
         label: label.to_owned(),

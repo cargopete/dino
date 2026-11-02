@@ -25,6 +25,7 @@ async-stream = "0.3.6"
 clap = { version = "4.5.51", features = ["derive"] }
 futures-core = "0.3.31"
 base64 = "0.22.1"
+bytes = "1.12.1"
 futures-util = "0.3.31"
 dino-core = { path = "crates/dino-core" }
 dino-eval = { path = "crates/dino-eval" }
@@ -35,6 +36,9 @@ dino-rust = { path = "crates/dino-rust" }
 dino-sandbox = { path = "crates/dino-sandbox" }
 dino-tools = { path = "crates/dino-tools" }
 html2text = "0.17.4"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }
 globset = "0.4.20"
 ignore = "0.4.33"
 regex = "1.13.1"

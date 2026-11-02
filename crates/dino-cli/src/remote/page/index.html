@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>dino</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <strong>dino</strong>
+  <span id="info"></span>
+  <span id="status">connecting</span>
+</header>
+<main id="log" aria-live="polite"></main>
+<section id="approvals"></section>
+<form id="form">
+  <textarea id="text" rows="2" placeholder="Message dino. While it works, this is delivered with its next tool results." autocomplete="off"></textarea>
+  <div class="row">
+    <button type="submit" id="send">Send</button>
+    <button type="button" id="cancel" disabled>Stop</button>
+  </div>
+</form>
+<script src="/app.js"></script>
+</body>
+</html>
