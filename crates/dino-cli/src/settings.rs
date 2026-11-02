@@ -65,6 +65,9 @@ pub struct FileConfig {
     /// A model to review each run's change before it ends, seeing only the
     /// task, the diff and the latest checks. User file only.
     pub review_model: Option<String>,
+    /// Seconds a task must have run before its `task_end` hooks fire, so a ping
+    /// means a long run and not a quick question. 300 when unset.
+    pub ping_after_seconds: Option<u64>,
 }
 
 /// The `[budget]` table.
@@ -76,6 +79,36 @@ pub struct BudgetConfig {
     pub daily_usd: Option<f64>,
     /// The share of a budget at which to warn. 0.8 when unset.
     pub warn_at: Option<f64>,
+    /// What one task may spend when its message names no limit. 20 when unset.
+    pub task_usd: Option<f64>,
+    /// The most one task may run when its message names no limit. 240 when unset.
+    pub task_minutes: Option<u64>,
+}
+
+impl BudgetConfig {
+    /// The limits a task runs under when its message names none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the key whose value cannot be a limit.
+    pub fn task_limits(self) -> Result<crate::task::Limits> {
+        let default = crate::task::Limits::default();
+        if let Some(value) = self.task_usd
+            && !(value.is_finite() && value > 0.0)
+        {
+            bail!("budget.task_usd must be a number of dollars above zero, not {value}");
+        }
+        if self.task_minutes == Some(0) {
+            bail!("budget.task_minutes must be above zero");
+        }
+        Ok(crate::task::Limits {
+            usd: self.task_usd.or(default.usd),
+            wall: self
+                .task_minutes
+                .map(|minutes| std::time::Duration::from_secs(minutes * 60))
+                .or(default.wall),
+        })
+    }
 }
 
 impl BudgetConfig {
@@ -164,6 +197,9 @@ pub enum HookEvent {
     BeforeEndTurn,
     /// Runs once when a session starts; what it prints goes in the prompt.
     SessionStart,
+    /// Runs when a task ends, finished or not, with `{status}` and `{message}`
+    /// in its arguments. Outside the sandbox, so it can reach a webhook.
+    TaskEnd,
 }
 
 /// Which file a value came from, so `dino config` can say.
@@ -244,6 +280,18 @@ impl Layers {
     /// Returns an error when a ceiling or the warning share is unusable.
     pub fn budget(&self) -> Result<Option<crate::spend::Budget>> {
         self.user.budget.map_or(Ok(None), BudgetConfig::resolve)
+    }
+
+    /// The user file's limits for one task, else the defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a limit is unusable.
+    pub fn task_limits(&self) -> Result<crate::task::Limits> {
+        self.user.budget.map_or(
+            Ok(crate::task::Limits::default()),
+            BudgetConfig::task_limits,
+        )
     }
 
     /// As [`Layers::pick`], for settings a project file may not set.

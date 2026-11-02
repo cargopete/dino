@@ -36,6 +36,7 @@ use serde::Serialize;
 pub struct Meter {
     spent: Mutex<Spent>,
     ledger: Option<Ledger>,
+    task: crate::task::Task,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -51,7 +52,25 @@ impl Meter {
         Self {
             spent: Mutex::new(Spent::default()),
             ledger,
+            task: crate::task::Task::default(),
         }
+    }
+
+    /// The limits a task runs under when its message names none.
+    #[must_use]
+    pub fn with_limits(mut self, defaults: crate::task::Limits) -> Self {
+        self.task = crate::task::Task::new(defaults);
+        self
+    }
+
+    #[must_use]
+    pub fn task(&self) -> &crate::task::Task {
+        &self.task
+    }
+
+    /// Starts a task at what has been spent so far.
+    pub fn begin_task(&self, message: &str) -> (crate::task::Limits, bool) {
+        self.task.begin(message, self.spent().usd)
     }
 
     pub fn record(&self, model: &str, price: Option<Pricing>, usage: &TokenUsage) {
@@ -309,6 +328,10 @@ impl<S: ModelSession> ModelSession for Metered<S> {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
+            let (task, meter) = (Arc::clone(&self.meter), Arc::clone(&self.meter));
+            task.task()
+                .admit(meter.spent().usd)
+                .map_err(ModelError::Account)?;
             if let Some(cap) = &self.cap {
                 let (cap, meter) = (Arc::clone(cap), Arc::clone(&self.meter));
                 // The person may be asked, which blocks on the terminal.
@@ -587,6 +610,44 @@ mod tests {
         assert!(matches!(error, ModelError::Account(_)), "{error}");
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert!((spending.meter.spent().usd - 2.0).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_task_limit_sends_no_further_request_until_it_is_lifted() {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spending = Spending {
+            meter: Arc::new(Meter::new(None)),
+            cap: None,
+        };
+        spending.meter.begin_task("fix it, max $2");
+        let mut session = Metered::new(
+            Dollars {
+                profile: dino_model::builtin_profile("kimi-k3.1-pro").unwrap(),
+                requests: Arc::clone(&requests),
+            },
+            &spending,
+        );
+        let ask = || TurnInput::User {
+            content: "go on".into(),
+        };
+
+        for _ in 0..2 {
+            let stream = session.next(ask()).await.unwrap();
+            let _: Vec<_> = stream.collect().await;
+        }
+        let Err(error) = session.next(ask()).await else {
+            panic!("the task budget is spent");
+        };
+        assert!(
+            error.to_string().contains("the task has spent $2.00"),
+            "{error}"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(spending.meter.task().stopped().is_some());
+
+        spending.meter.task().lift();
+        assert!(session.next(ask()).await.is_ok());
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
     }
 
     #[test]

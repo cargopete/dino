@@ -99,6 +99,10 @@ pub struct RunSettings {
     pub hooks: Vec<dino_exec::Hook>,
     pub end_turn_hooks: Vec<dino_exec::Hook>,
     pub start_hooks: Vec<dino_exec::Hook>,
+    /// Run when a task ends, for tasks that ran long enough.
+    pub task_end_hooks: Vec<crate::task::EndHook>,
+    /// What a task may spend when its message names no limit.
+    pub task_limits: crate::task::Limits,
     pub mcp: Vec<dino_exec::McpServer>,
     /// Most reasoning tokens per turn, for a server that honours a budget.
     pub thinking_budget: Option<u32>,
@@ -431,6 +435,8 @@ mod tests {
             hooks: Vec::new(),
             end_turn_hooks: Vec::new(),
             start_hooks: Vec::new(),
+            task_end_hooks: Vec::new(),
+            task_limits: crate::task::Limits::default(),
             mcp: Vec::new(),
             thinking_budget: None,
             compaction: Compaction::Manual,

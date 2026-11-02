@@ -375,6 +375,12 @@ fn sent_back_note(unfinished: &str) -> String {
     )
 }
 
+/// Sent when a model ends its turn on a task the person said to finish.
+const KEEP_GOING_NOTE: &str = "[dino: you were asked to finish this task, and ending your \
+     turn to report progress or ask whether to carry on is not finishing it. Take the next \
+     piece of the work now. If every part is done and checked, say so in a sentence. If you \
+     are blocked on a decision only the person can make, call report_blocker and name it.]";
+
 const CUT_OFF_NOTE: &str = "[dino: your last response was cut off because the context \
      window filled. Older tool results have been elided to make room. Carry on from where you \
      stopped, and keep each response short.]";
@@ -438,6 +444,8 @@ pub struct Agent<S, T> {
     config: AgentConfig,
     finish_check: Option<Box<dyn FinishCheck>>,
     reviewer: Option<std::sync::Arc<review::Reviewer>>,
+    /// Reviews only a run told to finish, for a session with no `review_model`.
+    task_reviewer: Option<std::sync::Arc<review::Reviewer>>,
     /// Whether this run's work has been reviewed, so it is reviewed once.
     reviewed: bool,
     // Kept outside `drive` so a run that ends in an error still reports what it
@@ -452,6 +460,11 @@ pub struct Agent<S, T> {
     unsent: Option<(Vec<ToolResult>, Option<String>)>,
     loops: loops::LoopWatch,
     outcomes: outcomes::OutcomeWatch,
+    /// Whether the person said to finish: a turn that ends after real work is
+    /// sent back, so a status report is not taken for the end of the task.
+    keep_going: bool,
+    /// How many events the run had when it was last sent back to keep going.
+    keep_going_mark: usize,
     /// Messages the person typed during a run, for its next tool results.
     inbox: Option<Inbox>,
 }
@@ -477,6 +490,7 @@ where
             config,
             finish_check: None,
             reviewer: None,
+            task_reviewer: None,
             reviewed: false,
             turns_started: 0,
             sent_back: false,
@@ -484,6 +498,8 @@ where
             unsent: None,
             loops: loops::LoopWatch::default(),
             outcomes: outcomes::OutcomeWatch::default(),
+            keep_going: false,
+            keep_going_mark: 0,
             inbox: None,
         }
     }
@@ -502,6 +518,22 @@ where
     pub fn with_reviewer(mut self, reviewer: std::sync::Arc<review::Reviewer>) -> Self {
         self.reviewer = Some(reviewer);
         self
+    }
+
+    /// As [`Agent::with_reviewer`], but only for a run the person told to finish
+    /// (see [`Agent::set_keep_going`]), which is long enough to be worth a second
+    /// look. An agent with a reviewer of its own reviews every run regardless.
+    #[must_use]
+    pub fn with_task_reviewer(mut self, reviewer: std::sync::Arc<review::Reviewer>) -> Self {
+        self.task_reviewer = Some(reviewer);
+        self
+    }
+
+    /// The reviewer for the run in progress, if any.
+    fn active_reviewer(&self) -> Option<std::sync::Arc<review::Reviewer>> {
+        self.reviewer
+            .clone()
+            .or_else(|| self.task_reviewer.clone().filter(|_| self.keep_going))
     }
 
     /// Delivers what the person types during a run with the next tool results.
@@ -559,6 +591,14 @@ where
     pub fn record(&mut self, event: &AgentEvent) -> Result<(), AgentError> {
         self.sink.emit(event)?;
         Ok(())
+    }
+
+    /// Sets whether the next run was told to finish. A model that ends its turn
+    /// after working is then sent back to carry on, rather than waiting for the
+    /// person to say go; one that ends it straight after being sent back is done,
+    /// or stuck, and ends. A blocker goes through `report_blocker`.
+    pub fn set_keep_going(&mut self, on: bool) {
+        self.keep_going = on;
     }
 
     /// Caps the turns of the next run, as a handover chain does per session.
@@ -743,11 +783,12 @@ where
     fn begin_run(&mut self) {
         self.sent_back = false;
         self.reviewed = false;
-        if let Some(reviewer) = &self.reviewer {
+        if let Some(reviewer) = self.active_reviewer() {
             reviewer.begin();
         }
         self.loops.reset();
         self.outcomes.reset();
+        self.keep_going_mark = 0;
     }
 
     /// Settles every call of a turn in order, noticing a reported blocker.
@@ -884,6 +925,45 @@ where
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, AgentError> {
+        if let Some(note) = self
+            .send_back_unfinished(model_turn, events, cancel)
+            .await?
+        {
+            return Ok(Some(note));
+        }
+        self.keep_going_note(model_turn, events)
+    }
+
+    /// The note that sends a model back to a task it was told to finish, when it
+    /// worked since it was last sent and is ending its turn all the same.
+    fn keep_going_note(
+        &mut self,
+        model_turn: u32,
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<Option<String>, AgentError> {
+        let worked = events[self.keep_going_mark.min(events.len())..]
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolFinished { .. }));
+        if !self.keep_going || !worked || model_turn >= self.config.max_model_turns.get() {
+            return Ok(None);
+        }
+        self.emit(
+            AgentEvent::SentBack {
+                model_turn,
+                reason: KEEP_GOING_NOTE.to_owned(),
+            },
+            events,
+        )?;
+        self.keep_going_mark = events.len();
+        Ok(Some(KEEP_GOING_NOTE.to_owned()))
+    }
+
+    async fn send_back_unfinished(
+        &mut self,
+        model_turn: u32,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, AgentError> {
         if model_turn >= self.config.max_model_turns.get() {
             return Ok(None);
         }
@@ -923,7 +1003,7 @@ where
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, AgentError> {
-        let Some(reviewer) = self.reviewer.clone().filter(|_| !self.reviewed) else {
+        let Some(reviewer) = self.active_reviewer().filter(|_| !self.reviewed) else {
             return Ok(None);
         };
         self.reviewed = true;

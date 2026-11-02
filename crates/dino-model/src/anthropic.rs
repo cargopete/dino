@@ -41,6 +41,9 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Bump when the persisted history shape changes. RFC-0014 section 3.
 pub(crate) const STATE_VERSION: u32 = 1;
 const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
+/// The result written for a call whose own result never reached the provider.
+pub(crate) const UNANSWERED_CALL: &str =
+    "No result was recorded: the request that carried it failed.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingMode {
@@ -212,6 +215,45 @@ impl AnthropicSession {
         }
     }
 
+    /// A request that failed after the model asked for tools leaves their
+    /// `tool_use` blocks last in the history with no result, and Anthropic
+    /// refuses every later request until each has one. Writes an error result
+    /// for each into `pending`, ahead of whatever else it carries.
+    fn answer_orphans(&self, pending: &mut AnthropicMessage) -> Result<(), ModelError> {
+        let orphans: Vec<Value> = {
+            let history = self
+                .history
+                .lock()
+                .map_err(|_| ModelError::Protocol("Anthropic history lock was poisoned".into()))?;
+            let Some(last) = history.last().filter(|last| last.role == Role::Assistant) else {
+                return Ok(());
+            };
+            let answered: Vec<&str> = pending
+                .content
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+                .collect();
+            last.content
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|block| block.get("id").and_then(Value::as_str))
+                .filter(|id| !answered.contains(id))
+                .map(|id| {
+                    json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": UNANSWERED_CALL,
+                        "is_error": true,
+                    })
+                })
+                .collect()
+        };
+        // Results must come first in the message.
+        pending.content.splice(0..0, orphans);
+        Ok(())
+    }
+
     fn request_body(&self, pending: &AnthropicMessage) -> Result<Value, ModelError> {
         validate_request_settings(&self.config)?;
         let history = self
@@ -348,7 +390,8 @@ impl ModelSession for AnthropicSession {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
-            let pending = Self::pending_message(input);
+            let mut pending = Self::pending_message(input);
+            self.answer_orphans(&mut pending)?;
             let body = self.request_body(&pending)?;
             let fast = AtomicBool::new(true);
             let response =
@@ -1069,6 +1112,94 @@ mod tests {
             restored.request_body(&pending).unwrap(),
             original.request_body(&pending).unwrap()
         );
+    }
+
+    #[test]
+    fn calls_left_unanswered_by_a_failed_request_get_an_error_result_first() {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let session = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
+        session.history.lock().unwrap().extend([
+            AnthropicMessage {
+                role: Role::User,
+                content: vec![json!({"type": "text", "text": "finish the wave"})],
+            },
+            AnthropicMessage {
+                role: Role::Assistant,
+                content: vec![
+                    json!({"type": "text", "text": "reading"}),
+                    json!({"type": "tool_use", "id": "call-1", "name": "read", "input": {}}),
+                    json!({"type": "tool_use", "id": "call-2", "name": "read", "input": {}}),
+                ],
+            },
+        ]);
+        let mut pending = AnthropicSession::pending_message(TurnInput::User {
+            content: "continue".into(),
+        });
+
+        session.answer_orphans(&mut pending).unwrap();
+
+        let ids: Vec<_> = pending
+            .content
+            .iter()
+            .map(|block| block["tool_use_id"].as_str())
+            .collect();
+        assert_eq!(ids, [Some("call-1"), Some("call-2"), None]);
+        assert_eq!(pending.content[0]["is_error"], true);
+        assert_eq!(
+            pending.content[2],
+            json!({"type": "text", "text": "continue"})
+        );
+        // The request carries the repair, so the provider accepts it.
+        let body = session.request_body(&pending).unwrap();
+        assert_eq!(body["messages"][2], json!(pending));
+    }
+
+    #[test]
+    fn only_the_calls_a_result_set_leaves_out_are_answered() {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let session = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
+        session.history.lock().unwrap().push(AnthropicMessage {
+            role: Role::Assistant,
+            content: vec![
+                json!({"type": "tool_use", "id": "call-1", "name": "read", "input": {}}),
+                json!({"type": "tool_use", "id": "call-2", "name": "read", "input": {}}),
+            ],
+        });
+        let mut pending = AnthropicSession::pending_message(TurnInput::ToolResults {
+            results: vec![dino_protocol::ToolResult {
+                call_id: "call-2".into(),
+                output: dino_protocol::ToolOutput::success("ok"),
+            }],
+            note: None,
+        });
+
+        session.answer_orphans(&mut pending).unwrap();
+
+        let ids: Vec<_> = pending
+            .content
+            .iter()
+            .map(|block| block["tool_use_id"].as_str())
+            .collect();
+        assert_eq!(ids, [Some("call-1"), Some("call-2")]);
+        assert_eq!(pending.content[1]["is_error"], false);
+    }
+
+    #[test]
+    fn a_history_with_every_call_answered_is_left_alone() {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let session = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
+        session.history.lock().unwrap().push(AnthropicMessage {
+            role: Role::Assistant,
+            content: vec![json!({"type": "text", "text": "done"})],
+        });
+        let mut pending = AnthropicSession::pending_message(TurnInput::User {
+            content: "thanks".into(),
+        });
+        let before = pending.clone();
+
+        session.answer_orphans(&mut pending).unwrap();
+
+        assert_eq!(pending, before);
     }
 
     #[test]

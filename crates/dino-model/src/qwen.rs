@@ -443,7 +443,14 @@ impl ModelSession for QwenSession {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
-            let pending = Self::pending_messages(input);
+            let mut pending = Self::pending_messages(input);
+            {
+                let history = self
+                    .history
+                    .lock()
+                    .map_err(|_| ModelError::Protocol("Qwen history lock was poisoned".into()))?;
+                answer_orphans(&history, &mut pending);
+            }
             let body = self.request_body(&pending)?;
             let response = self.send_with_retry(&body).await?;
 
@@ -486,6 +493,32 @@ impl ModelSession for QwenSession {
             Ok(Box::pin(stream) as ModelEventStream)
         })
     }
+}
+
+/// A request that failed after the model asked for tools leaves the calls of
+/// the last recorded message with no result, and a chat server refuses or
+/// misreads the next message. Writes an error result for each into `pending`,
+/// ahead of the rest, which is where results go.
+fn answer_orphans(history: &[ChatMessage], pending: &mut Vec<ChatMessage>) {
+    let Some(last) = history.last().filter(|last| last.role == Role::Assistant) else {
+        return;
+    };
+    let orphans: Vec<ChatMessage> = last
+        .tool_calls
+        .iter()
+        .filter(|call| {
+            !pending.iter().any(|message| {
+                message.role == Role::Tool && message.tool_call_id.as_deref() == Some(&call.id)
+            })
+        })
+        .map(|call| {
+            ChatMessage::tool(
+                call.id.clone(),
+                crate::anthropic::UNANSWERED_CALL.to_owned(),
+            )
+        })
+        .collect();
+    pending.splice(0..0, orphans);
 }
 
 fn commit_history(
@@ -946,6 +979,49 @@ mod tests {
     use super::*;
     use crate::test_server::serve_in_turn;
     use crate::test_server::status;
+
+    #[test]
+    fn calls_a_failed_request_left_unanswered_get_an_error_result_first() {
+        let call = |id: &str| ChatToolCall {
+            id: id.into(),
+            r#type: CallKind::Function,
+            function: ChatFunction {
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        };
+        let history = [
+            ChatMessage::plain(Role::User, "finish the wave".to_owned()),
+            ChatMessage {
+                role: Role::Assistant,
+                content: None,
+                reasoning_content: None,
+                images: Vec::new(),
+                tool_calls: vec![call("call-1"), call("call-2")],
+                tool_call_id: None,
+            },
+        ];
+        let mut pending = vec![
+            ChatMessage::tool("call-2".into(), "ok".into()),
+            ChatMessage::user("continue".to_owned()),
+        ];
+
+        answer_orphans(&history, &mut pending);
+
+        let ids: Vec<_> = pending
+            .iter()
+            .map(|message| message.tool_call_id.as_deref())
+            .collect();
+        assert_eq!(ids, [Some("call-1"), Some("call-2"), None]);
+        assert_eq!(
+            pending[0].content.as_deref(),
+            Some(crate::anthropic::UNANSWERED_CALL)
+        );
+
+        let mut answered = vec![ChatMessage::user("thanks".to_owned())];
+        answer_orphans(&history[..1], &mut answered);
+        assert_eq!(answered.len(), 1);
+    }
 
     #[test]
     fn a_spent_quota_is_an_account_refusal_and_a_rate_limit_is_not() {

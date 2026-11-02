@@ -1101,6 +1101,58 @@ async fn a_model_that_stops_with_work_unfinished_is_sent_back_once() {
 }
 
 #[tokio::test]
+async fn a_task_told_to_finish_sends_a_status_report_back_until_a_turn_does_no_work() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            text_turn("a is done; say go for b"),
+            tool_turn(tool_call("call-2", "read", "b.rs")),
+            text_turn("b is done; say go for c"),
+            text_turn("everything is done"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+    agent.set_keep_going(true);
+
+    let result = agent.run("finish the wave").await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(result.model_turns, 5);
+    assert_eq!(sent_back(&result), vec![2, 4]);
+    let note = last_result(&agent.session().inputs[2]);
+    assert!(note.contains("report_blocker"), "{note}");
+}
+
+#[tokio::test]
+async fn a_task_not_told_to_finish_ends_when_the_model_does() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            tool_turn(tool_call("call-1", "read", "a.rs")),
+            text_turn("a is done; say go for b"),
+        ]),
+        ScriptedTools::default(),
+        AgentConfig::default(),
+    );
+
+    let result = agent.run("read a").await.unwrap();
+
+    assert_eq!(result.model_turns, 2);
+    assert_eq!(sent_back(&result), Vec::<u32>::new());
+}
+
+#[tokio::test]
+async fn a_task_told_to_finish_that_did_no_work_is_not_sent_back() {
+    let mut agent = agent(vec![text_turn("it is a function")]);
+    agent.set_keep_going(true);
+
+    let result = agent.run("finish explaining").await.unwrap();
+
+    assert_eq!(result.model_turns, 1);
+    assert_eq!(sent_back(&result), Vec::<u32>::new());
+}
+
+#[tokio::test]
 async fn the_countdown_says_what_is_unfinished() {
     let asked = std::sync::Arc::default();
     let mut agent = Agent::new(

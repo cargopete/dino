@@ -91,6 +91,89 @@ impl GitSnapshot {
     }
 }
 
+/// A branch that does not hold what its main branch already does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Behind {
+    /// The remote branch, such as `origin/main`.
+    pub upstream: String,
+    pub commits: u32,
+    /// Subjects of the newest of them.
+    pub subjects: Vec<String>,
+}
+
+/// How far `HEAD` is behind the remote main branch, or `None` when it is not,
+/// when there is no such branch, or outside a repository. With `fetch`, asks
+/// `origin` first, for at most `FETCH_SECONDS`; a failed fetch leaves what the
+/// last one knew, which may be stale.
+#[must_use]
+pub fn behind(workspace: &Path, fetch: bool) -> Option<Behind> {
+    if fetch {
+        fetch_origin(workspace);
+    }
+    let main = git(
+        workspace,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .map(|name| name.trim().to_owned())
+    .or_else(|| {
+        ["origin/main", "origin/master"]
+            .into_iter()
+            .find_map(|name| {
+                git(workspace, &["rev-parse", "--verify", "--quiet", name]).map(|_| name.to_owned())
+            })
+    })?;
+    let range = format!("HEAD..{main}");
+    let commits: u32 = git(workspace, &["rev-list", "--count", &range])?
+        .trim()
+        .parse()
+        .ok()?;
+    if commits == 0 {
+        return None;
+    }
+    let subjects = git(
+        workspace,
+        &["log", "-n", RECENT_COMMITS, "--format=%s", &range],
+    )
+    .unwrap_or_default()
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    Some(Behind {
+        upstream: main,
+        commits,
+        subjects,
+    })
+}
+
+const FETCH_SECONDS: u64 = 20;
+
+/// `git fetch origin`, given up on after [`FETCH_SECONDS`] so a dead network
+/// cannot hold a task at its start.
+fn fetch_origin(workspace: &Path) {
+    let Ok(mut child) = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["fetch", "--quiet", "origin"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(FETCH_SECONDS);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn git(workspace: &Path, arguments: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -150,6 +233,39 @@ mod tests {
         assert!(text.contains("branch pete/work, main branch main, 1 changed path(s):"));
         assert!(text.contains("    - First commit"));
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_branch_behind_the_remote_main_says_how_far_after_a_fetch() {
+        let base = std::env::temp_dir().join(format!("dino-behind-{}", std::process::id()));
+        let (origin, work) = (base.join("origin"), base.join("work"));
+        std::fs::create_dir_all(&origin).unwrap();
+        run(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a.txt"), "a").unwrap();
+        run(&origin, &["add", "a.txt"]);
+        run(&origin, &["commit", "-q", "-m", "First"]);
+        run(
+            &base,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(behind(&work, false), None);
+
+        std::fs::write(origin.join("b.txt"), "b").unwrap();
+        run(&origin, &["add", "b.txt"]);
+        run(&origin, &["commit", "-q", "-m", "Measure the gate"]);
+
+        // Not fetched yet, so the clone cannot know.
+        assert_eq!(behind(&work, false), None);
+        let found = behind(&work, true).unwrap();
+        assert_eq!(found.upstream, "origin/main");
+        assert_eq!(found.commits, 1);
+        assert_eq!(found.subjects, ["Measure the gate"]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -199,6 +199,61 @@ fn reviews(result: &dino_core::RunResult) -> Vec<(u32, Vec<String>, Option<Strin
         .collect()
 }
 
+fn task_agent(
+    root: &Path,
+    turns: Vec<Turn>,
+    reviewer: &Arc<Reviewer>,
+) -> Agent<ScriptedSession, Files> {
+    Agent::new(
+        ScriptedSession::new(turns),
+        Files {
+            root: root.to_path_buf(),
+        },
+        AgentConfig::default(),
+    )
+    .with_policy(AllowAll)
+    .with_task_reviewer(Arc::clone(reviewer))
+}
+
+#[tokio::test]
+async fn a_task_told_to_finish_is_reviewed_without_a_review_model() {
+    let workspace = Workspace::new("task-reviewed");
+    let (reviewer, asked) = reviewer(&workspace.0, "nothing to flag");
+    let mut agent = task_agent(
+        &workspace.0,
+        vec![
+            write("1", "fn new() {}\n"),
+            text_turn("a is done; say go"),
+            text_turn("everything is done"),
+        ],
+        &reviewer,
+    );
+    agent.set_keep_going(true);
+
+    let result = agent.run("finish the wave").await.unwrap();
+
+    assert_eq!(result.model_turns, 3);
+    assert_eq!(reviews(&result).len(), 1);
+    assert_eq!(asked.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_task_not_told_to_finish_is_not_reviewed_by_the_task_reviewer() {
+    let workspace = Workspace::new("task-unreviewed");
+    let (reviewer, asked) = reviewer(&workspace.0, "- would object");
+    let mut agent = task_agent(
+        &workspace.0,
+        vec![write("1", "fn new() {}\n"), text_turn("done")],
+        &reviewer,
+    );
+
+    let result = agent.run("add new").await.unwrap();
+
+    assert_eq!(result.model_turns, 2);
+    assert_eq!(reviews(&result), []);
+    assert_eq!(asked.lock().unwrap().len(), 0);
+}
+
 #[tokio::test]
 async fn objections_go_back_once_and_the_model_may_act_on_them() {
     let workspace = Workspace::new("objects");

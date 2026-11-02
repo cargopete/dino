@@ -69,6 +69,10 @@ pub struct OpenAiSession {
     endpoint: Url,
     config: OpenAiConfig,
     previous_response_id: Arc<Mutex<Option<String>>>,
+    /// Call IDs the last response asked for and no request has answered yet. A
+    /// request that fails after tool calls leaves these, and the provider
+    /// refuses the continuation until each has an output.
+    outstanding: Arc<Mutex<Vec<String>>>,
 }
 
 impl OpenAiSession {
@@ -95,7 +99,43 @@ impl OpenAiSession {
             endpoint,
             config,
             previous_response_id: Arc::new(Mutex::new(None)),
+            outstanding: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Writes an error output into `body` for each outstanding call its input
+    /// does not answer, ahead of the rest of the input.
+    fn answer_orphans(&self, body: &mut Value) -> Result<(), ModelError> {
+        let outstanding = self
+            .outstanding
+            .lock()
+            .map_err(|_| ModelError::Protocol("OpenAI outstanding-call lock was poisoned".into()))?
+            .clone();
+        let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+            return Ok(());
+        };
+        let orphans: Vec<Value> = {
+            let answered: Vec<&str> = input
+                .iter()
+                .filter(|item| {
+                    item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                })
+                .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+                .collect();
+            outstanding
+                .iter()
+                .filter(|id| !answered.contains(&id.as_str()))
+                .map(|id| {
+                    json!({
+                        "type": "function_call_output",
+                        "call_id": id,
+                        "output": crate::anthropic::UNANSWERED_CALL,
+                    })
+                })
+                .collect()
+        };
+        input.splice(0..0, orphans);
+        Ok(())
     }
 
     fn request_body(&self, input: TurnInput) -> Result<Value, ModelError> {
@@ -205,7 +245,18 @@ impl ModelSession for OpenAiSession {
             provider: ProviderKind::OpenAi,
             model_key: self.config.profile.key.clone(),
             version: STATE_VERSION,
-            payload: serde_json::json!({ "previous_response_id": *previous }),
+            payload: {
+                let mut payload = serde_json::json!({ "previous_response_id": *previous });
+                let outstanding = self
+                    .outstanding
+                    .lock()
+                    .map(|ids| ids.clone())
+                    .unwrap_or_default();
+                if !outstanding.is_empty() {
+                    payload["outstanding"] = serde_json::json!(outstanding);
+                }
+                payload
+            },
         })
     }
 
@@ -224,12 +275,24 @@ impl ModelSession for OpenAiSession {
             .lock()
             .map_err(|_| ModelError::Protocol("OpenAI response lock was poisoned".into()))?;
         *previous = restored;
+        let outstanding: Vec<String> = state
+            .payload
+            .get("outstanding")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str().map(ToOwned::to_owned))
+            .collect();
+        if let Ok(mut ids) = self.outstanding.lock() {
+            *ids = outstanding;
+        }
         Ok(())
     }
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
-            let body = self.request_body(input)?;
+            let mut body = self.request_body(input)?;
+            self.answer_orphans(&mut body)?;
             let response = crate::send_with_retry(self.config.retry, || async {
                 let mut request = self.client.post(self.endpoint.clone()).json(&body);
                 if let Some(api_key) = &self.config.api_key {
@@ -254,10 +317,12 @@ impl ModelSession for OpenAiSession {
             .await?;
 
             let response_state = Arc::clone(&self.previous_response_id);
+            let outstanding = Arc::clone(&self.outstanding);
             let stream = try_stream! {
                 let mut chunks = response.bytes_stream();
                 let mut decoder = SseDecoder::default();
                 let mut parser = ResponsesStreamParser::default();
+                let mut asked: Vec<String> = Vec::new();
                 let mut done = false;
 
                 while let Some(chunk) = chunks.next().await {
@@ -267,11 +332,18 @@ impl ModelSession for OpenAiSession {
                             continue;
                         }
                         let events = parser.consume(&data)?;
+                        asked.extend(events.iter().filter_map(|event| match event {
+                            ModelEvent::ToolCallCompleted { call } => Some(call.id.clone()),
+                            _ => None,
+                        }));
                         let terminal = events
                             .iter()
                             .any(|event| matches!(event, ModelEvent::Finished { .. }));
                         if terminal {
                             set_response_id(&response_state, parser.response_id()?)?;
+                            if let Ok(mut ids) = outstanding.lock() {
+                                ids.clone_from(&asked);
+                            }
                         }
                         for event in events {
                             yield event;
@@ -608,6 +680,58 @@ mod tests {
             *restored.previous_response_id.lock().unwrap(),
             Some("resp_abc123".to_owned())
         );
+    }
+
+    #[test]
+    fn calls_a_failed_request_left_unanswered_get_an_error_output_first() {
+        let profile = crate::builtin_profile("terra").unwrap();
+        let session = OpenAiSession::new(OpenAiConfig::new("key", profile)).unwrap();
+        *session.outstanding.lock().unwrap() = vec!["call-1".into(), "call-2".into()];
+        let mut body = session
+            .request_body(TurnInput::ToolResults {
+                results: vec![dino_protocol::ToolResult {
+                    call_id: "call-2".into(),
+                    output: dino_protocol::ToolOutput::success("ok"),
+                }],
+                note: None,
+            })
+            .unwrap();
+
+        session.answer_orphans(&mut body).unwrap();
+
+        let ids: Vec<_> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["call_id"].as_str())
+            .collect();
+        assert_eq!(ids, [Some("call-1"), Some("call-2")]);
+        assert_eq!(
+            body["input"][0]["output"],
+            crate::anthropic::UNANSWERED_CALL
+        );
+
+        let mut body = session
+            .request_body(TurnInput::User {
+                content: "continue".into(),
+            })
+            .unwrap();
+        session.answer_orphans(&mut body).unwrap();
+        assert_eq!(body["input"].as_array().unwrap().len(), 3);
+        assert_eq!(body["input"][2]["role"], "user");
+    }
+
+    #[test]
+    fn the_outstanding_calls_survive_a_restore() {
+        let profile = crate::builtin_profile("terra").unwrap();
+        let original = OpenAiSession::new(OpenAiConfig::new("key", profile.clone())).unwrap();
+        *original.outstanding.lock().unwrap() = vec!["call-1".into()];
+        let state = original.export_state().unwrap();
+        let mut restored = OpenAiSession::new(OpenAiConfig::new("key", profile)).unwrap();
+
+        restored.restore_state(&state).unwrap();
+
+        assert_eq!(*restored.outstanding.lock().unwrap(), ["call-1"]);
     }
 
     #[test]

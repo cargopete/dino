@@ -215,7 +215,14 @@ CI and evals.
   hook changed the file, so the model reads it again before the next edit. A
   `before_end_turn` hook must pass before the model ends its turn, or it is sent
   back once with the output (`cargo clippy` makes a good one); a
-  `session_start` hook runs once and what it prints goes into the prompt.
+  `session_start` hook runs once and what it prints goes into the prompt. A
+  `task_end` hook runs when a task ends, finished or not, once the task has run
+  `ping_after_seconds` (300 unless set), with `{status}` (`finished`, `failed`,
+  `cancelled` or `stopped`) and `{message}` in its arguments and in
+  `DINO_STATUS` and `DINO_MESSAGE`. Unlike the others it runs outside the
+  sandbox, so it can reach a webhook; a failure names the program, never its
+  arguments, which may hold a token. For Discord:
+  `command = ["curl", "-sS", "--form-string", "content={message}", "https://discord.com/api/webhooks/ID/TOKEN"]`.
 - **An eval harness.** `dino eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also
@@ -489,6 +496,18 @@ Evals do not. A `[budget]` table in the user file, with `session_usd`,
 when one is spent, asks before the next request; yes carries on as far again,
 and with nobody at the terminal the run stops. Evals ignore it; `dino eval
 --max-usd` stops a corpus at a ceiling of its own.
+A submission is a task, and a message can set its limits: `max $50`, `max 1
+hour`, `max 90 minutes`. Naming one leaves the other open; naming none uses
+`task_usd` and `task_minutes` from `[budget]` (20 and 240 unless set). Dollars are
+list price since the task began, and both are checked before each request. At a
+limit the task is asked once, with changes refused, what is done and what is
+left, and a `dino run --handover` chain starts no further session. A message that
+names a limit or says to see it through ("keep going", "until it's done",
+"finish the ...") also sends the model back when it ends its turn after working,
+until a turn does no work or it calls `report_blocker`; and such a task fetches
+first, and tells the model when the branch is behind `origin`'s main. Such a task is
+also reviewed once before it ends, by `review_model` if set and by the model
+running it if not.
 `/compact` asks the model for a structured summary, with changes gated off,
 starts a fresh conversation and puts the summary ahead of your next message;
 the old conversation stays resumable in full. `auto_compact = true` in a config
@@ -508,8 +527,8 @@ persists to `.dino/history` and the conversation to `.dino/sessions`, so
 happened.
 
 Mutations and processes ask before they happen. `--read-only` refuses both
-instead; `--dangerously-allow-all` does not ask, which is a decision worth making
-deliberately. A sandboxed run has no network, so Cargo runs `--offline` and
+instead; `--dangerously-allow-all` (or `--dangerously-skip-permissions`) does not ask,
+which is a decision worth making deliberately. A sandboxed run has no network, so Cargo runs `--offline` and
 cannot fetch a dependency that is not already in the local registry cache: adding
 a crate is a job for a person, or for `--sandbox none`.
 
