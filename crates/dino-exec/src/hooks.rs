@@ -120,7 +120,9 @@ impl AfterEdit {
         let changed = std::fs::read(&file).ok() != before;
         let mut report = json!({"after_edit": ran, "changed_file": changed});
         if changed {
-            report["note"] = json!("a hook changed this file; read it again before editing it");
+            report["note"] = json!(
+                "a hook changed this file; the next edit's old_text must match it as it is now"
+            );
         }
         report
     }
@@ -158,6 +160,9 @@ impl ToolRuntime for AfterEdit {
                 return Ok(output);
             }
             let report = self.run_hooks(path).await;
+            if report["changed_file"] == json!(true) {
+                self.inner.rewritten(path);
+            }
             Ok(with_report(&output, report))
         })
     }

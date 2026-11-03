@@ -56,6 +56,9 @@ pub enum SandboxMode {
 pub enum ApprovalMode {
     /// Read-only calls proceed; mutations ask a person.
     Interactive,
+    /// As interactive, but edits to workspace files proceed, except those to
+    /// files that change what other programs run.
+    AcceptEdits,
     /// Mutations are refused without asking.
     ReadOnly,
     /// Everything proceeds without asking. Explicitly requested only.
@@ -66,6 +69,7 @@ impl ApprovalMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Interactive => "interactive (mutations require approval)",
+            Self::AcceptEdits => "accept-edits (workspace edits proceed; the rest asks)",
             Self::ReadOnly => "read-only (mutations are refused)",
             Self::AllowAll => "allow-all (nothing is asked)",
         }

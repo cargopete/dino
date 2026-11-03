@@ -101,6 +101,24 @@ fn the_whole_line_is_the_approval_subject() {
 }
 
 #[test]
+fn a_line_of_git_reads_needs_no_approval() {
+    let fixture = Fixture::new("reads");
+    let class = |line: &str| {
+        fixture
+            .tool()
+            .classify(&call(json!({"command": line})))
+            .unwrap()
+            .class
+    };
+
+    assert_eq!(
+        class("git status --short; git log --oneline -15 | head -5"),
+        ToolClass::ReadOnly
+    );
+    assert_eq!(class("git status; git commit -qm x"), ToolClass::Process);
+}
+
+#[test]
 fn empty_lines_and_escaping_directories_are_refused() {
     let fixture = Fixture::new("refuse");
     let tool = fixture.tool();
@@ -233,5 +251,27 @@ async fn package_managers_are_told_to_work_offline_only_when_the_network_is_deni
     assert!(
         failed.get("note").is_none(),
         "no policy to explain without a sandbox"
+    );
+}
+
+#[tokio::test]
+async fn a_line_that_writes_a_tracked_file_is_pointed_at_the_file_tools() {
+    let fixture = Fixture::new("tracked");
+    let tool = fixture.tool();
+    let setup = "git init -q && git config user.email t@t && git config user.name t \
+                 && echo one > kept.txt && git add kept.txt && git commit -qm one";
+    assert_eq!(
+        output(&tool, json!({"command": setup})).await["exit_code"],
+        0
+    );
+
+    let untracked = output(&tool, json!({"command": "echo two > scratch.txt"})).await;
+    assert!(untracked.get("wrote_tracked").is_none(), "{untracked}");
+
+    let tracked = output(&tool, json!({"command": "echo two >> kept.txt"})).await;
+    let note = tracked["wrote_tracked"].as_str().unwrap();
+    assert!(
+        note.contains("(kept.txt)") && note.contains("apply_patch"),
+        "{note}"
     );
 }

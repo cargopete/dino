@@ -223,10 +223,10 @@ fn a_command_sent_as_an_encoded_array_is_read_as_that_array() {
 
     let action = fixture
         .tool()
-        .classify(&call(json!({"command": "[\"git\", \"log\", \"-1\"]"})))
+        .classify(&call(json!({"command": "[\"git\", \"add\", \"-A\"]"})))
         .unwrap();
 
-    assert_eq!(action.subject.as_deref(), Some("git log -1"));
+    assert_eq!(action.subject.as_deref(), Some("git add -A"));
 }
 
 #[test]
@@ -271,13 +271,35 @@ fn exec_is_a_process_and_its_subject_is_the_argument_vector() {
 
     let action = fixture
         .tool()
-        .classify(&call(
-            json!({"command": ["git", "log", "--oneline", "-20"]}),
-        ))
+        .classify(&call(json!({"command": ["git", "commit", "-m", "wip"]})))
         .unwrap();
 
     assert_eq!(action.class, ToolClass::Process);
-    assert_eq!(action.subject.as_deref(), Some("git log --oneline -20"));
+    assert_eq!(action.subject.as_deref(), Some("git commit -m wip"));
+}
+
+#[test]
+fn a_git_command_that_only_reads_needs_no_approval() {
+    let fixture = Fixture::new();
+    let tool = fixture.tool();
+    let class = |command: Value| {
+        tool.classify(&call(json!({"command": command})))
+            .unwrap()
+            .class
+    };
+
+    assert_eq!(
+        class(json!(["git", "log", "--oneline", "-20"])),
+        ToolClass::ReadOnly
+    );
+    assert_eq!(
+        class(json!(["git", "status", "--short"])),
+        ToolClass::ReadOnly
+    );
+    assert_eq!(
+        class(json!(["git", "diff", "--output=x.patch"])),
+        ToolClass::Process
+    );
 }
 
 #[test]

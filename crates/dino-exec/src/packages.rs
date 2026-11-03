@@ -114,6 +114,7 @@ impl PackagesTool {
                 || execution.stderr.len() > max,
             restored_protected_paths: execution.restored,
             note: None,
+            wrote_tracked: None,
         })
     }
 }

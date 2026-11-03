@@ -442,6 +442,13 @@ mod tests {
     }
 
     #[test]
+    fn a_user_file_may_accept_edits() {
+        let parsed: FileConfig = toml::from_str("approvals = \"accept-edits\"\n").unwrap();
+
+        assert_eq!(parsed.approvals, Some(ApprovalMode::AcceptEdits));
+    }
+
+    #[test]
     fn a_project_file_may_not_weaken_a_boundary_or_redirect_a_credential() {
         for (key, value) in [
             ("approvals", "\"allow-all\""),

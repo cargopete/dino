@@ -109,6 +109,7 @@ impl ShellTool {
         } else {
             self.sandbox.as_ref()
         };
+        let before = crate::tracked::modified(self.root.path()).await;
         let execution = process::run(
             SH,
             &arguments,
@@ -118,6 +119,10 @@ impl ShellTool {
             self.limits.timeout,
         )
         .await?;
+        let wrote_tracked = match (before, crate::tracked::modified(self.root.path()).await) {
+            (Some(before), Some(after)) => crate::tracked::note(&before, &after),
+            _ => None,
+        };
         let note = process::network_note(sandbox, &execution);
         let max = self.limits.max_output_bytes;
         let stderr = if execution.timed_out {
@@ -139,6 +144,7 @@ impl ShellTool {
                 || execution.stderr.len() > max,
             restored_protected_paths: execution.restored,
             note,
+            wrote_tracked,
         })
     }
 }
@@ -197,6 +203,7 @@ impl ToolRuntime for ShellTool {
         self.directory(&request)?;
         Ok(match self.unconfined(&request)? {
             Some(reason) => ToolAction::unconfined_process(request.command, reason),
+            None if crate::reads::line_reads_only(&request.command) => ToolAction::read_only(),
             None => ToolAction::process(request.command),
         })
     }
