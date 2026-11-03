@@ -548,6 +548,14 @@ pub enum AgentEvent {
         attempt: u32,
         error: String,
     },
+    /// The request could not reach the model, after the adapter's own retries,
+    /// and the turn will be sent again after a wait.
+    WaitingForNetwork {
+        model_turn: u32,
+        error: String,
+        waited_seconds: u64,
+        retry_in_seconds: u64,
+    },
     /// The model was told how few turns it has left. Recorded because the note
     /// travels inside a tool result, where a reader would not otherwise know
     /// the model was the one being told.

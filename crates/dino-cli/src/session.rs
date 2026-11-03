@@ -191,6 +191,7 @@ enum Input {
     Cost,
     Model(Option<String>),
     Resume(Option<String>),
+    Rename(Option<String>),
     Plan(Option<String>),
     Compact,
     Auto,
@@ -228,6 +229,7 @@ fn parse(line: &str) -> Input {
         .split_whitespace()
         .next()
         .map(str::to_owned);
+    let remainder = || Some(rest[word.len()..].trim().to_owned()).filter(|text| !text.is_empty());
     match word {
         "help" | "h" | "?" => Input::Help,
         "status" => Input::Status,
@@ -238,10 +240,9 @@ fn parse(line: &str) -> Input {
         "auto" => Input::Auto,
         "init" => Input::Init,
         "model" => Input::Model(argument),
-        "resume" => Input::Resume(argument),
-        "plan" => {
-            Input::Plan(Some(rest[word.len()..].trim().to_owned()).filter(|task| !task.is_empty()))
-        }
+        "resume" => Input::Resume(remainder()),
+        "rename" => Input::Rename(remainder()),
+        "plan" => Input::Plan(remainder()),
         "log" => Input::Log,
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
@@ -353,6 +354,8 @@ pub struct Session<S> {
     pub history_path: std::path::PathBuf,
     /// Where this conversation is persisted after each submission.
     pub state_path: std::path::PathBuf,
+    /// What `/rename` called this conversation, saved with it.
+    pub name: Option<String>,
     /// Open with the dinosaur rather than the plain heading.
     pub greeting: bool,
     /// Set when pages are watching and driving this session, as `dino serve`.
@@ -386,6 +389,9 @@ where
         let _ = editor.load_history(&self.history_path);
 
         println!("{}", self.opening());
+        if let Some(offer) = self.offer_resume() {
+            println!("{offer}");
+        }
         // The prompt is the person's own line, so it wears the person's colour.
         let prompt = match style::EMBER.sequence() {
             sequence if sequence.is_empty() => "› ".to_owned(),
@@ -475,7 +481,8 @@ where
             Input::Model(None) => print!("{}", self.models()),
             Input::Model(Some(key)) => self.start_conversation(&key),
             Input::Resume(None) => print!("{}", self.saved()),
-            Input::Resume(Some(id)) => self.resume(&id),
+            Input::Resume(Some(wanted)) => self.resume(&wanted),
+            Input::Rename(name) => self.rename(name),
             Input::Diff => print!("{}", diff(&self.workspace_root)),
             Input::Plan(None) => println!(
                 "{}",
@@ -771,7 +778,8 @@ where
         // After each submission rather than continuously: a submission is the
         // unit that either happened or did not.
         if let Ok(state) = self.agent.session().export_state()
-            && let Err(error) = dino_core::resume::save(&self.state_path, &state)
+            && let Err(error) =
+                dino_core::resume::save(&self.state_path, &state, self.name.as_deref())
         {
             println!(
                 "{}",
@@ -936,6 +944,7 @@ where
                 self.agent.replace_session(session);
                 self.conversations += 1;
                 self.recall = crate::recall::Recall::default();
+                self.name = None;
                 let id = format!("{}-{}", self.run_id, self.conversations);
                 // An empty conversation is never written, so there may be nothing to name.
                 let previous = self.state_path.is_file().then(|| self.current_id());
@@ -957,8 +966,25 @@ where
         }
     }
 
-    fn resume(&mut self, id: &str) {
-        let path = dino_core::resume::state_path(&self.workspace_root, id);
+    fn resume(&mut self, wanted: &str) {
+        let found = match dino_core::resume::find(&self.workspace_root, wanted) {
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                println!(
+                    "{}",
+                    style::paint(
+                        style::WARN,
+                        &format!("  no saved conversation is called {wanted}; /resume lists them")
+                    )
+                );
+                return;
+            }
+            Err(error) => {
+                println!("{}", style::paint(style::WARN, &format!("  {error}")));
+                return;
+            }
+        };
+        let (id, path) = found;
         let restored = dino_core::resume::load(&path)
             .map_err(anyhow::Error::from)
             .and_then(|state| {
@@ -969,6 +995,9 @@ where
         match restored {
             Ok((session, name, key)) => {
                 self.agent.replace_session(session);
+                self.name = dino_core::resume::label(&path)
+                    .ok()
+                    .and_then(|label| label.name);
                 self.state_path = path;
                 self.model_key = key;
                 self.model = name;
@@ -979,6 +1008,48 @@ where
             }
             Err(error) => println!("{}", style::paint(style::WARN, &format!("  {error}"))),
         }
+    }
+
+    /// Names the conversation, or with no name clears it. A conversation
+    /// already on disk is saved again now, so the name is not lost to an exit.
+    fn rename(&mut self, name: Option<String>) {
+        self.name = name;
+        if self.state_path.is_file()
+            && let Ok(state) = self.agent.session().export_state()
+            && let Err(error) =
+                dino_core::resume::save(&self.state_path, &state, self.name.as_deref())
+        {
+            println!(
+                "{}",
+                style::paint(style::WARN, &format!("  could not save the name: {error}"))
+            );
+            return;
+        }
+        let said = match &self.name {
+            Some(name) => format!("  this conversation is {name}; /resume {name} continues it"),
+            None => "  the name is cleared".to_owned(),
+        };
+        println!("{}", style::paint(FAINT, &said));
+    }
+
+    /// Offers back the conversation the workspace's last session left in an
+    /// error, such as a network outage mid-task.
+    fn offer_resume(&self) -> Option<String> {
+        let interrupted = dino_core::resume::interrupted(&self.workspace_root, &self.run_id)?;
+        if interrupted.id == self.current_id() {
+            return None;
+        }
+        Some(style::paint(
+            style::WARN,
+            &format!(
+                "  the last session ended in an error ({}). /resume {} continues it.",
+                dino_core::text::capped_head(
+                    interrupted.error.lines().next().unwrap_or_default(),
+                    160
+                ),
+                interrupted.id
+            ),
+        ))
     }
 
     fn current_id(&self) -> String {
@@ -1025,14 +1096,21 @@ where
             let age = now
                 .duration_since(item.modified)
                 .map_or_else(|_| "now".to_owned(), |age| describe_age(age.as_secs()));
-            let model = dino_core::resume::load(&item.path)
-                .map_or_else(|_| "?".to_owned(), |state| state.model_key);
+            let (model, name) = dino_core::resume::label(&item.path).map_or_else(
+                |_| ("?".to_owned(), String::new()),
+                |label| (label.model_key, label.name.unwrap_or_default()),
+            );
             let marker = if item.id == current { "›" } else { " " };
             let _ = writeln!(
                 &mut block,
-                "  {marker} {}  {}",
+                "  {marker} {}  {}{}",
                 style::paint(PURPLE, &format!("{:<22}", item.id)),
-                style::paint(MUTED, &format!("{age:>8} ago  {model}"))
+                style::paint(MUTED, &format!("{age:>8} ago  {model}")),
+                if name.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", style::paint(style::TEXT, &name))
+                }
             );
         }
         block
@@ -1170,7 +1248,11 @@ fn help() -> String {
         ),
         (
             "/resume",
-            "list saved conversations; /resume <id> continues one",
+            "list saved conversations; /resume <id or name> continues one",
+        ),
+        (
+            "/rename",
+            "/rename <name> names this conversation; alone, clears it",
         ),
         (
             "/plan",
@@ -1293,6 +1375,15 @@ mod tests {
             parse("/resume 1a16-2"),
             Input::Resume(Some("1a16-2".into()))
         );
+        assert_eq!(
+            parse("/resume rfc wave"),
+            Input::Resume(Some("rfc wave".into()))
+        );
+        assert_eq!(
+            parse("/rename  rfc wave "),
+            Input::Rename(Some("rfc wave".into()))
+        );
+        assert_eq!(parse("/rename"), Input::Rename(None));
     }
 
     #[test]

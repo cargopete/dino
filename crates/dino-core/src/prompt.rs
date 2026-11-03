@@ -112,6 +112,8 @@ Tool discipline:
   prefer `exec` for a single program. Nothing a command starts outlives it, `&`
   included. For a server or watcher that must keep running between calls, use
   `background`: start it, read its `output`, and `stop` it when you are done.
+  For a build or CI run longer than `shell` allows, start it there and `wait`
+  on it rather than polling with `sleep`.
 - `todo` keeps a checklist for a task of several steps. Send the whole list
   each time, keep one item in progress, and mark items done as you finish them.
   An update goes in the same response as the next step's calls, or the last

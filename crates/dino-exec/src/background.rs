@@ -41,6 +41,10 @@ const KEPT_BYTES: usize = 256 * 1_024;
 const RETURNED_BYTES: usize = 16 * 1_024;
 /// How long `start` waits, so a command that fails at once says so.
 const SETTLE: Duration = Duration::from_millis(700);
+/// Longest one `wait` may ask for, and what it gets when it names none.
+const MAX_WAIT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_WAIT: Duration = Duration::from_secs(10 * 60);
+const POLL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Default)]
 struct Output {
@@ -62,6 +66,14 @@ impl Output {
             self.text.drain(..cut);
             self.dropped += cut;
         }
+    }
+
+    /// What arrived since the last read, without marking it read.
+    fn peek(&self) -> &str {
+        &self.text[self
+            .read_to
+            .saturating_sub(self.dropped)
+            .min(self.text.len())..]
     }
 
     /// What arrived since the last read, at most [`RETURNED_BYTES`] of the
@@ -243,6 +255,48 @@ impl BackgroundTool {
 
     /// The process's state and what it has printed since the last look.
     fn report(&self, id: u32) -> Result<ToolOutput, ToolError> {
+        self.report_waited(id, None)
+    }
+
+    /// Returns once the process exits, `until` matches what it printed since
+    /// the last look, or `timeout` passes, whichever is first.
+    async fn wait(
+        &self,
+        id: u32,
+        timeout: Duration,
+        until: Option<regex::Regex>,
+    ) -> Result<ToolOutput, ToolError> {
+        let deadline = Instant::now() + timeout.min(MAX_WAIT);
+        let outcome = loop {
+            let (state, output) = {
+                let processes = self.lock()?;
+                let process = processes.get(&id).ok_or_else(|| {
+                    ToolError::new(format!("there is no background process {id}"))
+                })?;
+                (process.state(), Arc::clone(&process.output))
+            };
+            let matched = until.as_ref().is_some_and(|until| {
+                output
+                    .lock()
+                    .is_ok_and(|output| until.is_match(output.peek()))
+            });
+            if matched {
+                break Waited::Matched;
+            }
+            if !state.running() {
+                // The readers may still hold the last of what it printed.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                break Waited::Exited;
+            }
+            if Instant::now() >= deadline {
+                break Waited::TimedOut;
+            }
+            tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
+        };
+        self.report_waited(id, Some(outcome))
+    }
+
+    fn report_waited(&self, id: u32, waited: Option<Waited>) -> Result<ToolOutput, ToolError> {
         let mut processes = self.lock()?;
         let process = processes
             .get_mut(&id)
@@ -263,6 +317,7 @@ impl BackgroundTool {
             command: process.command.clone(),
             running: state.running(),
             exit_code: state.code(),
+            waited,
             output,
             skipped_bytes: skipped,
             restored_protected_paths: restored,
@@ -330,12 +385,23 @@ async fn collect<R: AsyncRead + Unpin>(mut reader: R, output: Arc<Mutex<Output>>
     }
 }
 
+/// Why a `wait` returned.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Waited {
+    Exited,
+    Matched,
+    TimedOut,
+}
+
 #[derive(Debug, Serialize)]
 struct Report {
     id: u32,
     command: String,
     running: bool,
     exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waited: Option<Waited>,
     output: String,
     /// Output that arrived but is not shown, because it was too much.
     #[serde(skip_serializing_if = "is_zero")]
@@ -359,6 +425,11 @@ enum Request {
     Output {
         id: u32,
     },
+    Wait {
+        id: u32,
+        timeout_seconds: Option<u64>,
+        until: Option<String>,
+    },
     Stop {
         id: u32,
     },
@@ -374,8 +445,19 @@ impl Request {
         {
             return Err(ToolError::new("the command line must not be empty"));
         }
+        if let Self::Wait {
+            until: Some(until), ..
+        } = &request
+        {
+            until_pattern(until)?;
+        }
         Ok(request)
     }
+}
+
+fn until_pattern(until: &str) -> Result<regex::Regex, ToolError> {
+    regex::Regex::new(until)
+        .map_err(|error| ToolError::new(format!("until is not a regular expression: {error}")))
 }
 
 impl ToolRuntime for BackgroundTool {
@@ -386,17 +468,24 @@ impl ToolRuntime for BackgroundTool {
                 "Run a command line that keeps going across calls, such as a development \
                  server or a watcher, in the same containment as shell: {}. op start runs it \
                  and returns an id and its first output; output returns what it printed since \
-                 you last looked; stop ends it and everything it started; list shows them all. \
-                 At most {MAX_RUNNING} at once, and all are stopped when the session ends.",
-                self.sandbox.label()
+                 you last looked; wait blocks until it exits, until the regular expression \
+                 until matches its new output, or for timeout_seconds (default {}, at most {}), \
+                 so wait on a long build or CI run rather than polling with sleep; stop ends it \
+                 and everything it started; list shows them all. At most {MAX_RUNNING} at once, \
+                 and all are stopped when the session ends.",
+                self.sandbox.label(),
+                DEFAULT_WAIT.as_secs(),
+                MAX_WAIT.as_secs(),
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["start", "output", "stop", "list"]},
+                    "op": {"type": "string", "enum": ["start", "output", "wait", "stop", "list"]},
                     "command": {"type": "string", "minLength": 1, "description": "For start: the command line."},
                     "directory": {"type": "string", "minLength": 1, "description": "For start: relative to the workspace root."},
-                    "id": {"type": "integer", "minimum": 1, "description": "For output and stop."}
+                    "id": {"type": "integer", "minimum": 1, "description": "For output, wait and stop."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT.as_secs(), "description": "For wait: the longest to block."},
+                    "until": {"type": "string", "minLength": 1, "description": "For wait: a Rust regular expression; return as soon as new output matches it."}
                 },
                 "required": ["op"],
                 "additionalProperties": false
@@ -412,9 +501,10 @@ impl ToolRuntime for BackgroundTool {
             Request::Start { command, .. } => {
                 ToolAction::process(format!("{command} (in the background)"))
             }
-            Request::Output { .. } | Request::Stop { .. } | Request::List => {
-                ToolAction::read_only()
-            }
+            Request::Output { .. }
+            | Request::Wait { .. }
+            | Request::Stop { .. }
+            | Request::List => ToolAction::read_only(),
         })
     }
 
@@ -428,6 +518,15 @@ impl ToolRuntime for BackgroundTool {
             match request? {
                 Request::Start { command, directory } => self.start(command, directory).await,
                 Request::Output { id } => self.report(id),
+                Request::Wait {
+                    id,
+                    timeout_seconds,
+                    until,
+                } => {
+                    let timeout = timeout_seconds.map_or(DEFAULT_WAIT, Duration::from_secs);
+                    let until = until.as_deref().map(until_pattern).transpose()?;
+                    self.wait(id, timeout, until).await
+                }
                 Request::Stop { id } => self.stop(id).await,
                 Request::List => self.list(),
             }
@@ -528,6 +627,88 @@ mod tests {
         drop(tool);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!alive(pid), "the process outlived the session");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn wait_returns_when_the_job_exits_with_everything_it_printed() {
+        let root =
+            std::env::temp_dir().join(format!("dino-background-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tool = BackgroundTool::new(&root, Arc::new(Unconfined)).unwrap();
+        run(
+            &tool,
+            json!({"op": "start", "command": "sleep 1; echo built; exit 2"}),
+        )
+        .await;
+
+        let waited = run(&tool, json!({"op": "wait", "id": 1, "timeout_seconds": 30})).await;
+        assert_eq!(waited["waited"], "exited");
+        assert_eq!(waited["running"], false);
+        assert_eq!(waited["exit_code"], 2);
+        assert_eq!(waited["output"], "built\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn wait_returns_when_until_matches_new_output_and_leaves_the_job_running() {
+        let root =
+            std::env::temp_dir().join(format!("dino-background-until-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tool = BackgroundTool::new(&root, Arc::new(Unconfined)).unwrap();
+        run(
+            &tool,
+            json!({"op": "start", "command": "sleep 1; echo 'Listening on 8080'; while true; do sleep 0.1; done"}),
+        )
+        .await;
+
+        let started = Instant::now();
+        let waited = run(
+            &tool,
+            json!({"op": "wait", "id": 1, "timeout_seconds": 30, "until": r"Listening on \d+"}),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(waited["waited"], "matched");
+        assert_eq!(waited["running"], true);
+        assert_eq!(waited["output"], "Listening on 8080\n");
+        run(&tool, json!({"op": "stop", "id": 1})).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn wait_gives_up_at_its_timeout_and_says_so() {
+        let root =
+            std::env::temp_dir().join(format!("dino-background-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tool = BackgroundTool::new(&root, Arc::new(Unconfined)).unwrap();
+        run(
+            &tool,
+            json!({"op": "start", "command": "while true; do sleep 0.1; done"}),
+        )
+        .await;
+
+        let waited = run(
+            &tool,
+            json!({"op": "wait", "id": 1, "timeout_seconds": 1, "until": "never"}),
+        )
+        .await;
+        assert_eq!(waited["waited"], "timed_out");
+        assert_eq!(waited["running"], true);
+        run(&tool, json!({"op": "stop", "id": 1})).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_wait_with_a_broken_until_is_refused_before_it_runs() {
+        let root =
+            std::env::temp_dir().join(format!("dino-background-badre-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tool = BackgroundTool::new(&root, Arc::new(Unconfined)).unwrap();
+        assert!(
+            tool.classify(&call(json!({"op": "wait", "id": 1, "until": "("})))
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
