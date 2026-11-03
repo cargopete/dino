@@ -15,6 +15,7 @@ pub mod progress;
 pub mod prompt;
 pub mod resume;
 pub mod review;
+pub mod schedule;
 pub mod session;
 pub mod skills;
 pub mod text;
@@ -184,6 +185,14 @@ impl ToolSet {
         })
     }
 
+    /// Keeps only the tools `keep` names. One left out behaves as one never
+    /// built: absent from the definitions, and an unknown tool if called.
+    #[must_use]
+    pub fn keeping(mut self, keep: impl Fn(&str) -> bool) -> Self {
+        self.owners.retain(|name, _| keep(name));
+        self
+    }
+
     /// Refuses an array or object argument sent as a string. It is not parsed
     /// back: every one seen was broken JSON, and a guessed repair is an edit
     /// nobody wrote.
@@ -250,6 +259,7 @@ impl ToolRuntime for ToolSet {
         self.runtimes
             .iter()
             .flat_map(|runtime| runtime.definitions())
+            .filter(|definition| self.owners.contains_key(&definition.name))
             .collect()
     }
 

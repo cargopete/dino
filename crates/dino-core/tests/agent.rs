@@ -454,6 +454,31 @@ async fn a_tool_set_dispatches_by_tool_name() {
     );
 }
 
+#[tokio::test]
+async fn a_tool_left_out_of_a_tool_set_is_neither_offered_nor_run() {
+    let tools = ToolSet::new(vec![
+        Box::new(EchoTool { name: "first" }),
+        Box::new(EchoTool { name: "second" }),
+    ])
+    .unwrap()
+    .keeping(|name| name == "first");
+
+    let names: Vec<String> = tools
+        .definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let refused = tools
+        .classify(&tool_call("call-1", "second", "unused"))
+        .unwrap_err();
+
+    assert_eq!(names, vec!["first".to_owned()]);
+    assert_eq!(
+        refused.to_string(),
+        "unknown tool \"second\". The tools are: first."
+    );
+}
+
 /// A window small enough that the fractions land on readable numbers.
 const WINDOW: u32 = 1_000;
 

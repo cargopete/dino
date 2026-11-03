@@ -803,6 +803,23 @@ pub fn describe_call(call: &ToolCall) -> String {
             }
         }),
         "web_fetch" => argument_string(&call.arguments, "url"),
+        "schedule_create" | "schedule_update" => {
+            let when = ["delay", "at", "every", "daily", "weekly", "cron"]
+                .into_iter()
+                .find_map(|key| argument_string(&call.arguments, key).map(|value| (key, value)));
+            let id = argument_string(&call.arguments, "id");
+            let message = argument_string(&call.arguments, "message");
+            let parts: Vec<String> = [
+                id,
+                when.map(|(key, value)| format!("{key} {value}")),
+                message.map(|message| format!("{message:?}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        "schedule_delete" => argument_string(&call.arguments, "id"),
         "cargo" => argument_string(&call.arguments, "command").map(|command| {
             let package = argument_string(&call.arguments, "package")
                 .map_or_else(String::new, |package| format!(" -p {package}"));
@@ -1244,5 +1261,18 @@ mod tests {
         assert!(older.contains("190000 of 262144);"), "{older}");
         assert!(!older.contains("documented"));
         assert!(!older.contains("served"));
+    }
+
+    #[test]
+    fn a_schedule_is_described_by_its_timing_and_message() {
+        let call = dino_protocol::ToolCall {
+            id: "1".into(),
+            name: "schedule_create".into(),
+            arguments: serde_json::json!({"message": "check CI", "delay": "20m"}),
+        };
+        assert_eq!(
+            super::describe_call(&call),
+            "schedule_create delay 20m \"check CI\""
+        );
     }
 }

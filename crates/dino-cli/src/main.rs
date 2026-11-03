@@ -10,6 +10,7 @@ mod handover;
 mod listen;
 mod markdown;
 mod plugin;
+mod preset;
 mod probe;
 mod recall;
 mod remote;
@@ -176,6 +177,10 @@ struct CommonArgs {
     /// in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
+    /// The tools offered and the limits started under: standard, minimal or
+    /// review. Default standard.
+    #[arg(long, value_enum)]
+    preset: Option<preset::Preset>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -420,8 +425,13 @@ fn session_tool_set(
     sandbox: &Arc<dyn Sandbox>,
     extra: Vec<Box<dyn ToolRuntime>>,
 ) -> Result<ToolSet> {
-    let mut mcp = connect_mcp(&settings.mcp, &settings.workspace, sandbox);
+    let mut mcp = if settings.preset.connects_mcp() {
+        connect_mcp(&settings.mcp, &settings.workspace, sandbox)
+    } else {
+        Vec::new()
+    };
     mcp.extend(extra);
+    let preset = settings.preset;
     tool_set(
         &settings.workspace,
         Arc::clone(sandbox),
@@ -434,6 +444,7 @@ fn session_tool_set(
         ),
         mcp,
     )
+    .map(|tools| tools.keeping(|name| preset.offers(name)))
 }
 
 /// Starts each configured MCP server and lists its tools. A server that fails
@@ -872,14 +883,36 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
     ended
 }
 
+/// The workspace's schedules. Only a session that stays open can be sent what
+/// comes due, so a one-shot run, a handover, a review and an eval never get them.
+fn schedules(common: &CommonArgs) -> Result<(session::Due, Box<dyn ToolRuntime>)> {
+    let workspace = config::resolve_workspace(common.workspace.as_deref())?;
+    let due = session::Due {
+        store: dino_core::schedule::Schedules::in_workspace(&workspace),
+        conversation: dino_core::schedule::Conversation::default(),
+        clock: dino_core::schedule::system_clock(),
+        reported: None,
+    };
+    let tools =
+        dino_core::schedule::ScheduleTools::new(due.store.clone(), Arc::clone(&due.conversation));
+    Ok((due, Box::new(tools)))
+}
+
 /// Runs one session, and returns the workspace a page asked to move to, if one
-/// did.
+/// did. A move starts a new session there, with that workspace's schedules.
 async fn drive(
     common: CommonArgs,
     remote: Option<&mut Remote>,
 ) -> Result<Option<std::path::PathBuf>> {
     let hub = remote.as_ref().map(|remote| Arc::clone(&remote.hub));
-    let prepared = prepare(&common, false, Vec::new(), hub.as_ref())?;
+    let (due, tools) = schedules(&common)?;
+    let prepared = prepare(&common, false, vec![tools], hub.as_ref())?;
+    // Kept only when the preset offers the tools.
+    let schedules = prepared
+        .definitions
+        .iter()
+        .any(|definition| definition.name == dino_core::schedule::CREATE)
+        .then_some(due);
     if let Some(file) = settings::recent_workspaces_path() {
         let _ = remote::note_workspace(&file, &prepared.settings.workspace);
     }
@@ -954,7 +987,9 @@ async fn drive(
             stdin().is_terminal(),
         ),
         remote: hub,
+        schedules,
     };
+    session.note_conversation();
     let moving = if let Some(remote) = remote {
         session.serve(&mut remote.requests).await?
     } else {
@@ -1025,6 +1060,7 @@ async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
         request.push_str(&untracked);
     }
     args.common.read_only = true;
+    args.common.preset.get_or_insert(preset::Preset::Review);
     run(RunArgs {
         prompt: Some(request),
         handover: false,
@@ -1285,6 +1321,7 @@ pub(crate) fn save_state<S: ModelSession, T: dino_core::ToolRuntime>(
 /// Everything a run needs, with each value's origin, for `dino config`.
 struct Resolved {
     model: (Option<String>, Source),
+    preset: (preset::Preset, Source),
     max_turns: (NonZeroU32, Source),
     approvals: (ApprovalMode, Source),
     sandbox: (SandboxMode, Source),
@@ -1394,6 +1431,14 @@ fn end_hooks(layers: &Layers) -> Vec<task::EndHook> {
 /// default.
 fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
     let layers = Layers::load(workspace)?;
+    let preset = args.preset.map_or_else(
+        || {
+            layers
+                .pick(|file| file.preset)
+                .unwrap_or((preset::Preset::Standard, Source::Default))
+        },
+        |preset| (preset, Source::Flag),
+    );
 
     let model = if let Some(model) = args.model.clone() {
         (Some(model), Source::Flag)
@@ -1416,6 +1461,7 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
     } else {
         (ApprovalMode::Interactive, Source::Default)
     };
+    let approvals = with_preset(preset, approvals)?;
 
     let api_base = if let Some(base) = args.api_base.clone() {
         (Some(base), Source::Flag)
@@ -1439,15 +1485,7 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
 
     Ok(Resolved {
         model,
-        max_turns: args.max_turns.map_or_else(
-            || {
-                layers.pick(|file| file.max_turns).unwrap_or((
-                    NonZeroU32::new(100).expect("100 is non-zero"),
-                    Source::Default,
-                ))
-            },
-            |turns| (turns, Source::Flag),
-        ),
+        max_turns: max_turns(args, &layers, preset),
         approvals,
         sandbox: args.sandbox.map_or_else(
             || {
@@ -1496,8 +1534,46 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
             .filter(|(command, _)| !command.is_empty()),
         task_limits: layers.task_limits()?,
         mcp: mcp_servers(&layers),
+        preset,
         layers,
     })
+}
+
+/// The flag, then a file, then the preset, then 100.
+fn max_turns(
+    args: &CommonArgs,
+    layers: &Layers,
+    preset: (preset::Preset, Source),
+) -> (NonZeroU32, Source) {
+    args.max_turns.map_or_else(
+        || {
+            layers
+                .pick(|file| file.max_turns)
+                .or_else(|| preset.0.max_turns().map(|turns| (turns, preset.1)))
+                .unwrap_or((
+                    NonZeroU32::new(100).expect("100 is non-zero"),
+                    Source::Default,
+                ))
+        },
+        |turns| (turns, Source::Flag),
+    )
+}
+
+/// The approvals a preset requires in place of looser ones from a file. A flag
+/// that contradicts it is refused rather than quietly overruled.
+fn with_preset(
+    preset: (preset::Preset, Source),
+    approvals: (ApprovalMode, Source),
+) -> Result<(ApprovalMode, Source)> {
+    match preset.0.approvals() {
+        Some(required) if approvals.0 != required && approvals.1 == Source::Flag => bail!(
+            "the {} preset requires {}; drop the approval flag",
+            preset.0.name(),
+            required.label()
+        ),
+        Some(required) => Ok((required, preset.1)),
+        None => Ok(approvals),
+    }
 }
 
 fn compaction(layers: &Layers) -> config::Compaction {
@@ -1653,10 +1729,25 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         ..CommonArgs::default()
     };
     let resolved = resolve(&common, &workspace)?;
+    print!(
+        "{}",
+        crate::render::status_block(&config_rows(&resolved, &workspace))
+    );
+    println!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            "  a project file may not set approvals, sandbox or api base",
+        )
+    );
+    Ok(())
+}
 
+/// What `dino config` shows: each setting, its value and where it came from.
+fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, String)> {
     let show = |value: String, source: Source| format!("{value}  ({})", source.label());
     let switch = |(on, source): (bool, Source)| show(on.to_string(), source);
-    let rows = vec![
+    vec![
         (
             "model",
             show(
@@ -1671,6 +1762,10 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         (
             "workspace",
             format!("{}  (where you are)", workspace.display()),
+        ),
+        (
+            "preset",
+            show(resolved.preset.0.label().to_owned(), resolved.preset.1),
         ),
         (
             "approvals",
@@ -1738,16 +1833,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
             file_named(resolved.layers.project_path.as_ref()),
         ),
         ("user file", file_named(resolved.layers.user_path.as_ref())),
-    ];
-    print!("{}", crate::render::status_block(&rows));
-    println!(
-        "{}",
-        style::paint(
-            style::FAINT,
-            "  a project file may not set approvals, sandbox or api base",
-        )
-    );
-    Ok(())
+    ]
 }
 
 fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
@@ -1799,6 +1885,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         fallback,
         budget: resolved.budget,
         review,
+        preset: resolved.preset.0,
     })
 }
 
@@ -1811,6 +1898,7 @@ fn interactive_policy<A: Approver + 'static>(
 ) -> Box<dyn ApprovalPolicy> {
     let guarded = dino_sandbox::EXECUTABLE_CONFIG
         .iter()
+        .chain([&dino_core::schedule::DIR])
         .map(PathBuf::from)
         .collect();
     let interactive = Interactive::new(approver).guarding(guarded);
@@ -1920,6 +2008,30 @@ mod tests {
                 Some("kimi-k3.1-pro")
             ),
             "high  (flag)"
+        );
+    }
+
+    #[test]
+    fn a_preset_is_chosen_by_name() {
+        assert_eq!(
+            parsed(&["--preset", "minimal"]).unwrap().common.preset,
+            Some(preset::Preset::Minimal)
+        );
+        assert!(parsed(&["--preset", "huge"]).is_err());
+    }
+
+    #[test]
+    fn the_review_preset_overrules_a_file_but_refuses_a_contrary_flag() {
+        let review = (preset::Preset::Review, Source::Flag);
+        assert_eq!(
+            with_preset(review, (ApprovalMode::AllowAll, Source::UserFile)).unwrap(),
+            (ApprovalMode::ReadOnly, Source::Flag)
+        );
+        assert!(with_preset(review, (ApprovalMode::AcceptEdits, Source::Flag)).is_err());
+        let standard = (preset::Preset::Standard, Source::Default);
+        assert_eq!(
+            with_preset(standard, (ApprovalMode::AcceptEdits, Source::Flag)).unwrap(),
+            (ApprovalMode::AcceptEdits, Source::Flag)
         );
     }
 }

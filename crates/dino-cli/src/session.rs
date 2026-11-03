@@ -199,6 +199,7 @@ enum Input {
     Auto,
     Init,
     Log,
+    Schedules,
     Exit,
     Unknown(String),
     Blank,
@@ -256,6 +257,7 @@ fn parse(line: &str) -> Input {
         "rename" => Input::Rename(remainder()),
         "plan" => Input::Plan(remainder()),
         "log" => Input::Log,
+        "schedules" => Input::Schedules,
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
         other if rest.trim() == other => Input::Unknown(other.to_owned()),
@@ -340,6 +342,69 @@ const PLAN_MODE: &str = "Plan mode. Investigate with read-only tools: read, sear
     github and web_fetch. Edits and processes are refused until the person accepts a plan. \
     End with a short numbered plan, each step naming the files it touches, and stop there.";
 
+/// How often a session looks for schedules come due.
+const SCHEDULE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A session's schedules, and the conversation they are stamped with.
+pub struct Due {
+    pub store: dino_core::schedule::Schedules,
+    /// Shared with the schedule tools, and kept to the conversation open.
+    pub conversation: dino_core::schedule::Conversation,
+    pub clock: dino_core::schedule::Clock,
+    /// The last error reading them, so a poll does not repeat it.
+    pub reported: Option<String>,
+}
+
+/// Says at the prompt, as it happens, that a schedule has come due. The line
+/// editor cannot be interrupted, so it is sent once the person presses Enter.
+struct PromptWatch {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PromptWatch {
+    fn start(
+        mut printer: impl rustyline::ExternalPrinter + Send + 'static,
+        due: &Due,
+        at_prompt: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        use std::sync::atomic::Ordering;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let (store, conversation, clock) = (
+            due.store.clone(),
+            Arc::clone(&due.conversation),
+            Arc::clone(&due.clock),
+        );
+        std::thread::spawn(move || {
+            let mut announced = std::collections::HashSet::new();
+            while !stopping.load(Ordering::Relaxed) {
+                std::thread::sleep(SCHEDULE_POLL);
+                if !at_prompt.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let open = conversation.lock().map(|id| id.clone()).unwrap_or_default();
+                for schedule in store.due(clock(), &open).unwrap_or_default() {
+                    if announced.insert((schedule.id.clone(), schedule.next_due)) {
+                        let line = format!(
+                            "  {} is due: {}. Enter sends it.",
+                            schedule.id,
+                            dino_core::text::capped_head(schedule.message.trim(), 120)
+                        );
+                        let _ = printer.print(format!("{}\n", style::paint(PURPLE, &line)));
+                    }
+                }
+            }
+        });
+        Self { stop }
+    }
+}
+
+impl Drop for PromptWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Builds a fresh model session for a profile key, with its display name.
 pub type SessionFactory<S> = Box<dyn Fn(&str) -> Result<(S, String)>>;
 
@@ -400,6 +465,8 @@ pub struct Session<S> {
     pub greeting: bool,
     /// Set when pages are watching and driving this session, as `dino serve`.
     pub remote: Option<Arc<crate::remote::Hub>>,
+    /// Set when the session offers the schedule tools.
+    pub schedules: Option<Due>,
 }
 
 impl<S> Session<S>
@@ -432,6 +499,12 @@ where
         if let Some(offer) = self.offer_resume() {
             println!("{offer}");
         }
+        self.announce_waiting();
+        let at_prompt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _watch = self.schedules.as_ref().and_then(|due| {
+            let printer = editor.create_external_printer().ok()?;
+            Some(PromptWatch::start(printer, due, Arc::clone(&at_prompt)))
+        });
         // The prompt is the person's own line, so it wears the person's colour.
         let prompt = match style::EMBER.sequence() {
             sequence if sequence.is_empty() => "› ".to_owned(),
@@ -439,6 +512,9 @@ where
         };
 
         loop {
+            if self.queued.is_empty() && !self.awaiting_plan {
+                self.deliver_due().await;
+            }
             let line = if let Some(queued) = self.queued.pop_front() {
                 println!("{prompt}{queued}");
                 queued
@@ -448,7 +524,10 @@ where
                 // every keystroke would buy nothing.
                 let mut typed = std::mem::take(&mut self.typed_ahead);
                 typed.push_str(&crate::style::take_typeahead());
-                match editor.readline_with_initial(&prompt, (&typed, "")) {
+                at_prompt.store(true, std::sync::atomic::Ordering::Relaxed);
+                let read = editor.readline_with_initial(&prompt, (&typed, ""));
+                at_prompt.store(false, std::sync::atomic::Ordering::Relaxed);
+                match read {
                     Ok(line) => {
                         let _ = editor.add_history_entry(line.as_str());
                         line
@@ -494,9 +573,17 @@ where
         self.describe_to(&hub);
         hub.set_busy(false);
         println!("{}", self.opening());
+        self.announce_waiting();
         loop {
+            // Busy while a schedule runs, so a page's resume or move waits its turn.
+            if self.deliver_due().await {
+                self.drain_queued_remotely().await;
+                hub.set_busy(false);
+            }
+            let watching = self.schedules.is_some();
             let request = tokio::select! {
                 request = requests.recv() => request,
+                () = tokio::time::sleep(SCHEDULE_POLL), if watching => continue,
                 _ = tokio::signal::ctrl_c() => None,
             };
             let Some(request) = request else { break };
@@ -504,19 +591,7 @@ where
                 crate::remote::Request::Prompt(prompt) => {
                     hub.set_busy(true);
                     self.submit(prompt).await;
-                    while let Some(line) = self.queued.pop_front() {
-                        if is_command(&line) {
-                            println!(
-                                "{}",
-                                style::paint(
-                                    FAINT,
-                                    &format!("  {line}: not a command while serving")
-                                )
-                            );
-                        } else {
-                            self.submit(line).await;
-                        }
-                    }
+                    self.drain_queued_remotely().await;
                 }
                 crate::remote::Request::Resume(id) => {
                     if self.resume(&id) {
@@ -549,6 +624,156 @@ where
             log,
             root: self.workspace_root.clone(),
         });
+    }
+
+    /// Runs what was entered during a served run, which has no commands.
+    async fn drain_queued_remotely(&mut self) {
+        while let Some(line) = self.queued.pop_front() {
+            if is_command(&line) {
+                println!(
+                    "{}",
+                    style::paint(FAINT, &format!("  {line}: not a command while serving"))
+                );
+            } else {
+                self.submit(line).await;
+            }
+        }
+    }
+
+    /// Sends what has come due for the open conversation, each as a submission
+    /// of its own, in the order it fell due. Returns whether it sent any, having
+    /// marked a served session busy first.
+    async fn deliver_due(&mut self) -> bool {
+        let open = self.current_id();
+        let Some(due) = &mut self.schedules else {
+            return false;
+        };
+        let found = due.store.due((due.clock)(), &open);
+        let schedules = match found {
+            Ok(schedules) => {
+                due.reported = None;
+                schedules
+            }
+            Err(error) => {
+                let error = error.to_string();
+                if due.reported.as_ref() != Some(&error) {
+                    println!("{}", style::paint(style::WARN, &format!("  {error}")));
+                    due.reported = Some(error);
+                }
+                return false;
+            }
+        };
+        let (store, clock) = (due.store.clone(), Arc::clone(&due.clock));
+        let mut sent = false;
+        for schedule in schedules {
+            match store.claim(&schedule, clock()) {
+                Ok(Some(text)) => {
+                    if let Some(hub) = &self.remote {
+                        hub.set_busy(true);
+                    }
+                    sent = true;
+                    let said = format!("{} came due; sending it", schedule.id);
+                    self.tell(&said);
+                    println!("{}", style::paint(PURPLE, &format!("  {said}")));
+                    self.submit(text).await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    println!("{}", style::paint(style::WARN, &format!("  {error}")));
+                }
+            }
+        }
+        sent
+    }
+
+    /// Names the schedules due for conversations other than this one, which
+    /// wait until a session resumes theirs.
+    fn announce_waiting(&self) {
+        let Some(due) = &self.schedules else {
+            return;
+        };
+        let waiting = match due
+            .store
+            .waiting_elsewhere((due.clock)(), &self.current_id())
+        {
+            Ok(waiting) => waiting,
+            Err(error) => {
+                println!("{}", style::paint(style::WARN, &format!("  {error}")));
+                return;
+            }
+        };
+        if waiting.is_empty() {
+            return;
+        }
+        let named = waiting
+            .iter()
+            .map(|schedule| format!("{} for {}", schedule.id, schedule.conversation))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{}",
+            style::paint(
+                style::WARN,
+                &format!(
+                    "  due for other conversations: {named}. /resume <id> sends them; \
+                     /schedules lists every one."
+                )
+            )
+        );
+    }
+
+    /// Every schedule in the workspace, and how many deliveries were recorded.
+    fn schedules(&self) -> String {
+        let Some(due) = &self.schedules else {
+            return style::paint(FAINT, "  this session has no schedule tools\n");
+        };
+        let open = self.current_id();
+        let mut block = String::new();
+        match due.store.all() {
+            Ok(schedules) if schedules.is_empty() => {
+                block.push_str(&style::paint(FAINT, "  no schedules in this workspace\n"));
+            }
+            Ok(schedules) => {
+                for schedule in schedules {
+                    let _ = writeln!(
+                        &mut block,
+                        "  {}",
+                        style::paint(MUTED, &schedule.summary(&open))
+                    );
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    &mut block,
+                    "  {}",
+                    style::paint(style::WARN, &error.to_string())
+                );
+            }
+        }
+        let recorded = due.store.deliveries().len();
+        if recorded > 0 {
+            let _ = writeln!(
+                &mut block,
+                "{}",
+                style::paint(
+                    FAINT,
+                    &format!(
+                        "  {recorded} deliveries recorded in .dino/schedules/deliveries.jsonl; \
+                         each says a message was sent, not that its work was done"
+                    )
+                )
+            );
+        }
+        block
+    }
+
+    /// Tells the schedule tools which conversation is now open.
+    pub fn note_conversation(&self) {
+        if let Some(due) = &self.schedules
+            && let Ok(mut open) = due.conversation.lock()
+        {
+            *open = self.current_id();
+        }
     }
 
     /// Says something to the pages, when there are any.
@@ -604,6 +829,7 @@ where
                 println!("{}", style::paint(FAINT, &self.keep_going_banner()));
             }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
+            Input::Schedules => print!("{}", self.schedules()),
             Input::Unknown(name) => println!(
                 "{}",
                 style::paint(FAINT, &format!("no such command: /{name}. Try /help."))
@@ -1055,6 +1281,7 @@ where
                 // An empty conversation is never written, so there may be nothing to name.
                 let previous = self.state_path.is_file().then(|| self.current_id());
                 self.state_path = dino_core::resume::state_path(&self.workspace_root, &id);
+                self.note_conversation();
                 key.clone_into(&mut self.model_key);
                 self.model = name;
                 let note = previous.map_or_else(String::new, |previous| {
@@ -1105,6 +1332,7 @@ where
                     .ok()
                     .and_then(|label| label.name);
                 self.state_path = path;
+                self.note_conversation();
                 self.model_key = key;
                 self.model = name;
                 println!(
@@ -1409,6 +1637,10 @@ fn help() -> String {
         ),
         ("/auto", "see every message through, or stop doing so"),
         ("/log", "the path of this session's log"),
+        (
+            "/schedules",
+            "reminders and recurring messages in this workspace",
+        ),
         ("/exit", "leave; Ctrl-D does the same"),
     ];
     let mut block = String::new();
@@ -1416,7 +1648,7 @@ fn help() -> String {
         let _ = writeln!(
             &mut block,
             "  {}  {}",
-            style::paint(PURPLE, &format!("{command:<8}")),
+            style::paint(PURPLE, &format!("{command:<10}")),
             style::paint(MUTED, description)
         );
     }
