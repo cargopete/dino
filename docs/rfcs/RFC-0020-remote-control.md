@@ -52,7 +52,8 @@ matters.
 - A prompt sent while a run is under way goes to the model with its next tool
   results, exactly as a line typed at the terminal does. Sent while idle, it
   starts a run. **Slash commands are not available from a page**: `/clear`,
-  `/model`, `/resume` and `/compact` stay at the terminal.
+  `/model` and `/compact` stay at the terminal. Resuming is offered as a list
+  instead, section 9.
 - Stop from the page is ctrl-c: it cancels the run, and the conversation is
   intact.
 
@@ -133,7 +134,8 @@ assumption is that whoever holds the means to drive it is the person.
   the same stream and can be written against it.
 - **A relay**, so that a session behind NAT can be reached with no tunnel.
 - **Several sessions in one page**, accounts, or per-device tokens.
-- **Slash commands, attachments and images from the page.**
+- **Slash commands, attachments and images from the page.** Resume and a
+  change of workspace are lists rather than commands, section 9.
 - **A restart that keeps the page's place**: the backlog is in memory.
   `--resume` restores the conversation (RFC-0014), not the page.
 - **TLS.** Tailscale and SSH already encrypt, and a self-signed certificate on a
@@ -171,3 +173,39 @@ idle stop said so.
 browser, so its layout, scrolling and the phone case are unseen. Nothing was
 tried over a real Tailscale interface. The SSE stream was read with `curl` and
 the test client, not with a browser's `fetch`.
+
+## 9. Sessions, workspaces and the trajectory (2026-11-03)
+
+Added for #241, items 6 and 7.
+
+```text
+GET  /api/sessions     the workspace's saved conversations and logs: id, /rename name, age, model
+GET  /api/trace?id=    one log's trajectory, as `dino trace --json`, strings cut to 2 KiB
+POST /api/resume       {"id"}   continue a listed conversation
+GET  /api/workspaces   the current workspace, those in `workspaces`, and the recently used
+POST /api/workspace    {"path"} end this session and start one there
+```
+
+- **A page picks; it never names.** A resume id must be a saved conversation the
+  listing would return, and a trace id must match `[A-Za-z0-9_-]{1,64}` and be a
+  log in the current workspace's `.dino/sessions`, so neither can leave that
+  directory. A workspace must equal, byte for byte, a path the listing offers.
+  There is no browsing of the filesystem from the page.
+- **Where the workspaces come from.** `workspaces = [...]` in the user file,
+  which a project file may not set: a repository should not be able to add a
+  directory the page can reach. And the last ten workspaces an interactive or
+  served session ran in, kept in `$XDG_STATE_HOME/dino/workspaces` (by default
+  `~/.local/state/dino/workspaces`), outside any workspace a sandboxed process
+  can write. Only directories that exist are offered.
+- **A move restarts the session**, with the flags `dino serve` was started with,
+  in the new workspace, which reads that workspace's own project file. The
+  token, the listener and the page stay; the backlog says where it moved. If
+  the new workspace will not start, the session goes back to the old one and the
+  page is told why. Approval modes carry over as given: a `dino serve
+  --dangerously-allow-all` that moves is allow-all there too.
+- **Only while idle.** A resume or a move while a run is under way is refused
+  with 409, so neither can cut a run off.
+- **What a token holder gains.** The page reads the current workspace's logs
+  directly, cut to 2 KiB a string, and a listed workspace's after a move. Logs
+  hold tool output, so this is the session's own history, over workspaces the
+  person named in advance or worked in.

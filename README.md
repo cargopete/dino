@@ -183,7 +183,10 @@ CI and evals.
   Tailscale address, wants a fresh 256-bit token in a header on every request,
   and offers a page fewer approval answers than the terminal (nothing that is
   kept beyond the call's exact tool and subject, and no leaving the sandbox).
-  RFC-0020; the page has not been run in a browser.
+  The page also lists the workspace's sessions to resume or trace, and moves
+  the session to another workspace, but only one listed under `workspaces` in
+  the user file or recently used. RFC-0020; the page has not been run in a
+  browser.
 - **A turn budget.** `--max-turns` bounds a submission, 100 by default. The
   model is told the limit in its system prompt, sees the count from half-way, is
   counted down over its last three turns, and is told to make no calls in its
@@ -220,7 +223,11 @@ CI and evals.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `dino replay` renders a past session through the same renderer the live one
-  uses, with `--last N` for the recent exchanges.
+  uses, with `--last N` for the recent exchanges. `dino trace` shows where the
+  time went: each submission, turn and call with its input and output (cut to
+  2 KiB, `--full` for more), the model's time per turn, each call's run and the
+  wait for a person's approval, from the times every log record already
+  carries; `--json` for the same as data.
 - **Configuration, split by who wrote it.** `~/.config/dino/config.toml` for your
   defaults, `<workspace>/.dino/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
