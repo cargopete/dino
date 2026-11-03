@@ -379,7 +379,8 @@ impl dino_core::FinishCheck for EndTurnHooks {
 /// How a run ended, as a task-end hook is told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEnd {
-    /// One word: `finished`, `failed`, `cancelled` or `stopped`.
+    /// One word: `finished`, `failed`, `cancelled` or `stopped`. `finished`
+    /// means the model ended its turn, not that anything checked the work.
     pub status: String,
     /// A sentence or two for a person to read where the ping lands.
     pub message: String,
@@ -390,7 +391,8 @@ pub struct TaskEnd {
 /// wrong with any, by program name only: an argument may be a webhook token.
 ///
 /// Outside the sandbox, because a ping has to reach the network. The hook is
-/// from the user file, which a repository cannot write.
+/// from the user file, which a repository cannot write. A hook that exits 0 ran;
+/// whether its message arrived is the hook's affair, and nothing is retried.
 pub async fn run_task_end_hooks(
     hooks: &[Hook],
     root: &std::path::Path,

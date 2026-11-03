@@ -315,6 +315,9 @@ fn plain_words(line: &str) -> Option<Vec<String>> {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ExecOutput {
+    /// The call already holds it; a long one, such as an edit script, is only
+    /// echoed at the cost of context.
+    #[serde(skip_serializing_if = "too_long_to_echo")]
     pub(crate) command: String,
     pub(crate) exit_code: Option<i32>,
     pub(crate) timed_out: bool,
@@ -333,6 +336,13 @@ pub(crate) struct ExecOutput {
     /// Tracked files the command wrote, and what to use instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrote_tracked: Option<String>,
+}
+
+/// Longest command, in characters, that a result repeats.
+const MAX_ECHOED_COMMAND_CHARS: usize = 200;
+
+fn too_long_to_echo(command: &str) -> bool {
+    command.chars().count() > MAX_ECHOED_COMMAND_CHARS
 }
 
 pub(crate) fn json_output<T: Serialize>(value: &T) -> Result<ToolOutput, ToolError> {

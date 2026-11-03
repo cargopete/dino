@@ -1050,6 +1050,37 @@ async fn reporting_a_blocker_ends_the_run_with_the_reason() {
         result.text
     );
     assert_eq!(agent.session().inputs.len(), 1, "no turn after the blocker");
+
+    agent.run("then do it the spec's way").await.unwrap();
+    let inputs = &agent.session().inputs;
+    let TurnInput::ToolResults { results, .. } = &inputs[1] else {
+        panic!("the next run must answer the blocker call: {:?}", inputs[1]);
+    };
+    assert_eq!(results[0].call_id, "call-1");
+    assert!(!results[0].output.is_error);
+    assert!(note_of(&inputs[1]).contains("report_blocker"));
+}
+
+#[tokio::test]
+async fn results_left_unsent_are_dropped_with_the_conversation_they_answer() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![tool_turn(tool_call("call-1", "read", "a.rs"))]),
+        ScriptedTools::default(),
+        AgentConfig {
+            max_model_turns: std::num::NonZeroU32::new(1).unwrap(),
+            ..AgentConfig::default()
+        },
+    );
+    agent.run("read it").await.unwrap_err();
+
+    agent.replace_session(ScriptedSession::new(vec![text_turn("fresh")]));
+    agent.run("start over").await.unwrap();
+
+    assert!(
+        matches!(agent.session().inputs[0], TurnInput::User { .. }),
+        "{:?}",
+        agent.session().inputs[0]
+    );
 }
 
 /// Says the work is unfinished every time it is asked, and counts the asking.
@@ -1675,6 +1706,25 @@ fn a_call_with_unparsed_arguments_is_refused_with_what_was_sent() {
     assert!(error.contains("not valid JSON"), "{error}");
     assert!(error.contains("{items: x}"), "{error}");
     assert!(error.contains("key must be a string"), "{error}");
+}
+
+#[test]
+fn an_array_sent_as_a_string_is_refused_and_not_guessed_back() {
+    let tools = ToolSet::new(vec![Box::new(dino_core::todo::TodoTool)]).unwrap();
+    // As Haiku sent `edits`, with `">` where `": "` belongs.
+    let call = dino_protocol::ToolCall {
+        id: "call-1".into(),
+        name: "todo".into(),
+        arguments: serde_json::json!({"items": "[{\"text\">, \"status\": \"done\"}]"}),
+    };
+
+    let error = tools.classify(&call).unwrap_err().to_string();
+
+    assert!(
+        error.starts_with("`items` was sent as a string. It must be a JSON array"),
+        "{error}"
+    );
+    assert!(error.contains("`\">` where JSON puts `\": \"`"), "{error}");
 }
 
 fn todo_turn(items: &serde_json::Value) -> support::Turn {

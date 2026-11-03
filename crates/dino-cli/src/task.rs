@@ -417,14 +417,19 @@ pub fn ping_message(
     let place = workspace
         .file_name()
         .map_or_else(|| "workspace".into(), |name| name.to_string_lossy());
+    // A model that ends its turn has stopped, which is not a check that the
+    // work is done; what it says is its own account.
+    let (ended, said) = match outcome.status {
+        "finished" => ("ended its turn", ", saying: "),
+        status => (status, ": "),
+    };
     let mut line = format!(
-        "dino {} after {} in {place} on {model} ({})",
-        outcome.status,
+        "dino {ended} after {} in {place} on {model} ({})",
         duration_text(elapsed),
         usd(spent.usd)
     );
     if !outcome.detail.is_empty() {
-        line.push_str(": ");
+        line.push_str(said);
         line.push_str(&outcome.detail);
     }
     line
@@ -710,6 +715,22 @@ mod tests {
         assert_eq!(
             line,
             "dino failed after 36m in nuthatch on claude-sonnet ($3.10): model transport failed"
+        );
+        let finished = Outcome {
+            status: "finished",
+            detail: "All tests pass.".into(),
+        };
+        let line = ping_message(
+            &finished,
+            Duration::from_secs(36 * 60),
+            std::path::Path::new("/work/nuthatch"),
+            "claude-sonnet",
+            spent,
+        );
+        assert_eq!(
+            line,
+            "dino ended its turn after 36m in nuthatch on claude-sonnet ($3.10), saying: \
+             All tests pass."
         );
     }
 }

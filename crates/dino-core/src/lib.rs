@@ -142,6 +142,8 @@ pub struct ToolSet {
     owners: HashMap<String, usize>,
     /// Tool name to the optional arguments no empty string can satisfy.
     blank_is_absent: HashMap<String, Vec<String>>,
+    /// Tool name to its array and object arguments, with their type.
+    structured: HashMap<String, Vec<(String, &'static str)>>,
 }
 
 impl ToolSet {
@@ -155,11 +157,16 @@ impl ToolSet {
     pub fn new(runtimes: Vec<Box<dyn ToolRuntime>>) -> Result<Self, ToolError> {
         let mut owners = HashMap::new();
         let mut blank_is_absent = HashMap::new();
+        let mut structured = HashMap::new();
         for (index, runtime) in runtimes.iter().enumerate() {
             for definition in runtime.definitions() {
                 let blank = blank_means_absent(&definition.input_schema);
                 if !blank.is_empty() {
                     blank_is_absent.insert(definition.name.clone(), blank);
+                }
+                let shaped = structured_properties(&definition.input_schema);
+                if !shaped.is_empty() {
+                    structured.insert(definition.name.clone(), shaped);
                 }
                 if owners.insert(definition.name.clone(), index).is_some() {
                     return Err(ToolError::new(format!(
@@ -173,7 +180,31 @@ impl ToolSet {
             runtimes,
             owners,
             blank_is_absent,
+            structured,
         })
+    }
+
+    /// Refuses an array or object argument sent as a string. It is not parsed
+    /// back: every one seen was broken JSON, and a guessed repair is an edit
+    /// nobody wrote.
+    fn refuse_stringified(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let Some(properties) = self.structured.get(&call.name) else {
+            return Ok(());
+        };
+        for (name, kind) in properties {
+            let Some(Value::String(text)) = call.arguments.get(name) else {
+                continue;
+            };
+            let mut message = format!(
+                "`{name}` was sent as a string. It must be a JSON {kind} itself, not text that \
+                 spells one. Send the call again with `{name}` as a JSON {kind}."
+            );
+            if text.contains("\">") {
+                message.push_str(" The string also has `\">` where JSON puts `\": \"`.");
+            }
+            return Err(ToolError::new(message));
+        }
+        Ok(())
     }
 
     /// Drops the empty strings sent for optional arguments that cannot be
@@ -232,6 +263,7 @@ impl ToolRuntime for ToolSet {
                 unparsed["raw"].as_str().unwrap_or_default(),
             )));
         }
+        self.refuse_stringified(call)?;
         self.owner(call)?.classify(&self.normalise(call))
     }
 
@@ -253,6 +285,23 @@ impl ToolRuntime for ToolSet {
             runtime.begin_turn(calls);
         }
     }
+}
+
+/// The properties of a tool schema that only an array or an object satisfies.
+fn structured_properties(schema: &Value) -> Vec<(String, &'static str)> {
+    schema["properties"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, property)| {
+            let kind = match property["type"].as_str()? {
+                "array" => "array",
+                "object" => "object",
+                _ => return None,
+            };
+            Some((name.clone(), kind))
+        })
+        .collect()
 }
 
 /// The optional properties of a tool schema that no empty string satisfies:
@@ -434,9 +483,38 @@ struct Turn<'a> {
 enum Settled {
     /// The results, and what dino noticed while they ran.
     Results(Vec<ToolResult>, Vec<String>),
-    /// The model reported a blocker, and this is what it said.
-    Blocked(String),
+    /// The model reported a blocker, and this is what it said, with the
+    /// turn's results.
+    Blocked(String, Vec<ToolResult>),
     Cancelled,
+}
+
+/// Tool results a run computed and never sent. The provider's history ends in
+/// their calls, so the next submission must answer them before anything else.
+struct Unsent {
+    results: Vec<ToolResult>,
+    note: Option<String>,
+    /// Why they were not sent, for the model.
+    why: &'static str,
+}
+
+impl Unsent {
+    fn at_turn_limit(results: Vec<ToolResult>, note: Option<String>) -> Self {
+        Self {
+            results,
+            note,
+            why: "[dino: the last submission reached its turn limit before these results were sent.]",
+        }
+    }
+
+    fn after_blocker(results: Vec<ToolResult>) -> Self {
+        Self {
+            results,
+            note: None,
+            why: "[dino: the last submission ended at your report_blocker; these are that turn's \
+                  results.]",
+        }
+    }
 }
 
 /// What a turn came to, once any broken streams have been sent again.
@@ -489,9 +567,8 @@ pub struct Agent<S, T> {
     /// Images for the next submission's first turn.
     pending_images: Vec<dino_protocol::Image>,
     /// Tool results a run computed but never sent, because it hit the turn
-    /// limit. The provider's history ends in those calls, so the next
-    /// submission must answer them before anything else.
-    unsent: Option<(Vec<ToolResult>, Option<String>)>,
+    /// limit or ended at a blocker.
+    unsent: Option<Unsent>,
     loops: loops::LoopWatch,
     outcomes: outcomes::OutcomeWatch,
     /// Whether the person said to finish: a turn that ends after real work is
@@ -607,14 +684,9 @@ where
 
     /// The first turn of a submission, carrying any attached images.
     fn first_input(&mut self, content: String) -> TurnInput {
-        if let Some((results, note)) = self.unsent.take() {
+        if let Some(Unsent { results, note, why }) = self.unsent.take() {
             // Images wait for a submission that can carry them as a message.
-            let mut notes = vec![
-                person_says(&content),
-                "[dino: the last submission reached its turn limit before these results were \
-                 sent.]"
-                    .to_owned(),
-            ];
+            let mut notes = vec![person_says(&content), why.to_owned()];
             notes.extend(note);
             return TurnInput::ToolResults {
                 results,
@@ -667,6 +739,8 @@ where
     /// model, and returns the old one. Tools, policy and sink are kept.
     pub fn replace_session(&mut self, session: S) -> S {
         self.tools.history_lost();
+        // They answer calls in the old history, which the new one lacks.
+        self.unsent = None;
         std::mem::replace(&mut self.session, session)
     }
 
@@ -823,7 +897,7 @@ where
         }
 
         if let TurnInput::ToolResults { results, note } = input {
-            self.unsent = Some((results, note));
+            self.unsent = Some(Unsent::at_turn_limit(results, note));
         }
         Err(AgentError::ModelTurnLimit(
             self.config.max_model_turns.get(),
@@ -895,7 +969,7 @@ where
             results.push(result);
         }
         Ok(match reported_blocker {
-            Some(reason) => Settled::Blocked(reason),
+            Some(reason) => Settled::Blocked(reason, results),
             None => Settled::Results(results, notes),
         })
     }
@@ -949,7 +1023,8 @@ where
         }
         let (results, noted) = match self.settle_all(model_turn, calls, events, cancel).await? {
             Settled::Results(results, noted) => (results, noted),
-            Settled::Blocked(reason) => {
+            Settled::Blocked(reason, results) => {
+                self.unsent = Some(Unsent::after_blocker(results));
                 let events = std::mem::take(events);
                 return Ok(Err(blocked(events, text.to_owned(), &reason, model_turn)));
             }

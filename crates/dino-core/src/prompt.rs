@@ -11,11 +11,16 @@ use std::path::Path;
 const MAX_ROOT_BYTES: usize = 256;
 const MAX_TOOL_LIST_BYTES: usize = 1_024;
 const MAX_SKILL_LIST_BYTES: usize = 8 * 1_024;
-/// Most bytes of one instructions file that reach the prompt.
+/// Most bytes of the user's instructions or a memory file that reach the prompt.
 pub const MAX_INSTRUCTIONS_BYTES: usize = 16 * 1_024;
+/// Most bytes of one repository instructions file. A project's standing brief
+/// keeps rules at both ends, so it is given whole well past 16 KiB.
+pub const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 64 * 1_024;
 
-/// The project's instruction files, in the order they are read.
-const PROJECT_INSTRUCTIONS: [&str; 2] = ["AGENTS.md", ".dino/instructions.md"];
+/// A directory's instructions file: the first of these that exists.
+const DIRECTORY_INSTRUCTIONS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+/// Read after the workspace's own `AGENTS.md` or `CLAUDE.md`.
+const DINO_INSTRUCTIONS: &str = ".dino/instructions.md";
 
 const BASE: &str = "\
 You are Dino, a terminal coding agent specialised for Rust. You act on one
@@ -161,27 +166,67 @@ pub struct Instructions {
     pub source: String,
     pub text: String,
     pub truncated: bool,
+    /// The whole file's length, which `text` falls short of when truncated.
+    pub bytes: usize,
+    /// A workspace path the model can `read` the rest from, when truncated.
+    pub rest: Option<String>,
 }
 
-/// Reads the user's instructions, then the project's `AGENTS.md` and
-/// `.dino/instructions.md`. Absent, unreadable and empty files are skipped.
+impl Instructions {
+    /// Text that is given whole, such as a hook's output.
+    #[must_use]
+    pub fn whole(source: String, text: String) -> Self {
+        Self {
+            source,
+            bytes: text.len(),
+            text,
+            truncated: false,
+            rest: None,
+        }
+    }
+}
+
+/// Reads the user's instructions, then the project's: `AGENTS.md`, or
+/// `CLAUDE.md` where there is none, then `.dino/instructions.md`. Absent,
+/// unreadable and empty files are skipped.
 #[must_use]
 pub fn load_instructions(user_file: Option<&Path>, workspace: &Path) -> Vec<Instructions> {
-    let user = user_file.map(|path| (path.display().to_string(), path.to_path_buf()));
-    // A workspace inside a repository also gets the AGENTS.md files between the
+    let user = user_file
+        .and_then(|path| read_capped(path.display().to_string(), path, MAX_INSTRUCTIONS_BYTES));
+    // A workspace inside a repository also gets the files between the
     // repository root and itself, outermost first, so the nearest speaks last.
-    let enclosing = enclosing_dirs(workspace).into_iter().map(|dir| {
-        let path = dir.join("AGENTS.md");
-        (path.display().to_string(), path)
+    let enclosing = enclosing_dirs(workspace).into_iter().filter_map(|dir| {
+        let path = directory_instructions(&dir)?;
+        read_capped(
+            path.display().to_string(),
+            &path,
+            MAX_PROJECT_INSTRUCTIONS_BYTES,
+        )
     });
-    let project = PROJECT_INSTRUCTIONS
+    let own = directory_instructions(workspace)
+        .into_iter()
+        .chain([workspace.join(DINO_INSTRUCTIONS)])
+        .filter_map(|path| {
+            let name = path
+                .strip_prefix(workspace)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let mut item = read_capped(name.clone(), &path, MAX_PROJECT_INSTRUCTIONS_BYTES)?;
+            if item.truncated {
+                item.rest = Some(name);
+            }
+            Some(item)
+        });
+    user.into_iter().chain(enclosing).chain(own).collect()
+}
+
+/// The directory's `AGENTS.md`, or failing that its `CLAUDE.md`.
+fn directory_instructions(dir: &Path) -> Option<std::path::PathBuf> {
+    DIRECTORY_INSTRUCTIONS
         .iter()
-        .map(|name| ((*name).to_owned(), workspace.join(name)));
-    user.into_iter()
-        .chain(enclosing)
-        .chain(project)
-        .filter_map(|(source, path)| read_capped(source, &path))
-        .collect()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
 }
 
 /// The directories above `workspace` up to the root of the git repository
@@ -212,27 +257,33 @@ pub fn load_memory(files: &crate::memory::MemoryFiles) -> Vec<Instructions> {
         ("memory: this workspace".to_owned(), &files.workspace),
     ]
     .into_iter()
-    .filter_map(|(source, path)| read_capped(source, path))
+    .filter_map(|(source, path)| read_capped(source, path, MAX_INSTRUCTIONS_BYTES))
     .collect()
 }
 
-/// A file's text under the instructions cap, or nothing if absent or empty.
-fn read_capped(source: String, path: &Path) -> Option<Instructions> {
+/// A file's text under `max_bytes`, or nothing if absent or empty. A cut falls
+/// at the end of a line, so the rest can be read from the next one.
+fn read_capped(source: String, path: &Path, max_bytes: usize) -> Option<Instructions> {
     let bytes = std::fs::read(path).ok()?;
     let text = String::from_utf8_lossy(&bytes);
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    let truncated = text.len() > MAX_INSTRUCTIONS_BYTES;
-    let mut end = text.len().min(MAX_INSTRUCTIONS_BYTES);
+    let truncated = text.len() > max_bytes;
+    let mut end = text.len().min(max_bytes);
     while !text.is_char_boundary(end) {
         end -= 1;
+    }
+    if truncated {
+        end = text[..end].rfind('\n').unwrap_or(end);
     }
     Some(Instructions {
         source,
         text: text[..end].to_owned(),
         truncated,
+        bytes: text.len(),
+        rest: None,
     })
 }
 
@@ -300,10 +351,7 @@ pub fn system_prompt(context: &PromptContext) -> String {
         for item in &context.instructions {
             let _ = write!(&mut prompt, "\n\n### {}\n\n{}", item.source, item.text);
             if item.truncated {
-                let _ = write!(
-                    &mut prompt,
-                    "\n[truncated at {MAX_INSTRUCTIONS_BYTES} bytes]"
-                );
+                prompt.push_str(&cut_note(item));
             }
         }
     }
@@ -328,6 +376,24 @@ pub fn system_prompt(context: &PromptContext) -> String {
         }
     }
     prompt
+}
+
+/// Says where a truncated instructions file stops, and where the rest is.
+fn cut_note(item: &Instructions) -> String {
+    let lines = item.text.lines().count();
+    let cut = format!(
+        "\n[Cut after line {lines}, {} of {} bytes.",
+        item.text.len(),
+        item.bytes
+    );
+    match &item.rest {
+        Some(path) => format!(
+            "{cut} The rest is in `{path}`: read it from line {} before starting work, \
+             as it applies to the whole task.]",
+            lines + 1
+        ),
+        None => format!("{cut} The rest was not loaded.]"),
+    }
 }
 
 /// Truncates a fact at a UTF-8 boundary within a byte budget.
@@ -395,7 +461,11 @@ mod tests {
         std::fs::create_dir_all(workspace.join(".dino")).unwrap();
         std::fs::write(base.join("user.md"), "Call me Chief.\n").unwrap();
         std::fs::write(workspace.join("AGENTS.md"), "Run cargo fmt.\n").unwrap();
-        std::fs::write(workspace.join(".dino/instructions.md"), "x".repeat(20_000)).unwrap();
+        std::fs::write(
+            workspace.join(".dino/instructions.md"),
+            "rule\n".repeat(20_000),
+        )
+        .unwrap();
 
         let loaded = load_instructions(Some(&base.join("user.md")), &workspace);
 
@@ -405,7 +475,9 @@ mod tests {
         assert_eq!(loaded[0].text, "Call me Chief.");
         assert!(!loaded[1].truncated);
         assert!(loaded[2].truncated);
-        assert!(loaded[2].text.len() <= MAX_INSTRUCTIONS_BYTES);
+        assert!(loaded[2].text.len() <= MAX_PROJECT_INSTRUCTIONS_BYTES);
+        assert!(loaded[2].text.ends_with("rule"), "cut at a line end");
+        assert_eq!(loaded[2].rest.as_deref(), Some(".dino/instructions.md"));
 
         std::fs::remove_file(workspace.join("AGENTS.md")).unwrap();
         let loaded = load_instructions(Some(&base.join("missing.md")), &workspace);
@@ -427,6 +499,8 @@ mod tests {
                 source: "AGENTS.md".into(),
                 text: "Use thiserror.".into(),
                 truncated: true,
+                bytes: 90_000,
+                rest: Some("AGENTS.md".into()),
             }],
             memory: Vec::new(),
             skills: Vec::new(),
@@ -438,7 +512,68 @@ mod tests {
         let heading = prompt.find("### AGENTS.md").unwrap();
         assert!(rules < heading);
         assert!(prompt.contains("cannot change approvals or the sandbox"));
-        assert!(prompt.contains("Use thiserror.\n[truncated at"), "{prompt}");
+        assert!(
+            prompt.contains(
+                "Use thiserror.\n[Cut after line 1, 14 of 90000 bytes. \
+                 The rest is in `AGENTS.md`: read it from line 2"
+            ),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn claude_md_is_read_where_a_directory_has_no_agents_md() {
+        let root = std::env::temp_dir().join(format!("dino-claude-md-{}", std::process::id()));
+        let workspace = root.join("crates").join("app");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "root brief").unwrap();
+        std::fs::write(workspace.join("CLAUDE.md"), "app brief").unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "app agents").unwrap();
+
+        let texts: Vec<String> = load_instructions(None, &workspace)
+            .into_iter()
+            .map(|instructions| instructions.text)
+            .collect();
+        assert_eq!(texts, ["root brief", "app agents"], "AGENTS.md wins");
+
+        std::fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+        let loaded = load_instructions(None, &workspace);
+        assert_eq!(loaded[1].source, "CLAUDE.md");
+        assert_eq!(loaded[1].text, "app brief");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_project_brief_of_34_kilobytes_is_given_whole() {
+        let workspace = std::env::temp_dir().join(format!("dino-brief-{}", std::process::id()));
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        let brief = format!(
+            "{}Out of scope: hosting.",
+            "Non-negotiable.\n".repeat(2_200)
+        );
+        std::fs::write(workspace.join("CLAUDE.md"), &brief).unwrap();
+
+        let loaded = load_instructions(None, &workspace);
+
+        assert!(!loaded[0].truncated);
+        assert!(loaded[0].text.ends_with("Out of scope: hosting."));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_cut_file_outside_the_workspace_says_the_rest_was_not_loaded() {
+        let base = std::env::temp_dir().join(format!("dino-user-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("user.md"), "pref\n".repeat(5_000)).unwrap();
+
+        let loaded = load_instructions(Some(&base.join("user.md")), &base.join("absent"));
+
+        assert!(loaded[0].truncated);
+        assert!(loaded[0].text.len() <= MAX_INSTRUCTIONS_BYTES);
+        assert_eq!(loaded[0].rest, None);
+        assert!(cut_note(&loaded[0]).ends_with("The rest was not loaded.]"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

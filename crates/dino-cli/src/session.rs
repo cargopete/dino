@@ -190,6 +190,8 @@ enum Input {
     Diff,
     Cost,
     Model(Option<String>),
+    /// Switch, when a key is given, and start later sessions on the model.
+    SaveModel(Option<String>),
     Resume(Option<String>),
     Rename(Option<String>),
     Plan(Option<String>),
@@ -216,6 +218,10 @@ fn parse(line: &str) -> Input {
     if trimmed.is_empty() {
         return Input::Blank;
     }
+    // Said to a shell, never meant for a model.
+    if matches!(trimmed, "exit" | "quit") {
+        return Input::Exit;
+    }
     let submission = || Input::Submit(trimmed.to_owned());
     let Some(rest) = trimmed.strip_prefix('/') else {
         return submission();
@@ -225,10 +231,6 @@ fn parse(line: &str) -> Input {
         return submission();
     }
     // A known command word wins over whatever follows it, as in any shell.
-    let argument = rest[word.len()..]
-        .split_whitespace()
-        .next()
-        .map(str::to_owned);
     let remainder = || Some(rest[word.len()..].trim().to_owned()).filter(|text| !text.is_empty());
     match word {
         "help" | "h" | "?" => Input::Help,
@@ -239,7 +241,17 @@ fn parse(line: &str) -> Input {
         "compact" => Input::Compact,
         "auto" => Input::Auto,
         "init" => Input::Init,
-        "model" => Input::Model(argument),
+        "model" => {
+            let mut words: Vec<&str> = rest[word.len()..].split_whitespace().collect();
+            let default = words.contains(&"--default");
+            words.retain(|word| *word != "--default");
+            let key = words.first().map(|key| (*key).to_owned());
+            if default {
+                Input::SaveModel(key)
+            } else {
+                Input::Model(key)
+            }
+        }
         "resume" => Input::Resume(remainder()),
         "rename" => Input::Rename(remainder()),
         "plan" => Input::Plan(remainder()),
@@ -249,6 +261,32 @@ fn parse(line: &str) -> Input {
         other if rest.trim() == other => Input::Unknown(other.to_owned()),
         _ => submission(),
     }
+}
+
+/// Whether a line is for the session rather than the model.
+pub(crate) fn is_command(line: &str) -> bool {
+    !matches!(parse(line), Input::Submit(_) | Input::Blank)
+}
+
+/// Lines entered during a run, as the inputs they become after it: a command
+/// on its own, and prose between commands as one message.
+fn queue_lines(lines: Vec<String>) -> Vec<String> {
+    let mut queued = Vec::new();
+    let mut prose: Vec<String> = Vec::new();
+    for line in lines {
+        if is_command(&line) {
+            if !prose.is_empty() {
+                queued.push(std::mem::take(&mut prose).join("\n\n"));
+            }
+            queued.push(line);
+        } else {
+            prose.push(line);
+        }
+    }
+    if !prose.is_empty() {
+        queued.push(prose.join("\n\n"));
+    }
+    queued
 }
 
 /// What `/init` asks for: the instructions file a later session reads first.
@@ -344,6 +382,8 @@ pub struct Session<S> {
     pub inbox: dino_core::Inbox,
     /// Typed during the last run and not entered, to start the next prompt with.
     pub typed_ahead: String,
+    /// Entered during the last run and not delivered, run before the prompt.
+    pub queued: std::collections::VecDeque<String>,
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
@@ -399,28 +439,34 @@ where
         };
 
         loop {
-            // Blocking on purpose. Nothing else is running while a person is
-            // typing, and moving the editor across a spawn_blocking boundary
-            // every keystroke would buy nothing.
-            let mut typed = std::mem::take(&mut self.typed_ahead);
-            typed.push_str(&crate::style::take_typeahead());
-            match editor.readline_with_initial(&prompt, (&typed, "")) {
-                Ok(line) => {
-                    let _ = editor.add_history_entry(line.as_str());
-                    let input = parse(&join_continuations(&line));
-                    let input = if self.awaiting_plan {
-                        self.decide_plan(input).await
-                    } else {
-                        input
-                    };
-                    if self.handle(input).await? {
-                        break;
+            let line = if let Some(queued) = self.queued.pop_front() {
+                println!("{prompt}{queued}");
+                queued
+            } else {
+                // Blocking on purpose. Nothing else is running while a person is
+                // typing, and moving the editor across a spawn_blocking boundary
+                // every keystroke would buy nothing.
+                let mut typed = std::mem::take(&mut self.typed_ahead);
+                typed.push_str(&crate::style::take_typeahead());
+                match editor.readline_with_initial(&prompt, (&typed, "")) {
+                    Ok(line) => {
+                        let _ = editor.add_history_entry(line.as_str());
+                        line
                     }
+                    // At an idle prompt Ctrl-C clears the line, as a shell does.
+                    Err(ReadlineError::Interrupted) => continue,
+                    Err(ReadlineError::Eof) => break,
+                    Err(error) => return Err(error).context("cannot read from the terminal"),
                 }
-                // At an idle prompt Ctrl-C clears the line, as a shell does.
-                Err(ReadlineError::Interrupted) => {}
-                Err(ReadlineError::Eof) => break,
-                Err(error) => return Err(error).context("cannot read from the terminal"),
+            };
+            let input = parse(&join_continuations(&line));
+            let input = if self.awaiting_plan {
+                self.decide_plan(input).await
+            } else {
+                input
+            };
+            if self.handle(input).await? {
+                break;
             }
         }
 
@@ -455,6 +501,16 @@ where
             let Some(prompt) = prompt else { break };
             hub.set_busy(true);
             self.submit(prompt).await;
+            while let Some(line) = self.queued.pop_front() {
+                if is_command(&line) {
+                    println!(
+                        "{}",
+                        style::paint(FAINT, &format!("  {line}: not a command while serving"))
+                    );
+                } else {
+                    self.submit(line).await;
+                }
+            }
             hub.set_busy(false);
         }
         Ok(())
@@ -480,6 +536,15 @@ where
             }
             Input::Model(None) => print!("{}", self.models()),
             Input::Model(Some(key)) => self.start_conversation(&key),
+            Input::SaveModel(key) => {
+                if let Some(key) = key {
+                    self.start_conversation(&key);
+                    if self.model_key != key {
+                        return Ok(false);
+                    }
+                }
+                println!("{}", self.save_default_model());
+            }
             Input::Resume(None) => print!("{}", self.saved()),
             Input::Resume(Some(wanted)) => self.resume(&wanted),
             Input::Rename(name) => self.rename(name),
@@ -651,17 +716,6 @@ where
             run.stop_reason == StopReason::EndTurn
                 && (finishing || crate::task::proposes_next_step(&run.text))
         });
-        // Entered during the run but never delivered, because no tool result
-        // came after it: the next submission, in the order typed.
-        let undelivered = self
-            .inbox
-            .lock()
-            .map(|mut inbox| std::mem::take(&mut *inbox))
-            .unwrap_or_default();
-        if !undelivered.is_empty() {
-            Box::pin(self.submit(undelivered.join("\n\n"))).await;
-            return;
-        }
         let full = self
             .context_full
             .swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -698,6 +752,19 @@ where
         }
     }
 
+    /// Queues what was entered during the run but never delivered, because no
+    /// tool result came after it, then what the listener held back: in the
+    /// order typed.
+    fn queue_undelivered(&mut self, held: Vec<String>) {
+        let mut undelivered = self
+            .inbox
+            .lock()
+            .map(|mut inbox| std::mem::take(&mut *inbox))
+            .unwrap_or_default();
+        undelivered.extend(held);
+        self.queued.extend(queue_lines(undelivered));
+    }
+
     /// Runs one prepared message and saves the conversation after it.
     async fn run_submission(&mut self, text: String) -> Option<dino_core::RunResult> {
         // Each time, since `/model` and `/resume` change it and a run can learn
@@ -730,9 +797,11 @@ where
         if let Some(from_page) = from_page {
             from_page.abort();
         }
-        self.typed_ahead = listener
+        let stopped = listener
             .map(crate::listen::Listener::stop)
             .unwrap_or_default();
+        self.typed_ahead = stopped.typed;
+        self.queue_undelivered(stopped.held);
         if let Ok(mut status) = self.status.lock() {
             status.typed.clear();
             status.queued = 0;
@@ -1078,9 +1147,37 @@ where
         }
         block.push_str(&style::paint(
             FAINT,
-            "  /model <key> starts a new conversation on that model.\n",
+            "  /model <key> starts a new conversation on that model; add --default to start \
+             later sessions on it too.\n",
         ));
         block
+    }
+
+    /// Writes this session's model into the user's config, and says what
+    /// would still start another.
+    fn save_default_model(&self) -> String {
+        let path = match crate::settings::save_default_model(&self.model_key) {
+            Ok(path) => path,
+            Err(error) => return style::paint(style::WARN, &format!("  {error}")),
+        };
+        let mut said = format!(
+            "  later sessions start on {}: set in {}.",
+            self.model_key,
+            crate::render::short_path(&path, std::path::Path::new(""))
+        );
+        if std::env::var_os("DINO_MODEL").is_some() {
+            said.push_str(" DINO_MODEL is set and still wins.");
+        }
+        let project = crate::settings::Layers::load(&self.workspace_root)
+            .ok()
+            .and_then(|layers| layers.project.model);
+        if let Some(model) = project {
+            let _ = write!(
+                said,
+                " This repository's .dino/config.toml names {model}, which wins here."
+            );
+        }
+        style::paint(FAINT, &said)
     }
 
     fn saved(&self) -> String {
@@ -1244,7 +1341,8 @@ fn help() -> String {
         ),
         (
             "/model",
-            "list models; /model <key> switches, in a new conversation",
+            "list models; /model <key> switches, in a new conversation; \
+             --default keeps it for later sessions",
         ),
         (
             "/resume",
@@ -1349,6 +1447,29 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_exit_or_quit_leaves_and_a_sentence_with_it_does_not() {
+        assert_eq!(parse(" exit "), Input::Exit);
+        assert_eq!(parse("quit"), Input::Exit);
+        assert_eq!(
+            parse("exit early when the cursor is closed"),
+            Input::Submit("exit early when the cursor is closed".into())
+        );
+    }
+
+    #[test]
+    fn a_command_entered_during_a_run_is_run_on_its_own_after_it() {
+        let lines = ["exit", "/q"].map(str::to_owned).to_vec();
+        assert_eq!(queue_lines(lines), ["exit", "/q"]);
+        let lines = ["also tests", "and docs", "/cost", "then commit"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(
+            queue_lines(lines),
+            ["also tests\n\nand docs", "/cost", "then commit"]
+        );
+    }
+
+    #[test]
     fn plan_takes_the_rest_of_the_line_as_its_task() {
         assert_eq!(
             parse("/plan add a --json flag to dino models"),
@@ -1370,6 +1491,11 @@ mod tests {
             parse("/model  claude-opus "),
             Input::Model(Some("claude-opus".into()))
         );
+        assert_eq!(
+            parse("/model claude-sonnet --default"),
+            Input::SaveModel(Some("claude-sonnet".into()))
+        );
+        assert_eq!(parse("/model --default"), Input::SaveModel(None));
         assert_eq!(parse("/resume"), Input::Resume(None));
         assert_eq!(
             parse("/resume 1a16-2"),

@@ -220,7 +220,7 @@ form.addEventListener('submit', async (event) => {
   try {
     const result = await api('/api/prompt', { text: message });
     text.value = '';
-    if (result.queued) show('note', 'queued: delivered with the next tool results');
+    if (result.queued) show('note', 'queued: for the model with its next tool results, or after this run');
   } catch (error) {
     show('err', 'not sent: ' + error.message);
   }
