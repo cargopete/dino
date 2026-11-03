@@ -16,7 +16,7 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 10] = [
+const RESTRICTED: [(&str, &str); 11] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
@@ -25,6 +25,7 @@ const RESTRICTED: [(&str, &str); 10] = [
     ("fallback", "sends the conversation to another provider"),
     ("budget", "could raise what a session may spend"),
     ("review_model", "sends the change to another provider"),
+    ("webhook", "holds a secret and starts sessions"),
     ("workspaces", "lets a remote page reach another directory"),
     ("plugin_index", "chooses where plugins are installed from"),
 ];
@@ -81,6 +82,8 @@ pub struct FileConfig {
     /// to finish ends and before a commit the model makes. A project file may
     /// propose it; it runs once the person has trusted that exact command.
     pub verify: Option<Vec<String>>,
+    /// What `dino webhook` reviews and does with a review. User file only.
+    pub webhook: Option<WebhookConfig>,
     /// The tools offered and the limits started under: standard, minimal or
     /// review. Only ever narrows, so a project file may set it.
     pub preset: Option<crate::preset::Preset>,
@@ -90,6 +93,33 @@ pub struct FileConfig {
     /// The plugin index `dino plugin search` and `install <name>` read: a path
     /// or an http(s) URL. User file only.
     pub plugin_index: Option<String>,
+}
+
+/// The `[webhook]` table.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookConfig {
+    /// The secret GitHub signs deliveries with. `DINO_WEBHOOK_SECRET` wins.
+    pub secret: Option<String>,
+    /// Each repository reviewed, as `owner/name`, and the local clone its pull
+    /// requests are fetched into. Deliveries for any other are ignored.
+    #[serde(default)]
+    pub repos: std::collections::BTreeMap<String, PathBuf>,
+    /// Review a pull request opened ready for review, not only one marked
+    /// ready later. Default true.
+    pub on_opened: Option<bool>,
+    /// Post each review as a comment through `gh`. Default false: reviews are
+    /// recorded and nothing is said on GitHub.
+    pub post: Option<bool>,
+    /// The model reviews run on. Defaults to `review_model`, then `model`.
+    pub model: Option<String>,
+    /// Model turns one review may take. Default 40.
+    pub max_turns: Option<std::num::NonZeroU32>,
+    /// Reviews started in any hour, past which deliveries are refused. Default 6.
+    pub per_hour: Option<u32>,
+    /// Review pull requests from anyone, not only the repository's owner,
+    /// members and collaborators. Default false.
+    pub any_author: Option<bool>,
 }
 
 /// The `[budget]` table.
@@ -264,12 +294,9 @@ impl Layers {
     /// Returns an error when a file is malformed, holds an unknown key, or is a
     /// project file naming a restricted one.
     pub fn load(workspace: &Path) -> Result<Self> {
-        let user_path = user_config_path().filter(|path| path.is_file());
-        let user = match &user_path {
-            Some(path) => read(path)?,
-            None => FileConfig::default(),
-        };
-
+        let Self {
+            user, user_path, ..
+        } = Self::user_only()?;
         let project_path =
             Some(workspace.join(".dino").join("config.toml")).filter(|path| path.is_file());
         let project = match &project_path {
@@ -286,6 +313,25 @@ impl Layers {
             user,
             project_path,
             user_path,
+        })
+    }
+
+    /// The user file alone, for a checkout whose project file came from
+    /// someone the person has not trusted, such as a pull request's author.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the user file is malformed or holds an unknown key.
+    pub fn user_only() -> Result<Self> {
+        let user_path = user_config_path().filter(|path| path.is_file());
+        let user = match &user_path {
+            Some(path) => read(path)?,
+            None => FileConfig::default(),
+        };
+        Ok(Self {
+            user,
+            user_path,
+            ..Self::default()
         })
     }
 
@@ -641,6 +687,7 @@ mod tests {
                 "hooks",
                 "[{ event = \"after_edit\", command = [\"sh\", \"-c\", \"curl evil\"] }]",
             ),
+            ("webhook", "{ secret = \"known\", post = true }"),
         ] {
             let error = refuse_restricted(
                 Path::new("/repo/.dino/config.toml"),

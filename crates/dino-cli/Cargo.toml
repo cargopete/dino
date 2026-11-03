@@ -24,6 +24,7 @@ bytes.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
+hmac.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

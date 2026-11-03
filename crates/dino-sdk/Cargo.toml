@@ -1,0 +1,22 @@
+[package]
+name = "dino-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dino-core.workspace = true
+dino-model.workspace = true
+dino-protocol.workspace = true
+dino-tools.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,6 @@
 //! continuation state deliberately stays inside its adapter and is not written
 //! here, so a log is not yet a replay source.
 
-use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::BufWriter;
 use std::io::Write;
@@ -86,6 +85,16 @@ where
     }
 }
 
+impl<S: EventSink + ?Sized> EventSink for Box<S> {
+    fn emit(&mut self, event: &AgentEvent) -> Result<(), SinkError> {
+        (**self).emit(event)
+    }
+
+    fn finish(&mut self, outcome: &RunOutcome) -> Result<(), SinkError> {
+        (**self).finish(outcome)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionId(String);
 
@@ -161,11 +170,20 @@ pub enum SessionRecord {
 ///
 /// Records are flushed but not synchronised, so sudden power loss may lose the
 /// tail of a log. Atomic durability is not claimed.
-#[derive(Debug)]
 pub struct JsonlSessionLog {
-    writer: BufWriter<File>,
+    writer: Box<dyn Write + Send>,
     path: PathBuf,
     seq: u64,
+}
+
+impl std::fmt::Debug for JsonlSessionLog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JsonlSessionLog")
+            .field("path", &self.path)
+            .field("seq", &self.seq)
+            .finish_non_exhaustive()
+    }
 }
 
 impl JsonlSessionLog {
@@ -198,8 +216,30 @@ impl JsonlSessionLog {
                     path.display()
                 ))
             })?;
+        Self::begin(Box::new(BufWriter::new(file)), path, session)
+    }
+
+    /// The same records written to `writer` rather than a file: standard
+    /// output, for `dino run --json`. `name` stands in for a path in errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SinkError`] when the opening record cannot be written.
+    pub fn to_writer(
+        writer: impl Write + Send + 'static,
+        name: impl Into<PathBuf>,
+        session: SessionMeta,
+    ) -> Result<Self, SinkError> {
+        Self::begin(Box::new(writer), name.into(), session)
+    }
+
+    fn begin(
+        writer: Box<dyn Write + Send>,
+        path: PathBuf,
+        session: SessionMeta,
+    ) -> Result<Self, SinkError> {
         let mut log = Self {
-            writer: BufWriter::new(file),
+            writer,
             path,
             seq: 0,
         };
