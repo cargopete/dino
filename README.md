@@ -69,6 +69,10 @@ CI and evals.
   check and the logged diff. `cargo` runs a closed set of
   subcommands and returns parsed diagnostics, so an `E0308` arrives as a level,
   a code, a file, a line and a column rather than as a page of compiler output.
+  In a workspace with a `rust-toolchain.toml` it runs through `rustup run
+  <channel>`, whatever `cargo` is first on PATH, and the result names the
+  toolchain. A test run that ran no test, a filter that matched nothing, says so
+  and is not taken for a pass.
   `report_blocker` lets the model stop and say a task contradicts itself,
   rather than bend a test to fit. `todo` keeps a checklist for a task of
   several steps, shown in the transcript as it changes. `remember` appends a
@@ -190,6 +194,15 @@ CI and evals.
   model that ends its turn while `cargo check` reports errors is sent back once
   with the first of them, and the countdown names them too. An interactive
   session hands the turn to you instead.
+- **A workspace's own check.** `verify`, an argument vector such as
+  `["sh", "-c", "cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"]`,
+  runs before a task you told to finish may end, and in `dino run`, sending the
+  model back once with the output when it fails. It also runs before any
+  `exec` or `shell` call that makes a `git commit`, and a failure refuses the
+  commit. A project's `.dino/config.toml` may propose it; it runs only once you
+  have trusted that exact command for that workspace, asked once at the
+  terminal and kept in `~/.config/dino/trusted-verify`, and a changed command
+  asks again. `dino config` shows it and where it came from.
 - **A reasoning budget for Qwen.** Qwen profiles cap reasoning at 4,096 tokens
   a turn, through vLLM's `thinking_token_budget`. Measured on the four slowest
   hard cases, it gave the same pass rate in 15% less time (RFC-0017 §8.7).
@@ -224,14 +237,19 @@ CI and evals.
   half times a turn's new tokens. Whether the Token Plan bills it that way is not
   yet known, so it is off by default.
 - **Hooks.** `[[hooks]]` in the user file run after the file tools edit a file,
-  inside the sandbox, with `{path}` for the file and an optional `extension`.
-  With `extension = "rs"`, this formats every Rust edit:
-  `command = ["sh", "-c", "rustfmt --edition 2024 --emit stdout < \"$1\" > \"$1.fmt\" && mv \"$1.fmt\" \"$1\"; s=$?; rm -f \"$1.fmt\"; exit $s", "sh", "{path}"]`.
+  inside the sandbox, with `{path}` for the file, `{edition}` for the edition
+  of the package it belongs to (from the nearest `Cargo.toml`, 2015 when it
+  names none) and an optional `extension`. With `extension = "rs"`, this
+  formats every Rust edit:
+  `command = ["sh", "-c", "rustfmt --edition \"$2\" --emit stdout < \"$1\" > \"$1.fmt\" && mv \"$1.fmt\" \"$1\"; s=$?; rm -f \"$1.fmt\"; exit $s", "sh", "{path}", "{edition}"]`.
   It goes through standard input because `rustfmt {path}` follows `mod`
   declarations: it fails on a parent written before its children, and
-  reformats children the model has not touched. The tool result says what ran, and says so when a
-  hook changed the file; a later patch still applies if its `old_text` matches
-  the file as the hook left it. A
+  reformats children the model has not touched. A hook is first tried on a copy
+  of the file as it was before the edit, and is skipped when it would have
+  changed that too, so a file that was not formatted to begin with keeps the
+  lines the model did not touch. The tool result says what ran and what was
+  skipped, and says so when a hook changed the file, and a later patch
+  still applies if its `old_text` matches the file as the hook left it. A
   `before_end_turn` hook must pass before the model ends its turn, or it is sent
   back once with the output (`cargo clippy` makes a good one); a
   `session_start` hook runs once and what it prints goes into the prompt. A

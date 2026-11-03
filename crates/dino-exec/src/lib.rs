@@ -13,8 +13,10 @@ mod mcp;
 mod packages;
 pub mod process;
 mod reads;
+pub mod rust;
 mod shell;
 mod tracked;
+mod verify;
 mod web;
 
 pub use crate::background::BackgroundTool;
@@ -32,5 +34,7 @@ pub use crate::mcp::McpServer;
 pub use crate::mcp::McpTools;
 pub use crate::packages::PackagesTool;
 pub use crate::shell::ShellTool;
+pub use crate::verify::BeforeCommit;
+pub use crate::verify::Verify;
 pub use crate::web::WebFetchTool;
 pub use crate::web::WebLimits;

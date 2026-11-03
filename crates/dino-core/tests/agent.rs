@@ -1101,6 +1101,27 @@ async fn a_model_that_stops_with_work_unfinished_is_sent_back_once() {
 }
 
 #[tokio::test]
+async fn a_task_check_is_asked_only_of_a_task_told_to_finish() {
+    let asked = std::sync::Arc::default();
+    let mut agent = agent(vec![
+        text_turn("done"),
+        text_turn("done"),
+        text_turn("fixed"),
+    ])
+    .with_finish_check(AllGood)
+    .with_task_check(AlwaysBroken(std::sync::Arc::clone(&asked)));
+
+    let result = agent.run("explain it").await.unwrap();
+    assert_eq!(sent_back(&result), Vec::<u32>::new());
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    agent.set_keep_going(true);
+    let result = agent.run("finish it").await.unwrap();
+    assert_eq!(sent_back(&result), vec![1]);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn a_task_told_to_finish_sends_a_status_report_back_until_a_turn_does_no_work() {
     let mut agent = Agent::new(
         ScriptedSession::new(vec![

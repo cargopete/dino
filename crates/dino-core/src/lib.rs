@@ -475,6 +475,8 @@ pub struct Agent<S, T> {
     sink: Box<dyn EventSink>,
     config: AgentConfig,
     finish_check: Option<Box<dyn FinishCheck>>,
+    /// Asked after `finish_check`, only in a run told to finish.
+    task_check: Option<Box<dyn FinishCheck>>,
     reviewer: Option<std::sync::Arc<review::Reviewer>>,
     /// Reviews only a run told to finish, for a session with no `review_model`.
     task_reviewer: Option<std::sync::Arc<review::Reviewer>>,
@@ -523,6 +525,7 @@ where
             sink: Box::new(NullSink),
             config,
             finish_check: None,
+            task_check: None,
             reviewer: None,
             task_reviewer: None,
             reviewed: false,
@@ -544,6 +547,14 @@ where
     #[must_use]
     pub fn with_finish_check(mut self, check: impl FinishCheck + 'static) -> Self {
         self.finish_check = Some(Box::new(check));
+        self
+    }
+
+    /// As [`Agent::with_finish_check`], but only for a run the person told to
+    /// finish (see [`Agent::set_keep_going`]).
+    #[must_use]
+    pub fn with_task_check(mut self, check: impl FinishCheck + 'static) -> Self {
+        self.task_check = Some(Box::new(check));
         self
     }
 
@@ -1030,9 +1041,18 @@ where
             Some(check) => cancel.run_until_cancelled(check.unfinished()).await,
             None => Some(None),
         };
-        let Some(checked) = checked else {
+        let Some(mut checked) = checked else {
             return Ok(None);
         };
+        if checked.is_none()
+            && self.keep_going
+            && let Some(check) = self.task_check.as_ref()
+        {
+            let Some(task_checked) = cancel.run_until_cancelled(check.unfinished()).await else {
+                return Ok(None);
+            };
+            checked = task_checked;
+        }
         let Some(reason) = checked
             .or_else(|| unfinished_checklist(events))
             .or_else(|| verify::untested_edits(events))

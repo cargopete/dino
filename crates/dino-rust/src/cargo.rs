@@ -9,6 +9,7 @@ use std::time::Duration;
 use dino_core::ToolError;
 use dino_core::ToolFuture;
 use dino_core::ToolRuntime;
+use dino_core::outcomes::no_tests_ran;
 use dino_core::text::capped_output as capped;
 use dino_protocol::ToolAction;
 use dino_protocol::ToolCall;
@@ -27,6 +28,8 @@ use crate::diagnostics::ParsedDiagnostics;
 use crate::trim;
 use crate::trim::Source;
 use dino_exec::process;
+use dino_exec::rust;
+use dino_exec::rust::Toolchain;
 
 /// The longest a package name or test filter may be.
 const MAX_ARGUMENT_BYTES: usize = 128;
@@ -107,6 +110,15 @@ impl CargoTool {
     /// a test run picks up the same toolchain that is running the test.
     fn program() -> String {
         std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned())
+    }
+
+    /// Cargo with `arguments`, under the workspace's pinned toolchain if it has
+    /// one. Whatever `cargo` is first on PATH may be another compiler entirely.
+    fn cargo(&self, arguments: Vec<String>) -> (String, Vec<String>) {
+        match Toolchain::find(&self.root) {
+            Some(toolchain) => toolchain.wrap("cargo", arguments),
+            None => (Self::program(), arguments),
+        }
     }
 
     /// Builds the argument vector for a validated request.
@@ -198,8 +210,16 @@ impl CargoTool {
     /// format held to the files it names.
     fn command_line(&self, request: &CargoRequest) -> Result<(String, Vec<String>), ToolError> {
         if request.files.is_empty() {
-            return Ok((Self::program(), self.arguments(request)));
+            return Ok(self.cargo(self.arguments(request)));
         }
+        let arguments = self.rustfmt_arguments(request)?;
+        Ok(match Toolchain::find(&self.root) {
+            Some(toolchain) => toolchain.wrap("rustfmt", arguments),
+            None => ("rustfmt".to_owned(), arguments),
+        })
+    }
+
+    fn rustfmt_arguments(&self, request: &CargoRequest) -> Result<Vec<String>, ToolError> {
         let mut arguments = Vec::new();
         if let Some(edition) = self.edition_for(&request.files)? {
             arguments.extend(["--edition".to_owned(), edition]);
@@ -208,7 +228,7 @@ impl CargoTool {
             arguments.push("--check".to_owned());
         }
         arguments.extend(request.files.iter().cloned());
-        Ok(("rustfmt".to_owned(), arguments))
+        Ok(arguments)
     }
 
     /// The edition rustfmt must parse `files` with, from the manifest of the
@@ -216,7 +236,7 @@ impl CargoTool {
     fn edition_for(&self, files: &[String]) -> Result<Option<String>, ToolError> {
         let mut editions = std::collections::BTreeSet::new();
         for file in files {
-            editions.insert(self.edition_of(Path::new(file))?);
+            editions.insert(rust::edition_of(&self.root, Path::new(file))?);
         }
         if editions.len() > 1 {
             return Err(ToolError::new(
@@ -227,42 +247,15 @@ impl CargoTool {
         Ok(editions.pop_first().flatten())
     }
 
-    fn edition_of(&self, file: &Path) -> Result<Option<String>, ToolError> {
-        let path = self.root.join(file);
-        for directory in path.ancestors().skip(1) {
-            if !directory.starts_with(&self.root) {
-                break;
-            }
-            let Some(package) = read_manifest(&directory.join("Cargo.toml"))?
-                .and_then(|manifest| manifest.get("package").cloned())
-            else {
-                continue;
-            };
-            return Ok(match package.get("edition") {
-                Some(toml::Value::String(edition)) => Some(edition.clone()),
-                Some(toml::Value::Table(_)) => read_manifest(&self.manifest)?.and_then(|root| {
-                    root.get("workspace")?
-                        .get("package")?
-                        .get("edition")?
-                        .as_str()
-                        .map(ToOwned::to_owned)
-                }),
-                _ => None,
-            });
-        }
-        Ok(None)
-    }
-
     /// The command as a person would read it, and as a session rule is keyed.
     ///
     /// The manifest path is shown relative to the root because it is invariant
     /// for the session; every other argument appears exactly as it will be run.
     fn subject_for(&self, request: &CargoRequest) -> Result<String, ToolError> {
-        let (program, arguments) = self.command_line(request)?;
         let subject = if request.files.is_empty() {
-            self.subject(&arguments)
+            self.subject(&self.arguments(request))
         } else {
-            format!("{program} {}", arguments.join(" "))
+            format!("rustfmt {}", self.rustfmt_arguments(request)?.join(" "))
         };
         Ok(if request.command.fetches() {
             subject + FETCH_NOTE
@@ -318,9 +311,9 @@ impl CargoTool {
     pub async fn parsed_check(&self) -> Result<ParsedDiagnostics, ToolError> {
         self.require_manifest()?;
         let request = CargoRequest::plain(CargoCommand::Check);
-        let arguments = self.arguments(&request);
+        let (program, arguments) = self.cargo(self.arguments(&request));
         let execution = process::run(
-            &Self::program(),
+            &program,
             &arguments,
             &self.root,
             self.sandbox.as_ref(),
@@ -357,9 +350,10 @@ impl CargoTool {
     /// Returns [`ToolError`] when the child cannot be run.
     pub async fn run_tests(&self) -> Result<TestRun, ToolError> {
         self.require_manifest()?;
-        let arguments = self.arguments(&CargoRequest::plain(CargoCommand::Test));
+        let (program, arguments) =
+            self.cargo(self.arguments(&CargoRequest::plain(CargoCommand::Test)));
         let execution = process::run(
-            &Self::program(),
+            &program,
             &arguments,
             &self.root,
             self.sandbox.as_ref(),
@@ -373,8 +367,8 @@ impl CargoTool {
                 summary: format!("killed after {} seconds", self.limits.timeout.as_secs()),
             });
         }
-        let passed = execution.exit_code == Some(0);
         let output = format!("{}\n{}", execution.stdout, execution.stderr);
+        let passed = execution.exit_code == Some(0) && no_tests_ran(&output).is_none();
         let summary = output
             .lines()
             .filter(|line| {
@@ -408,6 +402,7 @@ impl CargoTool {
         self.require_manifest()?;
         let (program, arguments) = self.command_line(&request)?;
         let subject = self.subject_for(&request)?;
+        let toolchain = Toolchain::find(&self.root).map(|toolchain| toolchain.label(&self.root));
         let sandbox = self.sandbox_for(request.command)?;
         // A program that does not exit, such as a server, is cut short sooner.
         let timeout = if request.command == CargoCommand::Run {
@@ -425,37 +420,27 @@ impl CargoTool {
         )
         .await?;
 
-        if execution.timed_out {
-            return json_output(&CargoOutput {
-                command: subject,
-                exit_code: None,
-                timed_out: true,
-                counts: DiagnosticCounts::default(),
-                diagnostics: Vec::new(),
-                dropped_diagnostics: 0,
-                packages: None,
-                added: Vec::new(),
-                output: format!("no result: killed after {} seconds", timeout.as_secs()),
-                trimmed: None,
-                truncated: execution.truncated,
-                restored_protected_paths: execution.restored,
-            });
-        }
-
         let mut output = CargoOutput {
             command: subject,
             exit_code: execution.exit_code,
-            timed_out: false,
+            timed_out: execution.timed_out,
             counts: DiagnosticCounts::default(),
             diagnostics: Vec::new(),
             dropped_diagnostics: 0,
             packages: None,
             added: Vec::new(),
             output: String::new(),
+            no_tests: None,
+            toolchain,
             trimmed: None,
             truncated: execution.truncated,
             restored_protected_paths: execution.restored,
         };
+        if execution.timed_out {
+            output.exit_code = None;
+            output.output = format!("no result: killed after {} seconds", timeout.as_secs());
+            return json_output(&output);
+        }
 
         match request.command {
             CargoCommand::Check | CargoCommand::Clippy | CargoCommand::Build => {
@@ -500,6 +485,10 @@ impl CargoTool {
                 // Neither has a machine-readable stream worth parsing yet, so
                 // the captured text is returned as text and labelled as such.
                 let combined = format!("{}{}", execution.stdout, execution.stderr);
+                if request.command == CargoCommand::Test {
+                    // Before trimming, which drops the empty runs that show it.
+                    output.no_tests = no_tests_ran(&combined);
+                }
                 output.output = self.text(&combined, &request, &mut output);
                 if request.command == CargoCommand::Add {
                     output.added = added(&execution.stderr);
@@ -781,16 +770,6 @@ fn validate_file(file: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// A manifest as a table, or None when there is no file to read.
-fn read_manifest(path: &Path) -> Result<Option<toml::Table>, ToolError> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(None);
-    };
-    toml::from_str(&text)
-        .map(Some)
-        .map_err(|error| ToolError::new(format!("cannot read {}: {error}", path.display())))
-}
-
 /// As [`validate`], allowing `extra` characters as well, for version
 /// requirements and feature paths.
 fn validate_spec(field: &str, value: &str, extra: &str) -> Result<(), ToolError> {
@@ -870,6 +849,12 @@ struct CargoOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     added: Vec<String>,
     output: String,
+    /// Said when a test run ran no test, which is not a pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_tests: Option<String>,
+    /// The toolchain a pinned workspace ran under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toolchain: Option<String>,
     /// What was cut from `output` and `diagnostics` to keep them short.
     #[serde(skip_serializing_if = "Option::is_none")]
     trimmed: Option<String>,
