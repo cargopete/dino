@@ -27,7 +27,8 @@ use crate::exec::json_output;
 use crate::process;
 
 const NAME: &str = "github";
-const LIST_LIMIT: &str = "30";
+const LIST_LIMIT: u32 = 30;
+const MAX_LIST_LIMIT: u32 = 1_000;
 /// `gh pr checks` exits with this while any check is still pending.
 const CHECKS_PENDING: i32 = 8;
 const DEFAULT_WAIT_SECONDS: u64 = 600;
@@ -180,6 +181,8 @@ struct Request {
     log_failed: bool,
     /// Seconds `checks_wait` may wait.
     timeout: Option<u64>,
+    /// Rows a list returns.
+    limit: Option<u32>,
 }
 
 impl Request {
@@ -213,6 +216,15 @@ impl Request {
             _ if request.log_failed && request.command != Command::RunView => {
                 Err(ToolError::new("log_failed is for run_view"))
             }
+            _ if request.limit.is_some() && !lists => Err(ToolError::new("limit is for the lists")),
+            _ if request
+                .limit
+                .is_some_and(|limit| limit == 0 || limit > MAX_LIST_LIMIT) =>
+            {
+                Err(ToolError::new(format!(
+                    "limit is between 1 and {MAX_LIST_LIMIT}"
+                )))
+            }
             _ if request.timeout.is_some() && request.command != Command::ChecksWait => {
                 Err(ToolError::new("timeout is for checks_wait"))
             }
@@ -236,16 +248,18 @@ impl Request {
             State::All => "all",
         };
         let number = self.number.map(|number| number.to_string());
+        let limit = self.limit.unwrap_or(LIST_LIMIT).to_string();
+        let limit = limit.as_str();
         let mut arguments: Vec<&str> = match self.command {
-            Command::IssueList => vec!["issue", "list", "--state", state, "--limit", LIST_LIMIT],
-            Command::PrList => vec!["pr", "list", "--state", state, "--limit", LIST_LIMIT],
+            Command::IssueList => vec!["issue", "list", "--state", state, "--limit", limit],
+            Command::PrList => vec!["pr", "list", "--state", state, "--limit", limit],
             Command::IssueView => vec!["issue", "view", number.as_deref().unwrap_or_default()],
             Command::PrView => vec!["pr", "view", number.as_deref().unwrap_or_default()],
             Command::PrDiff => vec!["pr", "diff", number.as_deref().unwrap_or_default()],
             Command::PrChecks | Command::ChecksWait => {
                 vec!["pr", "checks", number.as_deref().unwrap_or_default()]
             }
-            Command::RunList => vec!["run", "list", "--limit", LIST_LIMIT],
+            Command::RunList => vec!["run", "list", "--limit", limit],
             Command::RunView => vec!["run", "view", number.as_deref().unwrap_or_default()],
         };
         if self.comments && matches!(self.command, Command::IssueView | Command::PrView) {
@@ -293,6 +307,13 @@ impl ToolRuntime for GithubTool {
                         "type": "string",
                         "enum": ["open", "closed", "merged", "all"],
                         "description": "For the lists. Defaults to open."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_LIST_LIMIT,
+                        "description": "For the lists: rows to return. Defaults to 30; a list \
+                                        that comes back with exactly that many may have more."
                     },
                     "comments": {
                         "type": "boolean",

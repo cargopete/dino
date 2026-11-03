@@ -181,8 +181,8 @@ CI and evals.
   no terminal and serves a small page: watch the stream, send a prompt, stop the
   run and answer approvals from a phone. It listens only on loopback or a
   Tailscale address, wants a fresh 256-bit token in a header on every request,
-  and offers a page fewer approval answers than the terminal (nothing that is
-  kept beyond the call's exact tool and subject, and no leaving the sandbox).
+  and offers a page every approval answer the terminal has, leaving the sandbox
+  included, except a rule remembered for later sessions.
   The page also lists the workspace's sessions to resume or trace, and moves
   the session to another workspace, but only one listed under `workspaces` in
   the user file or recently used. RFC-0020; the page has not been run in a

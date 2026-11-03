@@ -65,7 +65,8 @@ tool, the resolved subject (not a description the model wrote) and the call's
 arguments, up to 8 KiB. The pending approval survives a reconnect, and a run
 that is cancelled while asking takes its question back.
 
-A page is offered fewer answers than the terminal:
+A page is offered every answer but one (changed 2026-11-03, so that a session
+can be driven wholly from a phone):
 
 | Answer | Terminal | Page |
 |---|---|---|
@@ -74,20 +75,19 @@ A page is offered fewer answers than the terminal:
 | always for this exact tool and subject, this session | yes | yes |
 | refuse | yes | yes |
 | remember for later sessions | yes | no |
-| always for a whole program | yes | no |
-| every command this session | yes | no |
-| run once outside the sandbox | yes | **no, refuse only** |
+| always for a whole program | yes | yes |
+| every command or every edit this session | yes | yes |
+| run once outside the sandbox | yes | yes |
 
-The reasoning is that a phone can be lost, and the answers left out are the ones
-that outlast the loss or widen what an unattended session may do. The server
+A phone can be lost, and a remembered rule is the one answer that outlasts the
+session and its token. Everything else ends when `dino serve` does. The server
 checks the answer against what that approval offered, so a page cannot send one
 it was not given. Rules already saved for the workspace still apply, as they
 would at the terminal. With `--read-only` nothing asks, and with
 `--dangerously-allow-all` nothing asks either, which `dino serve` says.
 
-A call that asks to leave the sandbox can therefore never be approved in a
-`dino serve` session: there is no terminal prompt to approve it at. It is
-refused, and the model is told so.
+A call that asks to leave the sandbox is shown with what that means (full
+network, credentials, every file) and may be run once from the page.
 
 ## 5. Who may connect
 
