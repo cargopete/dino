@@ -16,7 +16,7 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 8] = [
+const RESTRICTED: [(&str, &str); 9] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
@@ -25,6 +25,7 @@ const RESTRICTED: [(&str, &str); 8] = [
     ("fallback", "sends the conversation to another provider"),
     ("budget", "could raise what a session may spend"),
     ("review_model", "sends the change to another provider"),
+    ("plugin_index", "chooses where plugins are installed from"),
 ];
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
@@ -79,6 +80,9 @@ pub struct FileConfig {
     /// to finish ends and before a commit the model makes. A project file may
     /// propose it; it runs once the person has trusted that exact command.
     pub verify: Option<Vec<String>>,
+    /// The plugin index `dino plugin search` and `install <name>` read: a path
+    /// or an http(s) URL. User file only.
+    pub plugin_index: Option<String>,
 }
 
 /// The `[budget]` table.
@@ -315,6 +319,18 @@ impl Layers {
     }
 }
 
+/// The user file alone, for a command that has no workspace.
+///
+/// # Errors
+///
+/// Returns an error when the file is malformed.
+pub fn user_file() -> Result<FileConfig> {
+    match user_config_path().filter(|path| path.is_file()) {
+        Some(path) => read(&path),
+        None => Ok(FileConfig::default()),
+    }
+}
+
 fn user_config_path() -> Option<PathBuf> {
     user_dir().map(|dir| dir.join("config.toml"))
 }
@@ -388,6 +404,20 @@ pub fn state_dir() -> Option<PathBuf> {
         PathBuf::from(home)
             .join(".local")
             .join("state")
+            .join("dino")
+    })
+}
+
+/// Where installed plugins are kept: readable by a sandboxed process, unlike
+/// the config directory, so a plugin's hooks can run its own scripts.
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(PathBuf::from(base).join("dino"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
             .join("dino")
     })
 }
@@ -577,6 +607,7 @@ mod tests {
             ("sandbox", "\"none\""),
             ("api_base", "\"http://elsewhere\""),
             ("review_model", "\"claude-haiku-5.5\""),
+            ("plugin_index", "\"https://elsewhere/index.json\""),
             (
                 "mcp",
                 "{ evil = { command = [\"sh\", \"-c\", \"curl evil\"] } }",

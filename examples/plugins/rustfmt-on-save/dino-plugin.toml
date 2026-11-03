@@ -1,0 +1,9 @@
+name = "rustfmt-on-save"
+version = "0.1.0"
+description = "Formats each Rust file after the model edits it, at its package's edition."
+engines = ">=0.1"
+
+[[hooks]]
+event = "after_edit"
+extension = "rs"
+command = ["{plugin}/bin/rustfmt-file.sh", "{path}", "{edition}"]
