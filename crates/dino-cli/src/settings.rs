@@ -16,7 +16,7 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 8] = [
+const RESTRICTED: [(&str, &str); 10] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
@@ -25,6 +25,8 @@ const RESTRICTED: [(&str, &str); 8] = [
     ("fallback", "sends the conversation to another provider"),
     ("budget", "could raise what a session may spend"),
     ("review_model", "sends the change to another provider"),
+    ("workspaces", "lets a remote page reach another directory"),
+    ("plugin_index", "chooses where plugins are installed from"),
 ];
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
@@ -82,6 +84,12 @@ pub struct FileConfig {
     /// The tools offered and the limits started under: standard, minimal or
     /// review. Only ever narrows, so a project file may set it.
     pub preset: Option<crate::preset::Preset>,
+    /// Workspaces the page of `dino serve` may move its session to, besides
+    /// those recently used. User file only.
+    pub workspaces: Option<Vec<PathBuf>>,
+    /// The plugin index `dino plugin search` and `install <name>` read: a path
+    /// or an http(s) URL. User file only.
+    pub plugin_index: Option<String>,
 }
 
 /// The `[budget]` table.
@@ -318,6 +326,18 @@ impl Layers {
     }
 }
 
+/// The user file alone, for a command that has no workspace.
+///
+/// # Errors
+///
+/// Returns an error when the file is malformed.
+pub fn user_file() -> Result<FileConfig> {
+    match user_config_path().filter(|path| path.is_file()) {
+        Some(path) => read(&path),
+        None => Ok(FileConfig::default()),
+    }
+}
+
 fn user_config_path() -> Option<PathBuf> {
     user_dir().map(|dir| dir.join("config.toml"))
 }
@@ -395,11 +415,42 @@ pub fn state_dir() -> Option<PathBuf> {
     })
 }
 
+/// Where installed plugins are kept: readable by a sandboxed process, unlike
+/// the config directory, so a plugin's hooks can run its own scripts.
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(PathBuf::from(base).join("dino"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("dino")
+    })
+}
+
 pub fn user_dir() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(base).join("dino"));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("dino"))
+}
+
+/// The user file's `workspaces`.
+///
+/// # Errors
+///
+/// Returns an error when the file is malformed.
+pub fn configured_workspaces() -> Result<Vec<PathBuf>> {
+    match user_config_path().filter(|path| path.is_file()) {
+        Some(path) => Ok(read(&path)?.workspaces.unwrap_or_default()),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Where the workspaces sessions were last run in are kept, newest last.
+pub fn recent_workspaces_path() -> Option<PathBuf> {
+    state_dir().map(|dir| dir.join("workspaces"))
 }
 
 /// What a project's verify command is trusted by: the workspace and the exact
@@ -580,6 +631,8 @@ mod tests {
             ("sandbox", "\"none\""),
             ("api_base", "\"http://elsewhere\""),
             ("review_model", "\"claude-haiku-5.5\""),
+            ("workspaces", "[\"/\"]"),
+            ("plugin_index", "\"https://elsewhere/index.json\""),
             (
                 "mcp",
                 "{ evil = { command = [\"sh\", \"-c\", \"curl evil\"] } }",

@@ -74,7 +74,7 @@ pub fn run(args: &ReplayArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn locate(requested: Option<&str>, workspace: &Path) -> Result<(String, PathBuf)> {
+pub(crate) fn locate(requested: Option<&str>, workspace: &Path) -> Result<(String, PathBuf)> {
     let directory = workspace.join(".dino").join("sessions");
     if let Some(id) = requested {
         let given = Path::new(id);

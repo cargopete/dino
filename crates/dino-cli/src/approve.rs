@@ -414,6 +414,27 @@ pub fn trust_verify(project_file: &Path, command: &[String]) -> bool {
     matches!(reply, ApprovalReply::Once)
 }
 
+/// Asks whether to install a plugin whose contributions have just been shown.
+pub fn confirm_plugin(name: &str) -> bool {
+    let choices = [
+        Choice {
+            key: 'y',
+            label: format!("install {name}"),
+            reply: ApprovalReply::Once,
+        },
+        Choice {
+            key: 'n',
+            label: "not now".to_owned(),
+            reply: ApprovalReply::Reject(None),
+        },
+    ];
+    let reply = match stderr().is_terminal().then(|| select(&choices)).flatten() {
+        Some(reply) => reply,
+        None => read_typed_answer(&choices),
+    };
+    matches!(reply, ApprovalReply::Once)
+}
+
 /// Restores the terminal however the selector exits.
 struct RawGuard;
 

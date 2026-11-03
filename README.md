@@ -78,9 +78,9 @@ CI and evals.
   several steps, shown in the transcript as it changes. `remember` appends a
   dated note to `~/.config/dino/memory/`, one file for you and one per workspace,
   both read back into later sessions, without asking. `skill` loads one of the skills in
-  `~/.config/dino/skills/` or the repository's `.dino/skills/`, folders with a
-  `SKILL.md` as Claude Code uses them; only their names and descriptions sit in
-  the system prompt. `github` reads the checkout's own issues, pull requests
+  `~/.config/dino/skills/`, an installed plugin or the repository's `.dino/skills/`,
+  folders with a `SKILL.md` as Claude Code uses them, or the built-in
+  `plugin-dev`; only their names and descriptions sit in the system prompt. `github` reads the checkout's own issues, pull requests
   and CI (`pr_checks`, `checks_wait` until no check is pending, `run_list`,
   `run_view` with `log_failed`) through a fixed set of read-only `gh` commands,
   run by `dino` rather than by a confined process, and is offered only where
@@ -183,7 +183,10 @@ CI and evals.
   Tailscale address, wants a fresh 256-bit token in a header on every request,
   and offers a page fewer approval answers than the terminal (nothing that is
   kept beyond the call's exact tool and subject, and no leaving the sandbox).
-  RFC-0020; the page has not been run in a browser.
+  The page also lists the workspace's sessions to resume or trace, and moves
+  the session to another workspace, but only one listed under `workspaces` in
+  the user file or recently used. RFC-0020; the page has not been run in a
+  browser.
 - **A turn budget.** `--max-turns` bounds a submission, 100 by default. The
   model is told the limit in its system prompt, sees the count from half-way, is
   counted down over its last three turns, and is told to make no calls in its
@@ -220,7 +223,11 @@ CI and evals.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `dino replay` renders a past session through the same renderer the live one
-  uses, with `--last N` for the recent exchanges.
+  uses, with `--last N` for the recent exchanges. `dino trace` shows where the
+  time went: each submission, turn and call with its input and output (cut to
+  2 KiB, `--full` for more), the model's time per turn, each call's run and the
+  wait for a person's approval, from the times every log record already
+  carries; `--json` for the same as data.
 - **Configuration, split by who wrote it.** `~/.config/dino/config.toml` for your
   defaults, `<workspace>/.dino/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
@@ -277,7 +284,9 @@ CI and evals.
   Each is a file in `.dino/schedules`, so it survives a restart. What comes due
   is sent between submissions as a message of its own, marked as scheduled
   rather than typed; one that falls due during a run waits for the run to end.
-  Under `dino serve` it is sent within a few seconds of falling due. At the
+  Under `dino serve` it is sent within a few seconds of falling due, a page's
+  resume sends what waits for the conversation resumed, and a move to another
+  workspace leaves this one's schedules behind for the next session here. At the
   terminal the line editor cannot be interrupted, so it is printed at once and
   sent when you next press Enter. A schedule belongs to the conversation that
   set it: if no session has that conversation open, it waits, a session in the
@@ -302,6 +311,46 @@ CI and evals.
   `--max-turns` says otherwise; `dino review` uses it. A tool a preset leaves
   out is absent, not refused, and only `standard` has schedules. The system
   prompt's general guidance still names tools a preset may have removed.
+- **Plugins.** A plugin is a directory with a `dino-plugin.toml` naming it, a
+  semver `version`, a `description` and an `engines` range of Dino versions,
+  and contributing any of skills (folders under `skills/`), `[[hooks]]` and
+  `[mcp.<name>]` tables shaped as in the user file, and an `instructions` file
+  read into every session's prompt. `{plugin}` in a command is the installed
+  bundle's directory. `dino plugin install` takes a directory, a git URL
+  (`git+<url>#<rev>` pins one) or `name[@version]` from an index, prints
+  everything it contributes, the commands its hooks and servers run included,
+  with its digest, and asks. With no terminal to ask at it refuses unless
+  `--checksum` names that digest, so a model installing one from chat (an
+  unconfined command, approved each time) installs exactly the files the
+  person was shown. `list`, `enable`, `disable` and `uninstall` do what they
+  say, and changes take effect from the next session. Bundles are copied to
+  `~/.local/share/dino/plugins/` (`$XDG_DATA_HOME`), not the config
+  directory, because a sandboxed hook cannot read `~/.config/dino` and must
+  run its plugin's scripts; what was approved is recorded in
+  `~/.config/dino/plugins.toml`, which no sandboxed process can read or write,
+  and a plugin whose files no longer hash to it is not loaded, with a warning.
+  Only the person's own directories are consulted: a repository cannot
+  install, enable or point at a plugin, and `plugin_index` is user-file only.
+  A plugin's hooks run after the user file's, and an MCP server whose name is
+  already configured is left out. `dino config` names the plugins loaded.
+- **Creating a plugin.** `dino plugin new <name>` writes a bundle that
+  validates as it stands; `dino plugin validate <dir>` names every problem at
+  once, or prints what it contributes and its digest. The built-in
+  `plugin-dev` skill takes a model through writing, validating and installing
+  one from chat, then checking `dino plugin list` and `dino prompt` for it.
+  A plugin loads when a session starts, so the session that wrote it does not
+  have it.
+- **A plugin index.** `plugin_index` in the user file, or `--index`, names a
+  JSON index by path or http(s) URL: each plugin's name, description, optional
+  icon, and versions with an `engines` range, a `source` (a directory beside
+  the index, or `git+<url>#<rev>`) and the `checksum` its bundle must hash to.
+  `dino plugin search [word]` lists it with the newest version made for this
+  Dino; `dino plugin install name[@version]` refuses a bundle that does not
+  match its checksum, or a version whose range excludes this Dino. `dino plugin
+  validate-index` checks an index, and every bundle it names by directory
+  whole; git sources are not fetched. No public index exists;
+  [examples/plugins](examples/plugins) is one with one plugin, checked by the
+  test suite.
 - **An eval harness.** `dino eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also
