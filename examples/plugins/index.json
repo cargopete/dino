@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "plugins": [
+    {
+      "name": "rustfmt-on-save",
+      "description": "Formats each Rust file after the model edits it, at its package's edition.",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "engines": ">=0.1",
+          "source": "rustfmt-on-save",
+          "checksum": "sha256:5d15824c83a55c5cd238a16e1dbddfd15f2e00f2c41908bb454e02e6c7885ff9"
+        }
+      ]
+    }
+  ]
+}
