@@ -184,7 +184,9 @@ fn absorb(metrics: &mut Metrics, names: &mut HashMap<String, ToolCall>, event: &
             metrics.bytes_reclaimed += bytes_reclaimed;
         }
         AgentEvent::ContextWarning { .. } => metrics.context_warned = true,
-        AgentEvent::TurnRetried { .. } => metrics.turns_retried += 1,
+        AgentEvent::TurnRetried { .. } | AgentEvent::WaitingForNetwork { .. } => {
+            metrics.turns_retried += 1;
+        }
         AgentEvent::TurnsRunningOut { .. } => metrics.told_turns_left = true,
         AgentEvent::TurnCutOff { .. } => metrics.turns_cut_off += 1,
         AgentEvent::SentBack { .. } => metrics.sent_back = true,
