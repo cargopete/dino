@@ -399,6 +399,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "terminal_size",
  "tokio",
@@ -461,6 +462,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]

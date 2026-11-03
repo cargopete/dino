@@ -375,6 +375,38 @@ impl crate::spend::Purse for TerminalPurse {
     }
 }
 
+/// Asks the person whether a project's proposed verify command may run. With
+/// nobody at the terminal, it may not.
+pub fn trust_verify(project_file: &Path, command: &[String]) -> bool {
+    if !stdin().is_terminal() {
+        return false;
+    }
+    eprintln!(
+        "\n{}  {} proposes a verify command, run before a task you said to finish ends \
+         and before each commit the model makes:\n    {}",
+        style::paint_with(EMBER, &[BOLD], "  verify"),
+        project_file.display(),
+        command.join(" ")
+    );
+    let choices = [
+        Choice {
+            key: 'y',
+            label: "trust this command in this workspace".to_owned(),
+            reply: ApprovalReply::Once,
+        },
+        Choice {
+            key: 'n',
+            label: "not now".to_owned(),
+            reply: ApprovalReply::Reject(None),
+        },
+    ];
+    let reply = match stderr().is_terminal().then(|| select(&choices)).flatten() {
+        Some(reply) => reply,
+        None => read_typed_answer(&choices),
+    };
+    matches!(reply, ApprovalReply::Once)
+}
+
 /// Restores the terminal however the selector exits.
 struct RawGuard;
 

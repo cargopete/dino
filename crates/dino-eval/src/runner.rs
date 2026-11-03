@@ -164,6 +164,8 @@ pub struct ToolOptions {
     /// Let `exec` and `shell` ask to run one command outside the sandbox, for
     /// a person to approve. Never in evals, which have no person.
     pub escalation: bool,
+    /// The workspace's verify command, run before `exec` or `shell` commits.
+    pub verify: Option<Vec<String>>,
 }
 
 /// A tool set with some tools hidden, for ablation.
@@ -675,6 +677,7 @@ fn eval_session(
                 skills: Vec::new(),
                 skip_edit_check: false,
                 escalation: false,
+                verify: None,
             },
         )?,
         hidden: variant.without.iter().cloned().collect(),
@@ -1088,25 +1091,34 @@ pub fn session_tools_with(
             .iter()
             .any(|definition| definition.name == dino_core::progress::PROGRESS)
     });
+    let committing = |tool: Box<dyn ToolRuntime>| -> Box<dyn ToolRuntime> {
+        match &options.verify {
+            Some(command) => Box::new(dino_exec::BeforeCommit::new(
+                tool,
+                dino_exec::Verify::new(command.clone(), workspace, Arc::clone(&sandbox)),
+            )),
+            None => tool,
+        }
+    };
     let mut runtimes: Vec<Box<dyn ToolRuntime>> = vec![
         file_tools(workspace, options, &sandbox)?,
         Box::new(dino_core::blocker::BlockerTool),
         {
             let exec = ExecTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
                 .map_err(setup)?;
-            Box::new(if options.escalation {
-                exec.with_escalation()
+            committing(if options.escalation {
+                Box::new(exec.with_escalation())
             } else {
-                exec
+                Box::new(exec)
             })
         },
         {
             let shell = ShellTool::new(workspace, ExecLimits::default(), Arc::clone(&sandbox))
                 .map_err(setup)?;
-            Box::new(if options.escalation {
-                shell.with_escalation()
+            committing(if options.escalation {
+                Box::new(shell.with_escalation())
             } else {
-                shell
+                Box::new(shell)
             })
         },
         Box::new(

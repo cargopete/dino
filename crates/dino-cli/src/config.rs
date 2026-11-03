@@ -101,6 +101,8 @@ pub struct RunSettings {
     pub start_hooks: Vec<dino_exec::Hook>,
     /// Run when a task ends, for tasks that ran long enough.
     pub task_end_hooks: Vec<crate::task::EndHook>,
+    /// The workspace's verify command, when it may run.
+    pub verify: Option<Vec<String>>,
     /// What a task may spend when its message names no limit.
     pub task_limits: crate::task::Limits,
     pub mcp: Vec<dino_exec::McpServer>,
@@ -436,6 +438,7 @@ mod tests {
             end_turn_hooks: Vec::new(),
             start_hooks: Vec::new(),
             task_end_hooks: Vec::new(),
+            verify: None,
             task_limits: crate::task::Limits::default(),
             mcp: Vec::new(),
             thinking_budget: None,

@@ -304,7 +304,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let tools = tool_set(
         &workspace,
         sandbox,
-        &interactive_options(&workspace, Vec::new(), None, Vec::new()),
+        &interactive_options(&workspace, Vec::new(), None, Vec::new(), None),
         Vec::new(),
     )?;
     let context = prompt_context(
@@ -339,7 +339,8 @@ fn tool_set(
 }
 
 /// What must be true before the model may end its turn: the user's
-/// before-end-turn hooks, and for a run nobody watches, a clean build.
+/// before-end-turn hooks, and for a run nobody watches, a clean build and the
+/// workspace's verify command.
 fn finish_checks(
     settings: &RunSettings,
     sandbox: &Arc<dyn Sandbox>,
@@ -358,7 +359,19 @@ fn finish_checks(
     {
         checks.push(Box::new(build));
     }
+    if unattended && let Some(verify) = verify_check(settings, sandbox) {
+        checks.push(Box::new(verify));
+    }
     Ok(checks)
+}
+
+fn verify_check(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Option<dino_exec::Verify> {
+    let command = settings.verify.clone()?;
+    Some(dino_exec::Verify::new(
+        command,
+        &settings.workspace,
+        Arc::clone(sandbox),
+    ))
 }
 
 /// What each session-start hook printed, as instructions under its command.
@@ -401,6 +414,7 @@ fn session_tool_set(
             settings.protected.clone(),
             settings.max_diagnostics,
             settings.hooks.clone(),
+            settings.verify.clone(),
         ),
         mcp,
     )
@@ -479,6 +493,7 @@ fn interactive_options(
     protected: Vec<PathBuf>,
     max_diagnostics: Option<usize>,
     hooks: Vec<dino_exec::Hook>,
+    verify: Option<Vec<String>>,
 ) -> dino_eval::ToolOptions {
     dino_eval::ToolOptions {
         protected,
@@ -490,6 +505,7 @@ fn interactive_options(
         web: true,
         skip_edit_check: false,
         escalation: true,
+        verify,
     }
 }
 
@@ -593,6 +609,10 @@ fn guarded(
         agent
     } else {
         agent.with_finish_check(dino_core::FirstUnfinished::new(checks))
+    };
+    let agent = match verify_check(settings, sandbox).filter(|_| !unattended) {
+        Some(verify) => agent.with_task_check(verify),
+        None => agent,
     };
     Ok(match &settings.review {
         Some(review) => agent.with_reviewer(Arc::new(dino_core::review::Reviewer::new(
@@ -1201,9 +1221,50 @@ struct Resolved {
     end_turn_hooks: Vec<dino_exec::Hook>,
     start_hooks: Vec<dino_exec::Hook>,
     task_end_hooks: Vec<task::EndHook>,
+    verify: Option<(Vec<String>, Source)>,
     task_limits: task::Limits,
     mcp: Vec<dino_exec::McpServer>,
     layers: Layers,
+}
+
+/// The verify command, if it may run: the user's own, or a project's the
+/// person has trusted, now or before, in exactly this form.
+fn trusted_verify(
+    proposed: Option<(Vec<String>, Source)>,
+    project_file: Option<&Path>,
+    workspace: &Path,
+) -> Option<Vec<String>> {
+    let (command, source) = proposed?;
+    let Some(project_file) = project_file.filter(|_| source == Source::ProjectFile) else {
+        return Some(command);
+    };
+    let digest = settings::verify_digest(workspace, &command);
+    let store = settings::trusted_verify_path()?;
+    if settings::is_trusted(&store, &digest) {
+        return Some(command);
+    }
+    if approve::trust_verify(project_file, &command) {
+        if let Err(error) = settings::trust(&store, &digest) {
+            eprintln!(
+                "{}",
+                style::paint(style::WARN, &format!("could not record the trust: {error}"))
+            );
+        }
+        return Some(command);
+    }
+    eprintln!(
+        "{}",
+        style::paint(
+            style::WARN,
+            &format!(
+                "{} proposes the verify command `{}`, which is not trusted and will not run; \
+                 start an interactive session here to trust it",
+                project_file.display(),
+                command.join(" ")
+            )
+        )
+    );
+    None
 }
 
 /// The user file's hooks for one event. A project file cannot set any.
@@ -1337,6 +1398,9 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         end_turn_hooks: hooks_for(&layers, settings::HookEvent::BeforeEndTurn),
         start_hooks: hooks_for(&layers, settings::HookEvent::SessionStart),
         task_end_hooks: end_hooks(&layers),
+        verify: layers
+            .pick(|file| file.verify.clone())
+            .filter(|(command, _)| !command.is_empty()),
         task_limits: layers.task_limits()?,
         mcp: mcp_servers(&layers),
         layers,
@@ -1372,6 +1436,13 @@ fn reasoning_effort(
             .pick(|file| file.reasoning_effort.map(Some))
             .unwrap_or((None, Source::Default)),
     }
+}
+
+fn verify_row(verify: Option<&(Vec<String>, Source)>) -> String {
+    verify.map_or_else(
+        || "unset".to_owned(),
+        |(command, source)| format!("{}  ({})", command.join(" "), source.label()),
+    )
 }
 
 fn budget_row(budget: Option<spend::Budget>) -> String {
@@ -1501,6 +1572,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
                 .map_or_else(|| "off".to_owned(), |key| format!("{key}  (user file)")),
         ),
         ("budget", budget_row(resolved.budget)),
+        ("verify", verify_row(resolved.verify.as_ref())),
         (
             "task budget",
             format!(
@@ -1540,6 +1612,11 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         Some(path) => path.clone(),
         None => config::default_log_path(&workspace, session_id.as_str()),
     };
+    let verify = trusted_verify(
+        resolved.verify,
+        resolved.layers.project_path.as_deref(),
+        &workspace,
+    );
     Ok(RunSettings {
         profile,
         workspace,
@@ -1553,6 +1630,7 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         end_turn_hooks: resolved.end_turn_hooks,
         start_hooks: resolved.start_hooks,
         task_end_hooks: resolved.task_end_hooks,
+        verify,
         task_limits: resolved.task_limits,
         mcp: resolved.mcp,
         thinking_budget: resolved.thinking_budget.0,
