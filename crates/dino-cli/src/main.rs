@@ -157,7 +157,8 @@ struct CommonArgs {
     /// high, xhigh or max. Leaves the model's default when absent.
     #[arg(long)]
     effort: Option<dino_protocol::ReasoningEffort>,
-    /// Continue a previous session. Bare, the most recent in this workspace.
+    /// Continue a previous session by id or /rename name. Bare, the most recent
+    /// in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 }
@@ -848,6 +849,9 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
         log_path: prepared.settings.log_path.display().to_string(),
         end_hooks: prepared.settings.task_end_hooks.clone(),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
+        name: resume::label(&prepared.state_path)
+            .ok()
+            .and_then(|label| label.name),
         state_path: prepared.state_path,
         greeting: greeting::shows(
             prepared.settings.greeting,
@@ -1157,11 +1161,10 @@ fn resume_from(requested: Option<&str>, workspace: &Path) -> Result<Option<(Stri
         };
         return Ok(Some(found));
     }
-    let path = resume::state_path(workspace, requested);
-    if !path.is_file() {
-        bail!("no session {requested:?} in {}", workspace.display());
+    match resume::find(workspace, requested)? {
+        Some(found) => Ok(Some(found)),
+        None => bail!("no session {requested:?} in {}", workspace.display()),
     }
-    Ok(Some((requested.to_owned(), path)))
 }
 
 /// Persists the session's native state, so it can be continued later.
@@ -1173,7 +1176,11 @@ pub(crate) fn save_state<S: ModelSession, T: dino_core::ToolRuntime>(
     // have expired anyway, and a one-shot against a provider without state is
     // still a complete run.
     match agent.session().export_state() {
-        Ok(state) => resume::save(path, &state).map_err(Into::into),
+        Ok(state) => {
+            // A resumed conversation keeps the name it was given.
+            let name = resume::label(path).ok().and_then(|label| label.name);
+            resume::save(path, &state, name.as_deref()).map_err(Into::into)
+        }
         Err(_) => Ok(()),
     }
 }

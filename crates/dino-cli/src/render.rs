@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use dino_core::session::EventSink;
 use dino_core::session::RunOutcome;
@@ -568,24 +569,20 @@ impl EventSink for Renderer {
             }
             AgentEvent::TurnRetried { attempt, error, .. } => {
                 self.break_stream()?;
-                write_out(&style::paint(
-                    WARN,
-                    &format!(
-                        "  the stream broke ({}); sending the turn again, attempt {}\n",
-                        cap(first_line(error), MAX_SUMMARY_BYTES),
-                        attempt + 1
-                    ),
-                ))
+                turn_retried(*attempt, error)
+            }
+            AgentEvent::WaitingForNetwork {
+                error,
+                waited_seconds,
+                retry_in_seconds,
+                ..
+            } => {
+                self.break_stream()?;
+                waiting_for_network(error, *waited_seconds, *retry_in_seconds)
             }
             AgentEvent::SentBack { reason, .. } => {
                 self.break_stream()?;
-                write_out(&style::paint(
-                    WARN,
-                    &format!(
-                        "  not finished, sent back: {}\n",
-                        cap(first_line(reason), MAX_SUMMARY_BYTES)
-                    ),
-                ))
+                sent_back(reason)
             }
             AgentEvent::Reviewed {
                 objections, error, ..
@@ -887,6 +884,39 @@ fn reviewed(objections: &[String], error: Option<&str>) -> String {
     };
     style::paint(if objections.is_empty() { FAINT } else { WARN }, &line)
 }
+fn turn_retried(attempt: u32, error: &str) -> Result<(), SinkError> {
+    write_out(&style::paint(
+        WARN,
+        &format!(
+            "  the stream broke ({}); sending the turn again, attempt {}\n",
+            cap(first_line(error), MAX_SUMMARY_BYTES),
+            attempt + 1
+        ),
+    ))
+}
+
+fn sent_back(reason: &str) -> Result<(), SinkError> {
+    write_out(&style::paint(
+        WARN,
+        &format!(
+            "  not finished, sent back: {}\n",
+            cap(first_line(reason), MAX_SUMMARY_BYTES)
+        ),
+    ))
+}
+
+fn waiting_for_network(error: &str, waited: u64, retry_in: u64) -> Result<(), SinkError> {
+    write_out(&style::paint(
+        WARN,
+        &format!(
+            "  waiting for the network ({}); trying again in {}, {} so far\n",
+            cap(first_line(error), MAX_SUMMARY_BYTES),
+            crate::task::duration_text(Duration::from_secs(retry_in)),
+            crate::task::duration_text(Duration::from_secs(waited)),
+        ),
+    ))
+}
+
 fn elided(results: usize, calls: usize, bytes: usize) -> Result<(), SinkError> {
     write_out(&style::paint(
         FAINT,

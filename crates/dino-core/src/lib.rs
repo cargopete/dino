@@ -29,6 +29,8 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::time::Duration;
+use std::time::Instant;
 
 use dino_model::ModelError;
 use dino_model::ModelSession;
@@ -308,6 +310,12 @@ pub struct AgentConfig {
     pub turn_attempts: u32,
     /// From how many turns left the model is told the count.
     pub turn_notice_at: u32,
+    /// How long a turn waits out a model it cannot reach, after the adapter's
+    /// own retries, before the run fails.
+    pub outage_limit: Duration,
+    /// The first wait in an outage, doubled up to `outage_backoff_cap`.
+    pub outage_first_delay: Duration,
+    pub outage_backoff_cap: Duration,
 }
 
 impl Default for AgentConfig {
@@ -321,6 +329,9 @@ impl Default for AgentConfig {
             keep_recent_results: 8,
             turn_attempts: 3,
             turn_notice_at: 3,
+            outage_limit: Duration::from_secs(30 * 60),
+            outage_first_delay: Duration::from_secs(5),
+            outage_backoff_cap: Duration::from_secs(60),
         }
     }
 }
@@ -430,6 +441,10 @@ enum Attempt {
     },
     Broken {
         error: String,
+    },
+    /// The request never reached the model, for a reason a repeat may fix.
+    Unreachable {
+        error: ModelError,
     },
     Cancelled {
         turns: u32,
@@ -1087,7 +1102,8 @@ where
     }
 
     /// Streams a turn, sending it again while its stream breaks partway and
-    /// attempts remain.
+    /// attempts remain, and while the model cannot be reached within the
+    /// outage limit.
     async fn stream_turn(
         &mut self,
         model_turn: u32,
@@ -1098,6 +1114,7 @@ where
         cancel: &CancellationToken,
     ) -> Result<Streamed, AgentError> {
         let mut attempt = 1;
+        let mut outage: Option<(Instant, Duration)> = None;
         loop {
             let turn = Turn {
                 number: model_turn,
@@ -1118,6 +1135,45 @@ where
                         events,
                     )?;
                     attempt += 1;
+                }
+                Attempt::Unreachable { error } => {
+                    let (since, delay) =
+                        *outage.get_or_insert((Instant::now(), self.config.outage_first_delay));
+                    let waited = since.elapsed();
+                    let Some(left) = self
+                        .config
+                        .outage_limit
+                        .checked_sub(waited)
+                        .filter(|left| !left.is_zero())
+                    else {
+                        return Err(AgentError::Unreachable {
+                            waited: waited.as_secs(),
+                            error,
+                        });
+                    };
+                    let delay = delay.min(left);
+                    self.emit(
+                        AgentEvent::WaitingForNetwork {
+                            model_turn,
+                            error: error.to_string(),
+                            waited_seconds: waited.as_secs(),
+                            retry_in_seconds: delay.as_secs(),
+                        },
+                        events,
+                    )?;
+                    if cancel
+                        .run_until_cancelled(tokio::time::sleep(delay))
+                        .await
+                        .is_none()
+                    {
+                        return Ok(Streamed::Cancelled {
+                            turns: model_turn.saturating_sub(1),
+                        });
+                    }
+                    outage = Some((
+                        since,
+                        delay.saturating_mul(2).min(self.config.outage_backoff_cap),
+                    ));
                 }
                 Attempt::Finished { calls, stop_reason } => {
                     return Ok(Streamed::Finished { calls, stop_reason });
@@ -1150,7 +1206,11 @@ where
                 turns: model_turn.saturating_sub(1),
             });
         };
-        let mut stream = stream?;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) if error.is_transient() => return Ok(Attempt::Unreachable { error }),
+            Err(error) => return Err(error.into()),
+        };
         let text_before = text.len();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut stop_reason = None;
@@ -1498,4 +1558,6 @@ pub enum AgentError {
     DuplicateToolCallId(String),
     #[error("model-turn limit reached after {0} turns")]
     ModelTurnLimit(u32),
+    #[error("gave up after {waited}s waiting for the model: {error}")]
+    Unreachable { waited: u64, error: ModelError },
 }
