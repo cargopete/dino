@@ -29,6 +29,32 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
+    /// The whole file, for a skill compiled into the binary rather than read.
+    pub builtin: Option<&'static str>,
+}
+
+/// A skill shipped inside the binary, or `None` when `text` has no description.
+#[must_use]
+pub fn builtin(text: &'static str) -> Option<Skill> {
+    let (front, _) = split_front_matter(text);
+    let field = |key: &str| front_field(front, key);
+    Some(Skill {
+        name: field("name").filter(|value| !value.is_empty())?,
+        description: cap(
+            &field("description").filter(|value| !value.is_empty())?,
+            MAX_DESCRIPTION_BYTES,
+        ),
+        path: PathBuf::from("(built in)"),
+        builtin: Some(text),
+    })
+}
+
+fn front_field(front: &str, key: &str) -> Option<String> {
+    front.lines().find_map(|line| {
+        line.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .map(|value| value.trim().trim_matches('"').to_owned())
+    })
 }
 
 /// Every skill beneath `dirs`, earlier directories winning a name. A folder
@@ -47,13 +73,7 @@ pub fn discover(dirs: &[PathBuf]) -> Vec<Skill> {
                 let text = std::fs::read_to_string(&path).ok()?;
                 let folder = entry.file_name().into_string().ok()?;
                 let (front, _) = split_front_matter(&text);
-                let field = |key: &str| {
-                    front.lines().find_map(|line| {
-                        line.strip_prefix(key)
-                            .and_then(|rest| rest.strip_prefix(':'))
-                            .map(|value| value.trim().trim_matches('"').to_owned())
-                    })
-                };
+                let field = |key: &str| front_field(front, key);
                 let description = field("description").filter(|value| !value.is_empty())?;
                 Some(Skill {
                     name: field("name")
@@ -61,6 +81,7 @@ pub fn discover(dirs: &[PathBuf]) -> Vec<Skill> {
                         .unwrap_or(folder),
                     description: cap(&description, MAX_DESCRIPTION_BYTES),
                     path,
+                    builtin: None,
                 })
             })
             .collect();
@@ -129,6 +150,9 @@ impl SkillTool {
 /// The body, and the other files in the skill's folder, which its text often
 /// names as scripts or references to read.
 fn load(skill: &Skill) -> Result<String, ToolError> {
+    if let Some(text) = skill.builtin {
+        return Ok(cap(split_front_matter(text).1.trim(), MAX_BODY_BYTES));
+    }
     let text = std::fs::read_to_string(&skill.path).map_err(|error| {
         ToolError::new(format!("cannot read {}: {error}", skill.path.display()))
     })?;
@@ -271,5 +295,23 @@ mod tests {
             output.content
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn a_built_in_skill_loads_its_body_without_touching_the_disk() {
+        let skill = builtin("---\nname: plugin-dev\ndescription: Write a plugin.\n---\n\n# Body\n")
+            .unwrap();
+        assert_eq!(skill.description, "Write a plugin.");
+        assert!(builtin("---\nname: nameless-description\n---\nbody\n").is_none());
+
+        let output = SkillTool::new(vec![skill])
+            .execute(&ToolCall {
+                id: "call-1".into(),
+                name: SKILL.into(),
+                arguments: json!({"name": "plugin-dev"}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.content, "# Body");
     }
 }

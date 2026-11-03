@@ -78,9 +78,9 @@ CI and evals.
   several steps, shown in the transcript as it changes. `remember` appends a
   dated note to `~/.config/dino/memory/`, one file for you and one per workspace,
   both read back into later sessions, without asking. `skill` loads one of the skills in
-  `~/.config/dino/skills/` or the repository's `.dino/skills/`, folders with a
-  `SKILL.md` as Claude Code uses them; only their names and descriptions sit in
-  the system prompt. `github` reads the checkout's own issues, pull requests
+  `~/.config/dino/skills/`, an installed plugin or the repository's `.dino/skills/`,
+  folders with a `SKILL.md` as Claude Code uses them, or the built-in
+  `plugin-dev`; only their names and descriptions sit in the system prompt. `github` reads the checkout's own issues, pull requests
   and CI (`pr_checks`, `checks_wait` until no check is pending, `run_list`,
   `run_view` with `log_failed`) through a fixed set of read-only `gh` commands,
   run by `dino` rather than by a confined process, and is offered only where
@@ -274,6 +274,46 @@ CI and evals.
   a hook that exits 0 ran, which is not proof the message arrived, and a
   process killed before its task ends sends none. For Discord:
   `command = ["curl", "-sS", "--form-string", "content={message}", "https://discord.com/api/webhooks/ID/TOKEN"]`.
+- **Plugins.** A plugin is a directory with a `dino-plugin.toml` naming it, a
+  semver `version`, a `description` and an `engines` range of Dino versions,
+  and contributing any of skills (folders under `skills/`), `[[hooks]]` and
+  `[mcp.<name>]` tables shaped as in the user file, and an `instructions` file
+  read into every session's prompt. `{plugin}` in a command is the installed
+  bundle's directory. `dino plugin install` takes a directory, a git URL
+  (`git+<url>#<rev>` pins one) or `name[@version]` from an index, prints
+  everything it contributes, the commands its hooks and servers run included,
+  with its digest, and asks. With no terminal to ask at it refuses unless
+  `--checksum` names that digest, so a model installing one from chat (an
+  unconfined command, approved each time) installs exactly the files the
+  person was shown. `list`, `enable`, `disable` and `uninstall` do what they
+  say, and changes take effect from the next session. Bundles are copied to
+  `~/.local/share/dino/plugins/` (`$XDG_DATA_HOME`), not the config
+  directory, because a sandboxed hook cannot read `~/.config/dino` and must
+  run its plugin's scripts; what was approved is recorded in
+  `~/.config/dino/plugins.toml`, which no sandboxed process can read or write,
+  and a plugin whose files no longer hash to it is not loaded, with a warning.
+  Only the person's own directories are consulted: a repository cannot
+  install, enable or point at a plugin, and `plugin_index` is user-file only.
+  A plugin's hooks run after the user file's, and an MCP server whose name is
+  already configured is left out. `dino config` names the plugins loaded.
+- **Creating a plugin.** `dino plugin new <name>` writes a bundle that
+  validates as it stands; `dino plugin validate <dir>` names every problem at
+  once, or prints what it contributes and its digest. The built-in
+  `plugin-dev` skill takes a model through writing, validating and installing
+  one from chat, then checking `dino plugin list` and `dino prompt` for it.
+  A plugin loads when a session starts, so the session that wrote it does not
+  have it.
+- **A plugin index.** `plugin_index` in the user file, or `--index`, names a
+  JSON index by path or http(s) URL: each plugin's name, description, optional
+  icon, and versions with an `engines` range, a `source` (a directory beside
+  the index, or `git+<url>#<rev>`) and the `checksum` its bundle must hash to.
+  `dino plugin search [word]` lists it with the newest version made for this
+  Dino; `dino plugin install name[@version]` refuses a bundle that does not
+  match its checksum, or a version whose range excludes this Dino. `dino plugin
+  validate-index` checks an index, and every bundle it names by directory
+  whole; git sources are not fetched. No public index exists;
+  [examples/plugins](examples/plugins) is one with one plugin, checked by the
+  test suite.
 - **An eval harness.** `dino eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also
