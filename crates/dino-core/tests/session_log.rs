@@ -127,3 +127,49 @@ fn an_unwritable_path_fails_at_creation_rather_than_later() {
 
     assert!(error.to_string().contains("session log"), "said: {error}");
 }
+
+/// A writer whose bytes the test can read after the log is dropped.
+#[derive(Clone, Default)]
+struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Shared {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_log_to_a_writer_carries_the_same_records_as_a_file() {
+    let written = Shared::default();
+    let mut log = JsonlSessionLog::to_writer(written.clone(), "stdout", meta()).unwrap();
+    log.emit(&AgentEvent::Submitted {
+        text: "hello".into(),
+    })
+    .unwrap();
+    log.finish(&RunOutcome {
+        stop_reason: Some(StopReason::EndTurn),
+        model_turns: 1,
+        error: None,
+    })
+    .unwrap();
+    drop(log);
+
+    let bytes = written.0.lock().unwrap().clone();
+    let records: Vec<Value> = String::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds: Vec<&str> = records
+        .iter()
+        .map(|record| record["record"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["started", "event", "finished"]);
+    assert_eq!(records[1]["event"]["type"], "submitted");
+    assert_eq!(records[1]["event"]["text"], "hello");
+}

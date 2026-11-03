@@ -184,6 +184,16 @@ CI and evals.
   and offers a page fewer approval answers than the terminal (nothing that is
   kept beyond the call's exact tool and subject, and no leaving the sandbox).
   RFC-0020; the page has not been run in a browser.
+- **Reviews from GitHub.** `dino webhook` takes signed `pull_request`
+  deliveries and reviews a pull request when it is marked ready, or opened
+  ready, in a checkout of its head beside a clone you name, read-only, with the
+  file tools only and nothing from the checkout in the prompt. Reviews are
+  recorded under Dino's state directory; posting them is off unless
+  `webhook.post` is set. See [docs/webhook.md](docs/webhook.md); not yet run
+  against GitHub.
+- **Driving Dino from a program.** The `dino-sdk` crate is the supported Rust
+  surface, and `dino run --json` streams the session log's records for any other
+  language. See [docs/sdk.md](docs/sdk.md).
 - **A turn budget.** `--max-turns` bounds a submission, 100 by default. The
   model is told the limit in its system prompt, sees the count from half-way, is
   counted down over its last three turns, and is told to make no calls in its
@@ -664,7 +674,7 @@ macOS-only helper left undead on Linux, and a sandbox helper that `cargo install
 did not deliver at all. A third job reports the Landlock ABI the hosted Linux
 runner offers.
 
-Nine crates:
+Ten crates:
 
 - `dino-protocol`: values crossing crate and frontend boundaries.
 - `dino-model`: provider session traits and the explicit model catalogue.
@@ -679,6 +689,8 @@ Nine crates:
   an unattended model back, and the withdrawn gate.
 - `dino-eval`: the case format, the runner, the metrics read from a log, and the
   one definition of what tools a session gets.
+- `dino-sdk`: the small, stable surface for driving Dino from another Rust
+  program.
 - `dino-cli`: the `dino` executable, its session loop, renderer, palette and
   approval prompt, and the `dino-confine` helper that restricts itself with
   Landlock and then `exec`s.

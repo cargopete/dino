@@ -21,6 +21,7 @@ mod spinner;
 mod style;
 mod summary;
 mod task;
+mod webhook;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -108,6 +109,9 @@ enum Command {
     /// Run a session with no terminal, driven from a web page over Tailscale or
     /// an SSH tunnel. RFC-0020.
     Serve(ServeArgs),
+    /// Review pull requests as GitHub reports them ready, read-only, from a
+    /// signed webhook. Configured under [webhook] in your own config file.
+    Webhook(WebhookArgs),
     /// Show the palette and the opening drawing as this terminal draws them.
     Palette,
 }
@@ -194,6 +198,10 @@ struct RunArgs {
     /// With --handover, the turns one session may take before it hands over.
     #[arg(long, default_value_t = 16)]
     session_turns: u32,
+    /// Write the run to standard output as JSON lines, the session log's
+    /// records, in place of the transcript. The protocol in docs/sdk.md.
+    #[arg(long)]
+    json: bool,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -209,6 +217,18 @@ struct ServeArgs {
     port: u16,
     #[command(flatten)]
     common: CommonArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct WebhookArgs {
+    /// Address to listen on: a loopback or Tailscale address, and nothing else.
+    /// Default localhost, for `tailscale funnel` or another proxy that ends
+    /// HTTPS in front of it.
+    #[arg(long)]
+    bind: Option<std::net::IpAddr>,
+    /// Port to listen on.
+    #[arg(long, default_value_t = 7879)]
+    port: u16,
 }
 
 #[derive(Debug, clap::Args)]
@@ -265,6 +285,7 @@ fn dispatch() -> Result<ExitCode> {
         }
         Some(Command::Replay(args)) => replay::run(&args),
         Some(Command::Serve(args)) => on_runtime(serve(args)),
+        Some(Command::Webhook(args)) => on_runtime(webhook(args)),
         Some(Command::Palette) => {
             style::enable(false);
             print!("{}", greeting::palette());
@@ -666,11 +687,30 @@ fn warn_unprotected(settings: &RunSettings, sandbox: &dyn Sandbox) {
     }
 }
 
+/// Where a run is shown: the terminal, or with `json` standard output as the
+/// session log's records.
+fn shown(
+    json: bool,
+    renderer: Renderer,
+    meta: SessionMeta,
+) -> Result<Box<dyn dino_core::session::EventSink>> {
+    Ok(if json {
+        Box::new(JsonlSessionLog::to_writer(
+            std::io::stdout(),
+            "standard output",
+            meta,
+        )?)
+    } else {
+        Box::new(renderer)
+    })
+}
+
 fn prepare(
     common: &CommonArgs,
     unattended: bool,
     extra: Vec<Box<dyn ToolRuntime>>,
     remote: Option<&Arc<remote::Hub>>,
+    json: bool,
 ) -> Result<Prepared> {
     let session_id = SessionId::generate();
     let settings = settings(common, &session_id)?;
@@ -706,19 +746,17 @@ fn prepare(
     };
     let mut model = metered(&settings, prompt.clone(), definitions.clone(), &spending)?;
 
-    let log = JsonlSessionLog::create(
-        &settings.log_path,
-        SessionMeta {
-            session_id: session_id.clone(),
-            dino_version: env!("CARGO_PKG_VERSION").to_owned(),
-            model_key: settings.profile.key.clone(),
-            provider: settings.profile.provider,
-            workspace_root: settings.workspace.display().to_string(),
-            approval_mode: settings.mode.label().to_owned(),
-            sandbox: sandbox_label.clone(),
-            max_model_turns: settings.max_turns.get(),
-        },
-    )?;
+    let meta = SessionMeta {
+        session_id: session_id.clone(),
+        dino_version: env!("CARGO_PKG_VERSION").to_owned(),
+        model_key: settings.profile.key.clone(),
+        provider: settings.profile.provider,
+        workspace_root: settings.workspace.display().to_string(),
+        approval_mode: settings.mode.label().to_owned(),
+        sandbox: sandbox_label.clone(),
+        max_model_turns: settings.max_turns.get(),
+    };
+    let log = JsonlSessionLog::create(&settings.log_path, meta.clone())?;
 
     // Restoring before the first turn, so the conversation continues rather than
     // starting. A mismatch refuses here rather than confusing the provider later.
@@ -744,6 +782,7 @@ fn prepare(
         status.answering(&settings.profile);
         status.meter = Some(Arc::clone(&spending.meter));
     }
+    let shown = shown(json, renderer, meta)?;
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
         model,
@@ -757,7 +796,7 @@ fn prepare(
         policy(settings.mode, &sandbox_label, &settings.workspace, remote),
         Arc::clone(&planning),
     ))
-    .with_sink(((renderer, log), remote::Tap(remote.map(Arc::clone))));
+    .with_sink(((shown, log), remote::Tap(remote.map(Arc::clone))));
     let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
 
     Ok(Prepared {
@@ -818,9 +857,88 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
     ended
 }
 
+/// Reviews waiting their turn. Past it, a delivery is told to come back.
+const WEBHOOK_QUEUE: usize = 4;
+
+/// Listens for GitHub, and reviews what it admits one at a time until
+/// interrupted.
+async fn webhook(args: WebhookArgs) -> Result<ExitCode> {
+    let layers = Layers::user_only()?;
+    let config = webhook::Config::resolve(
+        layers.user.webhook.as_ref(),
+        layers.user.review_model.clone(),
+        &|name| std::env::var(name).ok(),
+    )?;
+    for (repo, clone) in &config.repos {
+        if !clone.join(".git").exists() {
+            bail!("{repo}: {} is not a git clone", clone.display());
+        }
+    }
+    let requested = args
+        .bind
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let address = remote::bind_address(Some(requested), args.port)?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("cannot listen on {address}"))?;
+    let address = listener.local_addr().context("cannot read the address")?;
+    let repos = config.repos.keys().cloned().collect::<Vec<_>>().join(", ");
+    eprintln!(
+        "{}",
+        style::paint(
+            style::PURPLE,
+            &format!("webhook: http://{address}/github for {repos}")
+        )
+    );
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            if config.post {
+                "reviews are recorded and posted as pull request comments"
+            } else {
+                "reviews are recorded, not posted; set webhook.post to post them"
+            }
+        )
+    );
+    let config = Arc::new(config);
+    let (jobs, mut queue) = tokio::sync::mpsc::channel(WEBHOOK_QUEUE);
+    let server = tokio::spawn(webhook::serve(listener, Arc::clone(&config), jobs));
+    loop {
+        let job = tokio::select! {
+            job = queue.recv() => job,
+            _ = tokio::signal::ctrl_c() => None,
+        };
+        let Some(job) = job else { break };
+        match webhook::review(&job, &config).await {
+            Ok(record) => eprintln!(
+                "dino: webhook: reviewed {}#{} at {}: {}",
+                job.repo,
+                job.number,
+                job.short_head(),
+                record.display()
+            ),
+            Err(error) => eprintln!(
+                "{}",
+                style::paint(
+                    style::WARN,
+                    &format!(
+                        "dino: webhook: {}#{} at {}: {error:#}",
+                        job.repo,
+                        job.number,
+                        job.short_head()
+                    )
+                )
+            ),
+        }
+    }
+    server.abort();
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
     let hub = remote.as_ref().map(|remote| Arc::clone(&remote.hub));
-    let prepared = prepare(&common, false, Vec::new(), hub.as_ref())?;
+    let prepared = prepare(&common, false, Vec::new(), hub.as_ref(), false)?;
     if hub.is_some() && matches!(prepared.settings.mode, ApprovalMode::AllowAll) {
         eprintln!(
             "{}",
@@ -966,6 +1084,7 @@ async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
         handover: false,
         // Read only with --handover, which a review never uses.
         session_turns: 0,
+        json: false,
         common: args.common,
     })
     .await
@@ -1090,7 +1209,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         .iter()
         .map(|progress| Box::new(progress.clone()) as Box<dyn ToolRuntime>)
         .collect();
-    let mut prepared = prepare(&args.common, true, extra, None)?;
+    let mut prepared = prepare(&args.common, true, extra, None, args.json)?;
     let request = request_text(args.prompt)?;
     eprintln!(
         "{}",
@@ -1322,8 +1441,10 @@ fn end_hooks(layers: &Layers) -> Vec<task::EndHook> {
 /// Applies RFC-0015's precedence: flag, environment, project file, user file,
 /// default.
 fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
-    let layers = Layers::load(workspace)?;
+    resolve_layers(args, Layers::load(workspace)?)
+}
 
+fn resolve_layers(args: &CommonArgs, layers: Layers) -> Result<Resolved> {
     let model = if let Some(model) = args.model.clone() {
         (Some(model), Source::Flag)
     } else if let Ok(model) = std::env::var("DINO_MODEL") {
@@ -1648,7 +1769,23 @@ fn print_config(args: &PromptArgs) -> Result<()> {
 
 fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
-    let resolved = resolve(args, &workspace)?;
+    let mut resolved = resolve(args, &workspace)?;
+    let verify = trusted_verify(
+        resolved.verify.take(),
+        resolved.layers.project_path.as_deref(),
+        &workspace,
+    );
+    run_settings(args, workspace, resolved, verify, session_id)
+}
+
+/// The settings `resolved` comes to, with the verify command already decided.
+fn run_settings(
+    args: &CommonArgs,
+    workspace: PathBuf,
+    resolved: Resolved,
+    verify: Option<Vec<String>>,
+    session_id: &SessionId,
+) -> Result<RunSettings> {
     let profile = config::resolve_profile(resolved.model.0.as_deref())?;
     let fallback = config::resolve_fallback(&resolved.fallback, &profile)?;
     let review = resolved
@@ -1661,11 +1798,6 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         Some(path) => path.clone(),
         None => config::default_log_path(&workspace, session_id.as_str()),
     };
-    let verify = trusted_verify(
-        resolved.verify,
-        resolved.layers.project_path.as_deref(),
-        &workspace,
-    );
     Ok(RunSettings {
         profile,
         workspace,
@@ -1785,6 +1917,21 @@ mod tests {
             assert!(cli.common.dangerously_allow_all, "{flag}");
         }
         assert!(!parsed(&[]).unwrap().common.dangerously_allow_all);
+    }
+
+    #[test]
+    fn json_output_is_a_run_flag_and_the_webhook_listens_on_its_own_port() {
+        let Some(Command::Run(run)) = parsed(&["run", "--json", "--read-only", "hi"])
+            .unwrap()
+            .command
+        else {
+            panic!("not a run");
+        };
+        assert!(run.json && run.common.read_only);
+        let Some(Command::Webhook(webhook)) = parsed(&["webhook"]).unwrap().command else {
+            panic!("not the webhook");
+        };
+        assert_eq!((webhook.bind, webhook.port), (None, 7879));
     }
 
     #[test]

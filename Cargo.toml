@@ -8,6 +8,7 @@ members = [
     "crates/dino-protocol",
     "crates/dino-rust",
     "crates/dino-sandbox",
+    "crates/dino-sdk",
     "crates/dino-tools",
 ]
 resolver = "2"
@@ -27,6 +28,7 @@ futures-core = "0.3.31"
 base64 = "0.22.1"
 bytes = "1.12.1"
 futures-util = "0.3.31"
+hmac = "0.13.0"
 dino-core = { path = "crates/dino-core" }
 dino-eval = { path = "crates/dino-eval" }
 dino-exec = { path = "crates/dino-exec" }
