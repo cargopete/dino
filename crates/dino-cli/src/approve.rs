@@ -173,6 +173,13 @@ pub(crate) fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
             ApprovalReply::AllProcesses,
         ));
     }
+    if asking.class == ToolClass::Mutating {
+        choices.push(choice(
+            'e',
+            "every edit in the workspace this session",
+            ApprovalReply::AllEdits,
+        ));
+    }
     choices.push(choice('n', "refuse", ApprovalReply::Reject(None)));
     choices
 }
@@ -557,6 +564,27 @@ impl RuleStore for FileRuleStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_edit_is_offered_for_an_edit_and_not_for_a_command() {
+        let keys = |class| {
+            let context = AskContext::default();
+            let asking = Asking {
+                summary: "",
+                tool: "apply_patch",
+                subject: "src/lib.rs",
+                class,
+                context: &context,
+                change: None,
+            };
+            choices(&asking, always_label(class))
+                .iter()
+                .map(|choice| choice.key)
+                .collect::<String>()
+        };
+        assert_eq!(keys(ToolClass::Mutating), "yaren");
+        assert_eq!(keys(ToolClass::Process), "yarsn");
+    }
 
     #[test]
     fn rules_round_trip_through_the_file_and_are_kept_per_workspace() {

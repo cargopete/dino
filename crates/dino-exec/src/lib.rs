@@ -12,7 +12,9 @@ mod hooks;
 mod mcp;
 mod packages;
 pub mod process;
+mod reads;
 mod shell;
+mod tracked;
 mod web;
 
 pub use crate::background::BackgroundTool;

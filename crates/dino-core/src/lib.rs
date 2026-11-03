@@ -127,6 +127,10 @@ pub trait ToolRuntime: Send + Sync {
 
     /// Told every call of a model turn before the first runs.
     fn begin_turn(&self, _calls: &[ToolCall]) {}
+
+    /// Dino's own after-edit hook has just rewritten `path`, as the edit named
+    /// it, so the model's view of the file differs only by what the hook did.
+    fn rewritten(&self, _path: &str) {}
 }
 
 /// Several tool runtimes behind one, dispatching by tool name.

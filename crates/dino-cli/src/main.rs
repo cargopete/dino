@@ -132,6 +132,9 @@ struct CommonArgs {
     /// Refuse every mutation and every process instead of asking.
     #[arg(long, conflicts_with = "dangerously_allow_all")]
     read_only: bool,
+    /// Make edits to workspace files without asking; processes still ask.
+    #[arg(long, conflicts_with_all = ["dangerously_allow_all", "read_only"])]
+    accept_edits: bool,
     /// Approve everything without asking. Consider this carefully. Also
     /// spelled --dangerously-skip-permissions.
     #[arg(long, alias = "dangerously-skip-permissions")]
@@ -1256,6 +1259,8 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         (ApprovalMode::AllowAll, Source::Flag)
     } else if args.read_only {
         (ApprovalMode::ReadOnly, Source::Flag)
+    } else if args.accept_edits {
+        (ApprovalMode::AcceptEdits, Source::Flag)
     } else if let Some(found) = layers.pick_user_only(|file| file.approvals) {
         found
     } else {
@@ -1579,8 +1584,18 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
 fn interactive_policy<A: Approver + 'static>(
     approver: A,
     workspace: &Path,
+    accept_edits: bool,
 ) -> Box<dyn ApprovalPolicy> {
-    let interactive = Interactive::new(approver);
+    let guarded = dino_sandbox::EXECUTABLE_CONFIG
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let interactive = Interactive::new(approver).guarding(guarded);
+    let interactive = if accept_edits {
+        interactive.accepting_edits()
+    } else {
+        interactive
+    };
     match settings::user_dir() {
         Some(dir) => {
             Box::new(interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)))
@@ -1597,12 +1612,21 @@ fn policy(
     remote: Option<&Arc<remote::Hub>>,
 ) -> Box<dyn ApprovalPolicy> {
     match mode {
-        ApprovalMode::Interactive => match remote {
-            Some(hub) => {
-                interactive_policy(remote::RemoteApprover::new(Arc::clone(hub)), workspace)
+        ApprovalMode::Interactive | ApprovalMode::AcceptEdits => {
+            let accept_edits = mode == ApprovalMode::AcceptEdits;
+            match remote {
+                Some(hub) => interactive_policy(
+                    remote::RemoteApprover::new(Arc::clone(hub)),
+                    workspace,
+                    accept_edits,
+                ),
+                None => interactive_policy(
+                    TerminalApprover::new(sandbox, workspace),
+                    workspace,
+                    accept_edits,
+                ),
             }
-            None => interactive_policy(TerminalApprover::new(sandbox, workspace), workspace),
-        },
+        }
         ApprovalMode::ReadOnly => Box::new(ReadOnly),
         ApprovalMode::AllowAll => Box::new(AllowAll),
     }
@@ -1647,6 +1671,13 @@ mod tests {
     #[test]
     fn skip_permissions_still_conflicts_with_read_only() {
         assert!(parsed(&["--dangerously-skip-permissions", "--read-only"]).is_err());
+    }
+
+    #[test]
+    fn accept_edits_conflicts_with_the_other_approval_flags() {
+        assert!(parsed(&["--accept-edits"]).unwrap().common.accept_edits);
+        assert!(parsed(&["--accept-edits", "--read-only"]).is_err());
+        assert!(parsed(&["--accept-edits", "--dangerously-allow-all"]).is_err());
     }
 
     #[test]
