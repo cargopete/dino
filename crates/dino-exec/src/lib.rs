@@ -12,8 +12,10 @@ mod hooks;
 mod mcp;
 mod packages;
 pub mod process;
+mod reads;
 pub mod rust;
 mod shell;
+mod tracked;
 mod verify;
 mod web;
 

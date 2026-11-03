@@ -63,6 +63,10 @@ pub struct WorkspaceTools {
     /// or through its own write. A file that still has it has not changed
     /// behind the model's back, whatever hash the model copies into a patch.
     seen: Mutex<HashMap<PathBuf, String>>,
+    /// The fingerprint Dino's own after-edit hook left a file at, rewriting it
+    /// from one the model had seen. A patch may land on it: only the hook's
+    /// formatting differs, and `old_text` still has to match.
+    hooked: Mutex<HashMap<PathBuf, String>>,
     /// Workspace-relative paths no tool may write, such as the tests a task is
     /// judged by. A model under pressure edits those to pass.
     protected: Vec<PathBuf>,
@@ -91,6 +95,7 @@ impl WorkspaceTools {
             root: WorkspaceRoot::new(root)?,
             limits,
             seen: Mutex::new(HashMap::new()),
+            hooked: Mutex::new(HashMap::new()),
             protected: Vec::new(),
             versions: Mutex::new(HashMap::new()),
             reads: Mutex::new(HashMap::new()),
@@ -284,14 +289,13 @@ impl WorkspaceTools {
             }
             "apply_patch" => {
                 let arguments: PatchArguments = parse_arguments(&call.arguments, "apply_patch")?;
-                arguments.edits()?;
-                let resolved = self.writable(&arguments.path, true)?;
-                Ok(ToolAction::mutating(self.root.relative(&resolved)?))
+                let (path, ..) = self.patched(&arguments)?;
+                Ok(ToolAction::mutating(self.root.relative(&path)?))
             }
             "write_file" => {
                 let arguments: WriteArguments = parse_arguments(&call.arguments, "write_file")?;
-                let resolved = self.writable(&arguments.path, false)?;
-                Ok(ToolAction::mutating(self.root.relative(&resolved)?))
+                let (path, ..) = self.replaced(&arguments)?;
+                Ok(ToolAction::mutating(self.root.relative(&path)?))
             }
             name => Err(ToolError::new(format!("unknown tool {name:?}"))),
         }
@@ -665,7 +669,10 @@ impl WorkspaceTools {
         })
     }
 
-    fn apply_patch(&self, arguments: &PatchArguments) -> Result<ToolOutput, ToolError> {
+    /// Every check a patch must pass, so classification refuses before a
+    /// person is asked what execution would refuse after: the file, its
+    /// fingerprint before, and its text after.
+    fn patched(&self, arguments: &PatchArguments) -> Result<(PathBuf, String, String), ToolError> {
         let edits = arguments.edits()?;
         if edits.iter().any(|edit| edit.old_text.is_empty()) {
             return Err(ToolError::new("old_text must not be empty"));
@@ -681,10 +688,16 @@ impl WorkspaceTools {
             &arguments.path,
             arguments.expected_sha256.as_deref(),
             &before_sha256,
+            true,
         )?;
         let text = String::from_utf8(bytes)
             .map_err(|_| ToolError::new(format!("file is not valid UTF-8: {}", arguments.path)))?;
         let updated = replace_all(&text, &edits)?;
+        Ok((path, before_sha256, updated))
+    }
+
+    fn apply_patch(&self, arguments: &PatchArguments) -> Result<ToolOutput, ToolError> {
+        let (path, before_sha256, updated) = self.patched(arguments)?;
         write_atomic(&path, updated.as_bytes())?;
         let after_sha256 = fingerprint(updated.as_bytes());
         let note = self.notes(&path, &after_sha256, &arguments.path)?;
@@ -723,6 +736,9 @@ impl WorkspaceTools {
         if let Ok(mut seen) = self.seen.lock() {
             seen.insert(path.to_path_buf(), sha256.to_owned());
         }
+        if let Ok(mut hooked) = self.hooked.lock() {
+            hooked.remove(path);
+        }
         if let Ok(mut versions) = self.versions.lock() {
             let known = versions.entry(path.to_path_buf()).or_default();
             if !known.iter().any(|version| version == sha256) {
@@ -754,6 +770,7 @@ impl WorkspaceTools {
         shown: &str,
         expected: Option<&str>,
         current: &str,
+        after_hook: bool,
     ) -> Result<(), ToolError> {
         let seen = self
             .seen
@@ -761,7 +778,12 @@ impl WorkspaceTools {
             .ok()
             .and_then(|seen| seen.get(path).cloned());
         let named = expected.is_some_and(|hash| hash.len() >= 8 && current.starts_with(hash));
-        if named || seen.as_deref() == Some(current) {
+        let hooked = after_hook
+            && self
+                .hooked
+                .lock()
+                .is_ok_and(|hooked| hooked.get(path).is_some_and(|hash| hash == current));
+        if named || hooked || seen.as_deref() == Some(current) {
             return Ok(());
         }
         match (seen, expected) {
@@ -779,7 +801,12 @@ impl WorkspaceTools {
         }
     }
 
-    fn write_file(&self, arguments: &WriteArguments) -> Result<ToolOutput, ToolError> {
+    /// Every check a write must pass, as [`Self::patched`] is for a patch:
+    /// the file, whether it is new, and its text before when it has some.
+    fn replaced(
+        &self,
+        arguments: &WriteArguments,
+    ) -> Result<(PathBuf, bool, Option<String>), ToolError> {
         let path = self.writable(&arguments.path, false)?;
         let mut previous = None;
         let created = match fs::read(&path) {
@@ -798,6 +825,7 @@ impl WorkspaceTools {
                     &arguments.path,
                     arguments.expected_sha256.as_deref(),
                     &found,
+                    false,
                 )?;
                 previous = String::from_utf8(bytes).ok();
                 false
@@ -810,14 +838,19 @@ impl WorkspaceTools {
                         arguments.path
                     )));
                 }
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|error| file_error("create the directory for", &path, &error))?;
-                }
                 true
             }
             Err(error) => return Err(file_error("read", &path, &error)),
         };
+        Ok((path, created, previous))
+    }
+
+    fn write_file(&self, arguments: &WriteArguments) -> Result<ToolOutput, ToolError> {
+        let (path, created, previous) = self.replaced(arguments)?;
+        if created && let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| file_error("create the directory for", &path, &error))?;
+        }
         write_atomic(&path, arguments.content.as_bytes())?;
         let sha256 = fingerprint(arguments.content.as_bytes());
         let rewrite =
@@ -854,6 +887,18 @@ impl ToolRuntime for WorkspaceTools {
 
     /// Repeat reads are withheld only while the model still holds the first
     /// one. `seen` stays: it is about the bytes on disk, not the conversation.
+    fn rewritten(&self, path: &str) {
+        let Ok(path) = self.root.resolve_file(path) else {
+            return;
+        };
+        let seen = self.seen.lock().is_ok_and(|seen| seen.contains_key(&path));
+        if let (true, Ok(bytes)) = (seen, fs::read(&path))
+            && let Ok(mut hooked) = self.hooked.lock()
+        {
+            hooked.insert(path, fingerprint(&bytes));
+        }
+    }
+
     fn history_lost(&self) {
         if let Ok(mut reads) = self.reads.lock() {
             reads.clear();
@@ -1566,7 +1611,7 @@ mod tests {
                 "apply_patch",
                 json!({
                     "path": path,
-                    "expected_sha256": "0".repeat(64),
+                    "expected_sha256": fingerprint(b"one\n"),
                     "old_text": "one",
                     "new_text": "two",
                 }),
@@ -2320,6 +2365,79 @@ mod tests {
             fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
             "fn first() {}\nfn second() {}\n"
         );
+    }
+
+    #[test]
+    fn an_edit_execution_would_refuse_is_refused_before_anyone_is_asked() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        let tools = workspace.tools();
+        let patch = |old_text: &str| {
+            call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": old_text, "new_text": "x"}),
+            )
+        };
+
+        let unread = tools.classify(&patch("a()")).unwrap_err();
+        assert!(
+            unread.to_string().contains("before changing it"),
+            "{unread}"
+        );
+        let replace = call("write_file", json!({"path": "src/lib.rs", "content": "x"}));
+        let unread = tools.classify(&replace).unwrap_err();
+        assert!(unread.to_string().contains("read it before"), "{unread}");
+
+        tools
+            .execute_sync(&call("read", json!({"path": "src/lib.rs"})))
+            .unwrap();
+        let missing = tools.classify(&patch("b()")).unwrap_err();
+        assert!(missing.to_string().contains("found 0 matches"), "{missing}");
+        assert!(tools.classify(&patch("a()")).is_ok());
+
+        workspace.write("src/lib.rs", "fn a() {}\nfn c() {}\n");
+        let stale = tools.classify(&patch("a()")).unwrap_err();
+        assert!(stale.to_string().contains("stale file"), "{stale}");
+    }
+
+    #[test]
+    fn a_file_reformatted_by_dinos_hook_still_takes_a_patch_that_matches() {
+        let workspace = TestWorkspace::new();
+        let tools = workspace.tools();
+        tools
+            .execute_sync(&call(
+                "write_file",
+                json!({"path": "src/lib.rs", "content": "fn a(){}\n"}),
+            ))
+            .unwrap();
+        workspace.write("src/lib.rs", "fn a() {}\n");
+        tools.rewritten("src/lib.rs");
+
+        let replace = call("write_file", json!({"path": "src/lib.rs", "content": "x"}));
+        let stale = tools.classify(&replace).unwrap_err();
+        assert!(stale.to_string().contains("stale file"), "{stale}");
+        let patch = |old_text: &str| {
+            call(
+                "apply_patch",
+                json!({"path": "src/lib.rs", "old_text": old_text, "new_text": "b() {}"}),
+            )
+        };
+        let unmatched = tools.classify(&patch("a(){}")).unwrap_err();
+        assert!(
+            unmatched.to_string().contains("found 0 matches"),
+            "{unmatched}"
+        );
+        tools.execute_sync(&patch("a() {}")).unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("src/lib.rs")).unwrap(),
+            "fn b() {}\n"
+        );
+
+        // A change after the hook's is not the hook's.
+        workspace.write("src/lib.rs", "fn b() {}\nfn c() {}\n");
+        tools.rewritten("src/other.rs");
+        let stale = tools.classify(&patch("c() {}")).unwrap_err();
+        assert!(stale.to_string().contains("stale file"), "{stale}");
     }
 
     #[test]

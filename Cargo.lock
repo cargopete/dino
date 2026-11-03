@@ -458,6 +458,7 @@ dependencies = [
  "html2text",
  "nix",
  "pretty_assertions",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

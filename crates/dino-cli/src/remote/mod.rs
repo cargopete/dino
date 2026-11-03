@@ -492,7 +492,10 @@ fn wire_key(reply: &ApprovalReply) -> Option<&'static str> {
         ApprovalReply::ForTurn => Some("turn"),
         ApprovalReply::ForSession => Some("session"),
         ApprovalReply::Reject(_) => Some("reject"),
-        ApprovalReply::Remember | ApprovalReply::ForProgram | ApprovalReply::AllProcesses => None,
+        ApprovalReply::Remember
+        | ApprovalReply::ForProgram
+        | ApprovalReply::AllProcesses
+        | ApprovalReply::AllEdits => None,
     }
 }
 

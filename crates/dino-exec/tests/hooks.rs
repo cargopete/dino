@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use dino_core::ToolError;
 use dino_core::ToolFuture;
@@ -23,6 +24,7 @@ use serde_json::json;
 /// Writes `edited` into the named file, as `write_file` would.
 struct Writer {
     root: PathBuf,
+    rewritten: Arc<Mutex<Vec<String>>>,
 }
 
 impl ToolRuntime for Writer {
@@ -41,6 +43,10 @@ impl ToolRuntime for Writer {
             Ok(ToolOutput::success(json!({"written": true}).to_string()))
         })
     }
+
+    fn rewritten(&self, path: &str) {
+        self.rewritten.lock().unwrap().push(path.to_owned());
+    }
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -58,8 +64,19 @@ fn call(name: &str) -> ToolCall {
 }
 
 fn hooked(root: &PathBuf, hooks: Vec<Hook>) -> AfterEdit {
+    hooked_telling(root, hooks, Arc::default())
+}
+
+fn hooked_telling(
+    root: &PathBuf,
+    hooks: Vec<Hook>,
+    rewritten: Arc<Mutex<Vec<String>>>,
+) -> AfterEdit {
     AfterEdit::new(
-        Box::new(Writer { root: root.clone() }),
+        Box::new(Writer {
+            root: root.clone(),
+            rewritten,
+        }),
         hooks,
         root,
         Arc::new(Unconfined),
@@ -76,9 +93,11 @@ fn argv(parts: &[&str]) -> Hook {
 #[tokio::test]
 async fn a_hook_that_changes_the_file_says_so() {
     let root = fixture("change");
-    let tool = hooked(
+    let rewritten = Arc::default();
+    let tool = hooked_telling(
         &root,
         vec![argv(&["sh", "-c", "printf formatted > {path}"])],
+        Arc::clone(&rewritten),
     );
 
     let output = tool.execute(&call("write_file")).await.unwrap();
@@ -91,9 +110,14 @@ async fn a_hook_that_changes_the_file_says_so() {
         output["hooks"]["note"]
             .as_str()
             .unwrap()
-            .contains("read it again")
+            .contains("as it is now")
     );
     assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "formatted");
+    assert_eq!(
+        *rewritten.lock().unwrap(),
+        ["a.txt"],
+        "the file tool is told"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -363,7 +387,10 @@ async fn a_commit_waits_for_the_verify_command_and_a_failure_refuses_it() {
     };
 
     let failing = BeforeCommit::new(
-        Box::new(Writer { root: root.clone() }),
+        Box::new(Writer {
+            root: root.clone(),
+            rewritten: Arc::default(),
+        }),
         verify("echo '2 warnings' >&2; exit 1"),
     );
     let refused = failing.execute(&commit).await.unwrap();
@@ -377,7 +404,13 @@ async fn a_commit_waits_for_the_verify_command_and_a_failure_refuses_it() {
     let unfinished = verify("exit 1").unfinished().await.unwrap();
     assert!(unfinished.contains("verify command"), "{unfinished}");
 
-    let passing = BeforeCommit::new(Box::new(Writer { root: root.clone() }), verify("true"));
+    let passing = BeforeCommit::new(
+        Box::new(Writer {
+            root: root.clone(),
+            rewritten: Arc::default(),
+        }),
+        verify("true"),
+    );
     assert!(!passing.execute(&commit).await.unwrap().is_error);
     assert!(root.join("a.txt").exists());
     assert_eq!(verify("true").unfinished().await, None);

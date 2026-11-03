@@ -15,12 +15,12 @@ serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

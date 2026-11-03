@@ -572,6 +572,7 @@ fn eval_settings(
         verify: None,
         task_limits: crate::task::Limits::default(),
         compaction: config::Compaction::Manual,
+        keep_going: false,
         mcp: Vec::new(),
         thinking_budget: args.thinking_budget,
         show_reasoning: false,

@@ -29,6 +29,8 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::time::Duration;
+use std::time::Instant;
 
 use dino_model::ModelError;
 use dino_model::ModelSession;
@@ -127,6 +129,10 @@ pub trait ToolRuntime: Send + Sync {
 
     /// Told every call of a model turn before the first runs.
     fn begin_turn(&self, _calls: &[ToolCall]) {}
+
+    /// Dino's own after-edit hook has just rewritten `path`, as the edit named
+    /// it, so the model's view of the file differs only by what the hook did.
+    fn rewritten(&self, _path: &str) {}
 }
 
 /// Several tool runtimes behind one, dispatching by tool name.
@@ -308,6 +314,12 @@ pub struct AgentConfig {
     pub turn_attempts: u32,
     /// From how many turns left the model is told the count.
     pub turn_notice_at: u32,
+    /// How long a turn waits out a model it cannot reach, after the adapter's
+    /// own retries, before the run fails.
+    pub outage_limit: Duration,
+    /// The first wait in an outage, doubled up to `outage_backoff_cap`.
+    pub outage_first_delay: Duration,
+    pub outage_backoff_cap: Duration,
 }
 
 impl Default for AgentConfig {
@@ -321,6 +333,9 @@ impl Default for AgentConfig {
             keep_recent_results: 8,
             turn_attempts: 3,
             turn_notice_at: 3,
+            outage_limit: Duration::from_secs(30 * 60),
+            outage_first_delay: Duration::from_secs(5),
+            outage_backoff_cap: Duration::from_secs(60),
         }
     }
 }
@@ -348,12 +363,12 @@ fn blocked(events: Vec<AgentEvent>, mut text: String, reason: &str, turns: u32) 
 
 fn turns_left_note(turns_left: u32, unfinished: Option<&str>) -> String {
     let mut note = if turns_left == 1 {
-        "[dino: your next response is the last in this run. Make no tool calls: say \
-         what is done, what is not, and what should happen next.]"
+        "[dino: your next response is the last for this submission. Make no tool calls: \
+         say what is done, what is not, and what should happen next.]"
             .to_owned()
     } else {
         format!(
-            "[dino: {turns_left} model turns left in this run, including your next \
+            "[dino: {turns_left} model turns left for this submission, including your next \
              response. Finish the change, check it once, and say what is done and what is \
              not.]"
         )
@@ -375,11 +390,24 @@ fn sent_back_note(unfinished: &str) -> String {
     )
 }
 
+/// Goes with a submission the person said to see through, so the model knows
+/// before it first stops rather than learning it by being sent back.
+const SEE_IT_THROUGH_NOTE: &str = "[dino: this task is to be seen through. Holding a \
+     recommendation for the next step, take it: record the decision and why in the plan, RFC \
+     or commit, and carry on. Stop only by calling report_blocker, before an irreversible or \
+     external action such as a push, a release or a message to someone, or for a choice of \
+     contract that has no defensible default. Do not end a turn to ask whether to continue.]";
+
 /// Sent when a model ends its turn on a task the person said to finish.
 const KEEP_GOING_NOTE: &str = "[dino: you were asked to finish this task, and ending your \
      turn to report progress or ask whether to carry on is not finishing it. Take the next \
      piece of the work now. If every part is done and checked, say so in a sentence. If you \
      are blocked on a decision only the person can make, call report_blocker and name it.]";
+
+/// Sent once when a task told to finish ends on a question after working.
+const PROCEED_NOTE: &str = "[dino: you ended on a question, and this task is to be seen \
+     through. Proceed with your recommendation, and record the decision where the work is \
+     tracked. If only the person can answer it, call report_blocker and say so.]";
 
 const CUT_OFF_NOTE: &str = "[dino: your last response was cut off because the context \
      window filled. Older tool results have been elided to make room. Carry on from where you \
@@ -431,6 +459,10 @@ enum Attempt {
     Broken {
         error: String,
     },
+    /// The request never reached the model, for a reason a repeat may fix.
+    Unreachable {
+        error: ModelError,
+    },
     Cancelled {
         turns: u32,
     },
@@ -467,6 +499,8 @@ pub struct Agent<S, T> {
     keep_going: bool,
     /// How many events the run had when it was last sent back to keep going.
     keep_going_mark: usize,
+    /// The turn this run was sent back at for ending on a question, if it was.
+    asked_back: Option<u32>,
     /// Messages the person typed during a run, for its next tool results.
     inbox: Option<Inbox>,
 }
@@ -503,6 +537,7 @@ where
             outcomes: outcomes::OutcomeWatch::default(),
             keep_going: false,
             keep_going_mark: 0,
+            asked_back: None,
             inbox: None,
         }
     }
@@ -576,7 +611,8 @@ where
             // Images wait for a submission that can carry them as a message.
             let mut notes = vec![
                 person_says(&content),
-                "[dino: the last run reached its turn limit before these results were sent.]"
+                "[dino: the last submission reached its turn limit before these results were \
+                 sent.]"
                     .to_owned(),
             ];
             notes.extend(note);
@@ -584,6 +620,11 @@ where
                 results,
                 note: joined(&notes),
             };
+        }
+        let mut content = content;
+        if self.keep_going {
+            content.push_str("\n\n");
+            content.push_str(SEE_IT_THROUGH_NOTE);
         }
         let images = std::mem::take(&mut self.pending_images);
         if images.is_empty() {
@@ -800,6 +841,7 @@ where
         self.loops.reset();
         self.outcomes.reset();
         self.keep_going_mark = 0;
+        self.asked_back = None;
     }
 
     /// Settles every call of a turn in order, noticing a reported blocker.
@@ -946,27 +988,41 @@ where
     }
 
     /// The note that sends a model back to a task it was told to finish, when it
-    /// worked since it was last sent and is ending its turn all the same.
+    /// worked since it was last sent and is ending its turn all the same, or
+    /// once when it ends on a question after working at all.
     fn keep_going_note(
         &mut self,
         model_turn: u32,
         events: &mut Vec<AgentEvent>,
     ) -> Result<Option<String>, AgentError> {
-        let worked = events[self.keep_going_mark.min(events.len())..]
-            .iter()
-            .any(|event| matches!(event, AgentEvent::ToolFinished { .. }));
-        if !self.keep_going || !worked || model_turn >= self.config.max_model_turns.get() {
+        if !self.keep_going || model_turn >= self.config.max_model_turns.get() {
             return Ok(None);
         }
+        let worked = |events: &[AgentEvent]| {
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+        };
+        let note = if self.asked_back.is_none()
+            && worked(events)
+            && ends_in_question(&turn_text(events, model_turn))
+        {
+            self.asked_back = Some(model_turn);
+            PROCEED_NOTE
+        } else if worked(&events[self.keep_going_mark.min(events.len())..]) {
+            KEEP_GOING_NOTE
+        } else {
+            return Ok(None);
+        };
         self.emit(
             AgentEvent::SentBack {
                 model_turn,
-                reason: KEEP_GOING_NOTE.to_owned(),
+                reason: note.to_owned(),
             },
             events,
         )?;
         self.keep_going_mark = events.len();
-        Ok(Some(KEEP_GOING_NOTE.to_owned()))
+        Ok(Some(note.to_owned()))
     }
 
     async fn send_back_unfinished(
@@ -1087,7 +1143,7 @@ where
         if turns_left > self.config.turn_notice_at {
             // From half-way the count rides along, so the end is no surprise.
             return Ok((model_turn * 2 >= max)
-                .then(|| format!("[dino: {model_turn} of {max} model turns used.]")));
+                .then(|| format!("[dino: this submission: turn {model_turn} of {max}.]")));
         }
         self.emit(
             AgentEvent::TurnsRunningOut {
@@ -1107,7 +1163,8 @@ where
     }
 
     /// Streams a turn, sending it again while its stream breaks partway and
-    /// attempts remain.
+    /// attempts remain, and while the model cannot be reached within the
+    /// outage limit.
     async fn stream_turn(
         &mut self,
         model_turn: u32,
@@ -1118,6 +1175,7 @@ where
         cancel: &CancellationToken,
     ) -> Result<Streamed, AgentError> {
         let mut attempt = 1;
+        let mut outage: Option<(Instant, Duration)> = None;
         loop {
             let turn = Turn {
                 number: model_turn,
@@ -1138,6 +1196,45 @@ where
                         events,
                     )?;
                     attempt += 1;
+                }
+                Attempt::Unreachable { error } => {
+                    let (since, delay) =
+                        *outage.get_or_insert((Instant::now(), self.config.outage_first_delay));
+                    let waited = since.elapsed();
+                    let Some(left) = self
+                        .config
+                        .outage_limit
+                        .checked_sub(waited)
+                        .filter(|left| !left.is_zero())
+                    else {
+                        return Err(AgentError::Unreachable {
+                            waited: waited.as_secs(),
+                            error,
+                        });
+                    };
+                    let delay = delay.min(left);
+                    self.emit(
+                        AgentEvent::WaitingForNetwork {
+                            model_turn,
+                            error: error.to_string(),
+                            waited_seconds: waited.as_secs(),
+                            retry_in_seconds: delay.as_secs(),
+                        },
+                        events,
+                    )?;
+                    if cancel
+                        .run_until_cancelled(tokio::time::sleep(delay))
+                        .await
+                        .is_none()
+                    {
+                        return Ok(Streamed::Cancelled {
+                            turns: model_turn.saturating_sub(1),
+                        });
+                    }
+                    outage = Some((
+                        since,
+                        delay.saturating_mul(2).min(self.config.outage_backoff_cap),
+                    ));
                 }
                 Attempt::Finished { calls, stop_reason } => {
                     return Ok(Streamed::Finished { calls, stop_reason });
@@ -1170,7 +1267,11 @@ where
                 turns: model_turn.saturating_sub(1),
             });
         };
-        let mut stream = stream?;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) if error.is_transient() => return Ok(Attempt::Unreachable { error }),
+            Err(error) => return Err(error.into()),
+        };
         let text_before = text.len();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut stop_reason = None;
@@ -1478,6 +1579,48 @@ fn filled_window(events: &[AgentEvent], window: u32) -> Option<TokenUsage> {
     (filled >= u64::from(window) - u64::from(window / 100)).then_some(usage)
 }
 
+/// What the model wrote in one turn.
+fn turn_text(events: &[AgentEvent], turn: u32) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Model {
+                model_turn,
+                event: ModelEvent::TextDelta { text },
+            } if *model_turn == turn => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `text` closes by asking something: its last line ends in a question
+/// mark, markdown emphasis and closing quotes aside.
+#[must_use]
+pub fn ends_in_question(text: &str) -> bool {
+    text.trim_end()
+        .trim_end_matches(['*', '_', '`', '"', '\'', ')', '\u{201d}'])
+        .ends_with('?')
+}
+
+/// The text of the last turn that wrote any: what a run ended by saying.
+#[must_use]
+pub fn final_message(events: &[AgentEvent]) -> String {
+    let last = events.iter().rev().find_map(|event| match event {
+        AgentEvent::Model {
+            model_turn,
+            event: ModelEvent::TextDelta { text },
+        } if !text.trim().is_empty() => Some(*model_turn),
+        _ => None,
+    });
+    last.map(|turn| turn_text(events, turn)).unwrap_or_default()
+}
+
+/// The context the last request of a run sent, cached input included.
+#[must_use]
+pub fn context_tokens(events: &[AgentEvent]) -> Option<u64> {
+    last_usage(events).map(|usage| usage.input_tokens)
+}
+
 /// The most recent usage the provider reported.
 fn last_usage(events: &[AgentEvent]) -> Option<TokenUsage> {
     usages(events).next_back().copied()
@@ -1518,4 +1661,6 @@ pub enum AgentError {
     DuplicateToolCallId(String),
     #[error("model-turn limit reached after {0} turns")]
     ModelTurnLimit(u32),
+    #[error("gave up after {waited}s waiting for the model: {error}")]
+    Unreachable { waited: u64, error: ModelError },
 }
