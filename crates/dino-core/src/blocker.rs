@@ -55,7 +55,8 @@ impl ToolRuntime for BlockerTool {
             name: REPORT_BLOCKER.into(),
             description: "Stop, and report that the task cannot be done as asked: the \
                           request contradicts itself, or contradicts the tests or code it \
-                          must keep. Give the reason and the evidence, such as the files and \
+                          must keep, or a gate that a document says stops the work has \
+                          failed. Give the reason and the evidence, such as the files and \
                           test names. This ends the run, so use it instead of changing a test \
                           or the spec to make the two agree."
                 .into(),

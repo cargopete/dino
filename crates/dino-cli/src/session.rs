@@ -193,6 +193,7 @@ enum Input {
     Resume(Option<String>),
     Plan(Option<String>),
     Compact,
+    Auto,
     Init,
     Log,
     Exit,
@@ -234,6 +235,7 @@ fn parse(line: &str) -> Input {
         "diff" => Input::Diff,
         "cost" => Input::Cost,
         "compact" => Input::Compact,
+        "auto" => Input::Auto,
         "init" => Input::Init,
         "model" => Input::Model(argument),
         "resume" => Input::Resume(argument),
@@ -267,6 +269,29 @@ const COMPACT_REQUEST: &str = "This conversation is about to be compacted: you w
     Decisions (and why), Remaining (next steps), Open questions. Include exact names, paths, \
     commands and error messages that the next turn will need.";
 
+/// The summary a task seen through is compacted into: the report it ended on,
+/// the branch's commits, and what the recall saw.
+fn seeded_summary(
+    report: &str,
+    commits: Option<(String, String)>,
+    recalled: Option<String>,
+) -> String {
+    let mut summary = format!(
+        "A task seen through ended its last submission with this report:\n\n{}",
+        report.trim()
+    );
+    if let Some((range, log)) = commits {
+        let _ = write!(
+            summary,
+            "\n\nCommits on this branch (`git log {range}`):\n\n{log}"
+        );
+    }
+    if let Some(recalled) = recalled {
+        let _ = write!(summary, "\n\n{recalled}");
+    }
+    summary
+}
+
 /// Sent after a compaction that interrupted a task, so the work goes on.
 pub const CONTINUE_AFTER_COMPACTION: &str = "The conversation was compacted in the middle of the \
     task. Carry on from the summary below.";
@@ -280,6 +305,8 @@ const PLAN_MODE: &str = "Plan mode. Investigate with read-only tools: read, sear
 pub type SessionFactory<S> = Box<dyn Fn(&str) -> Result<(S, String)>>;
 
 /// Everything a session needs that does not change between submissions.
+// Each switch is a separate thing a person turns on or off.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Session<S> {
     pub agent: Agent<S, ToolSet>,
     pub usage: Arc<Mutex<TokenUsage>>,
@@ -299,8 +326,15 @@ pub struct Session<S> {
     pub carried: Option<String>,
     /// What this conversation did, from its events, for the next compaction.
     pub recall: crate::recall::Recall,
-    /// Compact after any submission that filled the context past the mark.
-    pub auto_compact: bool,
+    /// When to compact without being asked.
+    pub compaction: crate::config::Compaction,
+    /// Every submission is a task to see through, as `/auto` switches.
+    pub keep_going: bool,
+    /// The last run handed back with a next step in hand, so a go-ahead
+    /// continues it as a task to see through.
+    pub proposed: bool,
+    /// Model turns one submission may take, for the banner.
+    pub max_turns: u32,
     /// Set by the renderer when the core warns the context is filling.
     pub context_full: Arc<std::sync::atomic::AtomicBool>,
     /// The status row's figures, told which model is answering.
@@ -456,6 +490,10 @@ where
             Input::Compact => {
                 self.compact().await;
             }
+            Input::Auto => {
+                self.keep_going = !self.keep_going;
+                println!("{}", style::paint(FAINT, &self.keep_going_banner()));
+            }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Unknown(name) => println!(
                 "{}",
@@ -582,8 +620,9 @@ where
                 style::paint(FAINT, &format!("  task budget: {}", limits.describe()))
             );
         }
+        let go_ahead = self.proposed && crate::task::is_go_ahead(&text);
         // Not while planning: a plan is where that run is meant to stop.
-        let finishing = crate::task::wants_to_finish(&text)
+        let finishing = (self.keep_going || go_ahead || crate::task::wants_to_finish(&text))
             && !self.planning.load(std::sync::atomic::Ordering::Relaxed);
         self.agent.set_keep_going(finishing);
         let text = if finishing {
@@ -601,6 +640,10 @@ where
         if let Some(run) = &run {
             self.recall.absorb(&run.events);
         }
+        self.proposed = run.as_ref().is_some_and(|run| {
+            run.stop_reason == StopReason::EndTurn
+                && (finishing || crate::task::proposes_next_step(&run.text))
+        });
         // Entered during the run but never delivered, because no tool result
         // came after it: the next submission, in the order typed.
         let undelivered = self
@@ -615,7 +658,24 @@ where
         let full = self
             .context_full
             .swap(false, std::sync::atomic::Ordering::Relaxed);
-        if full && self.auto_compact {
+        let large = self.compaction.at_tokens().is_some_and(|at| {
+            run.as_ref()
+                .and_then(|run| dino_core::context_tokens(&run.events))
+                .is_some_and(|tokens| tokens >= at)
+        });
+        // A task seen through has just written its report, which is the summary.
+        if finishing
+            && (full || large)
+            && self.compaction != crate::config::Compaction::Manual
+            && let Some(run) = run
+                .as_ref()
+                .filter(|run| run.stop_reason != StopReason::MaxTokens)
+        {
+            self.compact_from_report(&dino_core::final_message(&run.events));
+            return;
+        }
+        let automatic = matches!(self.compaction, crate::config::Compaction::Automatic { .. });
+        if (full || large) && automatic {
             println!(
                 "{}",
                 style::paint(FAINT, "  the context is filling, so compacting now")
@@ -744,6 +804,7 @@ where
     /// and carries the summary into the next message. The old conversation
     /// stays saved in full.
     async fn compact(&mut self) -> bool {
+        self.agent.set_keep_going(false);
         let was_planning = self.planning.load(std::sync::atomic::Ordering::Relaxed);
         self.planning
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -779,6 +840,46 @@ where
             )
         );
         true
+    }
+
+    /// Compacts with no request to the model: the summary is the report a task
+    /// seen through has just ended on, and the commits it made.
+    fn compact_from_report(&mut self, report: &str) {
+        let summary = seeded_summary(
+            report,
+            dino_core::git::branch_log(&self.workspace_root),
+            self.recall.render(),
+        );
+        let key = self.model_key.clone();
+        self.start_conversation(&key);
+        let words = summary.split_whitespace().count();
+        self.carried = Some(summary);
+        println!(
+            "{}",
+            style::paint(
+                FAINT,
+                &format!(
+                    "  compacted at the end of the task into its report and commits ({words} \
+                     words), which go ahead of your next message"
+                )
+            )
+        );
+    }
+
+    /// The one line that says whether every submission is seen through, and
+    /// within what.
+    fn keep_going_banner(&self) -> String {
+        if self.keep_going {
+            format!(
+                "  keep going: every message is a task to see through, up to {} turns and {} \
+                 each. /auto turns it off.",
+                self.max_turns,
+                self.meter.task().defaults().describe()
+            )
+        } else {
+            "  keep going is off: a message ends when the model hands back. /auto turns it on."
+                .to_owned()
+        }
     }
 
     fn set_planning(&mut self, planning: bool) {
@@ -968,8 +1069,13 @@ where
                 style::paint(crate::style::TEXT, &format!("{} · {workspace}", self.model)),
             )
         };
+        let keep_going = if self.keep_going {
+            format!("{}\n", style::paint(FAINT, &self.keep_going_banner()))
+        } else {
+            String::new()
+        };
         format!(
-            "{hello}  {}\n  {}\n",
+            "{hello}  {}\n  {}\n{keep_going}",
             style::paint(
                 crate::style::MUTED,
                 &format!(
@@ -1080,6 +1186,7 @@ fn help() -> String {
             "/compact",
             "summarise, then carry on in a fresh conversation",
         ),
+        ("/auto", "see every message through, or stop doing so"),
         ("/log", "the path of this session's log"),
         ("/exit", "leave; Ctrl-D does the same"),
     ];
@@ -1102,6 +1209,29 @@ fn help() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_task_is_compacted_into_its_report_and_the_commits_main_lacks() {
+        let summary = seeded_summary(
+            "S0 is met; S1 is next.\n",
+            Some(("main..HEAD".into(), "3c7b6b2 Meet the gate".into())),
+            Some("Files changed: src/shape.rs".into()),
+        );
+
+        assert!(
+            summary.contains("report:\n\nS0 is met; S1 is next."),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("(`git log main..HEAD`):\n\n3c7b6b2 Meet the gate"),
+            "{summary}"
+        );
+        assert!(
+            summary.ends_with("Files changed: src/shape.rs"),
+            "{summary}"
+        );
+        assert!(!seeded_summary("done", None, None).contains("git log"));
+    }
 
     #[test]
     fn a_trailing_backslash_keeps_the_line_open() {
@@ -1151,6 +1281,7 @@ mod tests {
         assert_eq!(parse("/diff"), Input::Diff);
         assert_eq!(parse("/cost"), Input::Cost);
         assert_eq!(parse("/compact"), Input::Compact);
+        assert_eq!(parse("/auto"), Input::Auto);
         assert_eq!(parse("/init"), Input::Init);
         assert_eq!(parse("/model"), Input::Model(None));
         assert_eq!(

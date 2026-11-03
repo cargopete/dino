@@ -55,8 +55,15 @@ pub struct FileConfig {
     /// How hard a model that offers a choice thinks: none, low, medium, high,
     /// xhigh or max. Unset keeps each provider's default.
     pub reasoning_effort: Option<dino_protocol::ReasoningEffort>,
-    /// Compact on its own once the context window passes the warning mark.
+    /// Compact on its own once the context window passes the warning mark or
+    /// `auto_compact_tokens`. Unset, only a task seen through compacts on its
+    /// own, between submissions; false, nothing does.
     pub auto_compact: Option<bool>,
+    /// Context, in tokens, past which a session compacts on its own, whatever
+    /// the window. 200,000 when unset.
+    pub auto_compact_tokens: Option<std::num::NonZeroU64>,
+    /// See every submission through, as if each said "keep going".
+    pub keep_going: Option<bool>,
     /// Models to continue on, in order, when the provider refuses the account.
     /// One name is a list of one. User file only.
     pub fallback: Option<Fallback>,
@@ -512,6 +519,21 @@ mod tests {
             message.contains("meduim") && message.contains("medium"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn keep_going_and_a_compaction_mark_in_tokens_are_read_and_zero_is_refused() {
+        let file = parse(
+            Path::new("x"),
+            "keep_going = true\nauto_compact_tokens = 150000\n",
+        )
+        .unwrap();
+        assert_eq!(file.keep_going, Some(true));
+        assert_eq!(
+            file.auto_compact_tokens.map(std::num::NonZeroU64::get),
+            Some(150_000)
+        );
+        assert!(parse(Path::new("x"), "auto_compact_tokens = 0\n").is_err());
     }
 
     #[test]

@@ -145,6 +145,26 @@ pub fn behind(workspace: &Path, fetch: bool) -> Option<Behind> {
     })
 }
 
+/// Most commits [`branch_log`] lists.
+const BRANCH_COMMITS: &str = "40";
+
+/// The commits on this branch that its main branch lacks, one line each, as
+/// `git log --oneline main..HEAD` gives them. `None` when there are none or no
+/// main branch is found.
+#[must_use]
+pub fn branch_log(workspace: &Path) -> Option<(String, String)> {
+    let main = ["main", "master", "origin/main", "origin/master"]
+        .into_iter()
+        .find(|name| git(workspace, &["rev-parse", "--verify", "--quiet", name]).is_some())?;
+    let range = format!("{main}..HEAD");
+    let log = git(
+        workspace,
+        &["log", "--oneline", "-n", BRANCH_COMMITS, &range],
+    )?;
+    let log = log.trim();
+    (!log.is_empty()).then(|| (range, log.to_owned()))
+}
+
 const FETCH_SECONDS: u64 = 20;
 
 /// `git fetch origin`, given up on after [`FETCH_SECONDS`] so a dead network
@@ -232,6 +252,28 @@ mod tests {
         let text = snapshot.render();
         assert!(text.contains("branch pete/work, main branch main, 1 changed path(s):"));
         assert!(text.contains("    - First commit"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn the_branch_log_lists_what_main_lacks() {
+        let workspace = std::env::temp_dir().join(format!("dino-log-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        run(&workspace, &["init", "-q", "-b", "main"]);
+        std::fs::write(workspace.join("a.txt"), "a").unwrap();
+        run(&workspace, &["add", "a.txt"]);
+        run(&workspace, &["commit", "-q", "-m", "First"]);
+        run(&workspace, &["switch", "-q", "-c", "pete/work"]);
+        assert_eq!(branch_log(&workspace), None);
+
+        std::fs::write(workspace.join("b.txt"), "b").unwrap();
+        run(&workspace, &["add", "b.txt"]);
+        run(&workspace, &["commit", "-q", "-m", "Meet the gate"]);
+
+        let (range, log) = branch_log(&workspace).unwrap();
+        assert_eq!(range, "main..HEAD");
+        assert!(log.ends_with(" Meet the gate"), "{log}");
+        assert!(!log.contains("First"), "{log}");
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
