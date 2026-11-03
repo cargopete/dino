@@ -78,9 +78,9 @@ CI and evals.
   several steps, shown in the transcript as it changes. `remember` appends a
   dated note to `~/.config/dino/memory/`, one file for you and one per workspace,
   both read back into later sessions, without asking. `skill` loads one of the skills in
-  `~/.config/dino/skills/` or the repository's `.dino/skills/`, folders with a
-  `SKILL.md` as Claude Code uses them; only their names and descriptions sit in
-  the system prompt. `github` reads the checkout's own issues, pull requests
+  `~/.config/dino/skills/`, an installed plugin or the repository's `.dino/skills/`,
+  folders with a `SKILL.md` as Claude Code uses them, or the built-in
+  `plugin-dev`; only their names and descriptions sit in the system prompt. `github` reads the checkout's own issues, pull requests
   and CI (`pr_checks`, `checks_wait` until no check is pending, `run_list`,
   `run_view` with `log_failed`) through a fixed set of read-only `gh` commands,
   run by `dino` rather than by a confined process, and is offered only where
@@ -183,7 +183,10 @@ CI and evals.
   Tailscale address, wants a fresh 256-bit token in a header on every request,
   and offers a page fewer approval answers than the terminal (nothing that is
   kept beyond the call's exact tool and subject, and no leaving the sandbox).
-  RFC-0020; the page has not been run in a browser.
+  The page also lists the workspace's sessions to resume or trace, and moves
+  the session to another workspace, but only one listed under `workspaces` in
+  the user file or recently used. RFC-0020; the page has not been run in a
+  browser.
 - **Reviews from GitHub.** `dino webhook` takes signed `pull_request`
   deliveries and reviews a pull request when it is marked ready, or opened
   ready, in a checkout of its head beside a clone you name, read-only, with the
@@ -230,7 +233,11 @@ CI and evals.
 - **A session log, and a way to read it back.** Append-only JSONL holding what
   you asked, the proposed action, the decision, the execution and the result.
   `dino replay` renders a past session through the same renderer the live one
-  uses, with `--last N` for the recent exchanges.
+  uses, with `--last N` for the recent exchanges. `dino trace` shows where the
+  time went: each submission, turn and call with its input and output (cut to
+  2 KiB, `--full` for more), the model's time per turn, each call's run and the
+  wait for a person's approval, from the times every log record already
+  carries; `--json` for the same as data.
 - **Configuration, split by who wrote it.** `~/.config/dino/config.toml` for your
   defaults, `<workspace>/.dino/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
@@ -277,6 +284,83 @@ CI and evals.
   a hook that exits 0 ran, which is not proof the message arrived, and a
   process killed before its task ends sends none. For Discord:
   `command = ["curl", "-sS", "--form-string", "content={message}", "https://discord.com/api/webhooks/ID/TOKEN"]`.
+- **Schedules.** In a session, `schedule_create`, `schedule_list`,
+  `schedule_update` and `schedule_delete` set a message to be sent into this
+  conversation later: once after a `delay` (`20m`, `1h30m`), once `at` a time
+  (`2026-11-04T09:00`, an instant with an offset, or the next `15:30`), `every`
+  interval of a minute or more, `daily` at `HH:MM`, `weekly` on named days
+  (`mon,thu 09:00`, `weekdays 08:30`), or by five-field `cron`, all read in an
+  IANA `timezone` (this machine's unless given) and following its clock changes.
+  Each is a file in `.dino/schedules`, so it survives a restart. What comes due
+  is sent between submissions as a message of its own, marked as scheduled
+  rather than typed; one that falls due during a run waits for the run to end.
+  Under `dino serve` it is sent within a few seconds of falling due, a page's
+  resume sends what waits for the conversation resumed, and a move to another
+  workspace leaves this one's schedules behind for the next session here. At the
+  terminal the line editor cannot be interrupted, so it is printed at once and
+  sent when you next press Enter. A schedule belongs to the conversation that
+  set it: if no session has that conversation open, it waits, a session in the
+  workspace names it at startup, and `/resume <id>` sends it. A recurring one
+  missed for a while is sent once, not once per miss. Creating, changing or
+  deleting one asks first, `--accept-edits` included, and a read-only session
+  refuses it. Every delivery is appended to
+  `.dino/schedules/deliveries.jsonl`, and a record means the message was handed
+  to the conversation, not that the work it asks for was done. Delivery is not
+  exactly-once: the record is written just before the message is sent, so a
+  process that dies between the two loses that one, and two sessions with the
+  same conversation open can both send it. `dino run`, a handover, `dino
+  review` and evals have no schedule tools, since nothing would be open to
+  receive what comes due.
+- **Presets.** `--preset` or `preset = "..."` in a config file picks the tools a
+  session offers. `standard`, the default, offers everything. `minimal` offers
+  `read`, `search`, `list`, `apply_patch`, `write_file`, `exec`, `shell`, `cargo`
+  and `report_blocker`, and starts no MCP server: a short list for a small model.
+  `review` offers only reading (`read`, `search`, `list`, `github`, `web_fetch`,
+  `skill`, `todo`, `report_blocker`), runs read-only whatever a file says,
+  refuses a contrary approval flag, and takes 40 turns unless `max_turns` or
+  `--max-turns` says otherwise; `dino review` uses it. A tool a preset leaves
+  out is absent, not refused, and only `standard` has schedules. The system
+  prompt's general guidance still names tools a preset may have removed.
+- **Plugins.** A plugin is a directory with a `dino-plugin.toml` naming it, a
+  semver `version`, a `description` and an `engines` range of Dino versions,
+  and contributing any of skills (folders under `skills/`), `[[hooks]]` and
+  `[mcp.<name>]` tables shaped as in the user file, and an `instructions` file
+  read into every session's prompt. `{plugin}` in a command is the installed
+  bundle's directory. `dino plugin install` takes a directory, a git URL
+  (`git+<url>#<rev>` pins one) or `name[@version]` from an index, prints
+  everything it contributes, the commands its hooks and servers run included,
+  with its digest, and asks. With no terminal to ask at it refuses unless
+  `--checksum` names that digest, so a model installing one from chat (an
+  unconfined command, approved each time) installs exactly the files the
+  person was shown. `list`, `enable`, `disable` and `uninstall` do what they
+  say, and changes take effect from the next session. Bundles are copied to
+  `~/.local/share/dino/plugins/` (`$XDG_DATA_HOME`), not the config
+  directory, because a sandboxed hook cannot read `~/.config/dino` and must
+  run its plugin's scripts; what was approved is recorded in
+  `~/.config/dino/plugins.toml`, which no sandboxed process can read or write,
+  and a plugin whose files no longer hash to it is not loaded, with a warning.
+  Only the person's own directories are consulted: a repository cannot
+  install, enable or point at a plugin, and `plugin_index` is user-file only.
+  A plugin's hooks run after the user file's, and an MCP server whose name is
+  already configured is left out. `dino config` names the plugins loaded.
+- **Creating a plugin.** `dino plugin new <name>` writes a bundle that
+  validates as it stands; `dino plugin validate <dir>` names every problem at
+  once, or prints what it contributes and its digest. The built-in
+  `plugin-dev` skill takes a model through writing, validating and installing
+  one from chat, then checking `dino plugin list` and `dino prompt` for it.
+  A plugin loads when a session starts, so the session that wrote it does not
+  have it.
+- **A plugin index.** `plugin_index` in the user file, or `--index`, names a
+  JSON index by path or http(s) URL: each plugin's name, description, optional
+  icon, and versions with an `engines` range, a `source` (a directory beside
+  the index, or `git+<url>#<rev>`) and the `checksum` its bundle must hash to.
+  `dino plugin search [word]` lists it with the newest version made for this
+  Dino; `dino plugin install name[@version]` refuses a bundle that does not
+  match its checksum, or a version whose range excludes this Dino. `dino plugin
+  validate-index` checks an index, and every bundle it names by directory
+  whole; git sources are not fetched. No public index exists;
+  [examples/plugins](examples/plugins) is one with one plugin, checked by the
+  test suite.
 - **An eval harness.** `dino eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
   metrics decide nothing and are read back out of the session log, which is also
@@ -541,8 +625,8 @@ Inside a session: `/help`, `/status`, `/log`, `/exit` (or a bare `exit` or
 `quit`); `/clear` for a new conversation, `/model <key>` to switch model (in a
 new conversation, since history does not move between models; add `--default`
 to start later sessions on it too), `/resume [id]` to list or continue a
-saved one, `/diff` for the working tree and `/cost` for requests, tokens and
-cost. Prices are list prices kept in the model profiles (`dino models --json`),
+saved one, `/diff` for the working tree, `/schedules` for the workspace's
+schedules and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost
 when it ends, along with today's total in UTC, which every session appends to
 `$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).
@@ -622,7 +706,8 @@ interactive session in colour opens with a small dinosaur; `greeting = false`
 in a config file turns it off, and `dino palette` shows both in your terminal.
 
 **What lands on disk.** `.dino/` in the workspace holds the session log, the
-resumable state and the input history. The log records what you typed; the state
+resumable state, the input history, and any schedules with their delivery
+records. The log records what you typed; the state
 holds the conversation, and the conversation holds your source, because tool
 results are file contents. It is git-ignored and mode 0600, and it is worth
 knowing it is there.

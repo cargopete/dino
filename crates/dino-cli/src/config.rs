@@ -160,6 +160,8 @@ pub struct RunSettings {
     /// The model that reviews a run's change before it ends, with none of the
     /// conversation. Off unless set.
     pub review: Option<ModelProfile>,
+    /// The tools offered and the limits started under.
+    pub preset: crate::preset::Preset,
 }
 
 /// Resolves the model profile named by a flag or `DINO_MODEL`.
@@ -481,6 +483,7 @@ mod tests {
             fallback: Vec::new(),
             budget: None,
             review: None,
+            preset: crate::preset::Preset::Standard,
         }
     }
 

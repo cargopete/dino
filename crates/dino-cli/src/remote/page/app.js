@@ -11,6 +11,10 @@ const infoLine = document.getElementById('info');
 const form = document.getElementById('form');
 const text = document.getElementById('text');
 const cancel = document.getElementById('cancel');
+const sessionsPanel = document.getElementById('sessions');
+const workspacesPanel = document.getElementById('workspaces');
+const tracePanel = document.getElementById('trace');
+const viewButtons = document.querySelectorAll('#views button');
 
 // The token arrives in the address fragment, which the browser never sends
 // anywhere. It is kept for this tab only and taken out of the address bar.
@@ -24,6 +28,9 @@ if (location.hash.length > 1) {
 let last = 0;
 let answer = null; // the block a streamed answer is being added to
 const cards = new Map();
+let busy = false;
+let info = null;
+let view = 'chat';
 
 function show(kind, content) {
   const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
@@ -38,6 +45,12 @@ function show(kind, content) {
 function setStatus(label, kind) {
   statusLine.textContent = label;
   statusLine.className = kind || '';
+}
+
+async function get(path) {
+  const response = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
+  if (!response.ok) throw new Error(response.status + ' ' + (await response.text()));
+  return response.json();
 }
 
 async function api(path, body) {
@@ -155,11 +168,18 @@ function onFrame(frame) {
       if (frame.outcome === 'withdrawn') show('note', 'a question was withdrawn');
       break;
     }
-    case 'state':
-      if (frame.info) infoLine.textContent = [frame.info.model, frame.info.workspace, frame.info.sandbox, frame.info.approvals].join(' · ');
-      setStatus(frame.busy ? 'working' : 'idle', frame.busy ? 'busy' : '');
-      cancel.disabled = !frame.busy;
+    case 'state': {
+      const moved = frame.info && (!info || frame.info.workspace !== info.workspace || frame.info.conversation !== info.conversation);
+      if (frame.info) {
+        info = frame.info;
+        infoLine.textContent = [info.model, info.workspace, info.sandbox, info.approvals].join(' · ');
+      }
+      busy = frame.busy;
+      setStatus(busy ? 'working' : 'idle', busy ? 'busy' : '');
+      cancel.disabled = !busy;
+      if (moved || view === 'sessions' || view === 'workspaces') refreshView();
       break;
+    }
     case 'notice':
       show('note', frame.text);
       break;
@@ -233,5 +253,184 @@ cancel.addEventListener('click', async () => {
     show('err', 'could not stop: ' + error.message);
   }
 });
+
+// Sessions, workspaces and a session's trajectory. Each list comes from the
+// server, and a page can only pick from it: a resume or a move names an entry,
+// which the server checks against the same list.
+
+function el(tag, className, content) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (content !== undefined) node.textContent = content;
+  return node;
+}
+
+function button(label, action, disabled) {
+  const node = el('button', '', label);
+  node.type = 'button';
+  node.disabled = !!disabled;
+  node.addEventListener('click', action);
+  return node;
+}
+
+function took(ms) {
+  if (ms === null || ms === undefined) return '?';
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  if (ms < 3600000) return Math.floor(ms / 60000) + 'm ' + String(Math.floor(ms / 1000) % 60).padStart(2, '0') + 's';
+  return Math.floor(ms / 3600000) + 'h ' + String(Math.floor(ms / 60000) % 60).padStart(2, '0') + 'm';
+}
+
+function age(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+  if (seconds < 86400) return Math.floor(seconds / 3600) + 'h';
+  return Math.floor(seconds / 86400) + 'd';
+}
+
+function showView(name) {
+  view = name;
+  for (const b of viewButtons) b.classList.toggle('on', b.dataset.view === name);
+  log.hidden = name !== 'chat';
+  form.hidden = name !== 'chat';
+  sessionsPanel.hidden = name !== 'sessions';
+  workspacesPanel.hidden = name !== 'workspaces';
+  tracePanel.hidden = name !== 'trace';
+  refreshView();
+}
+
+function refreshView() {
+  if (view === 'sessions') loadSessions();
+  if (view === 'workspaces') loadWorkspaces();
+}
+
+async function loadSessions() {
+  let listed;
+  try {
+    listed = (await get('/api/sessions')).sessions;
+  } catch (error) {
+    sessionsPanel.replaceChildren(el('div', 'err', 'could not list sessions: ' + error.message));
+    return;
+  }
+  const rows = [];
+  if (info && info.log) {
+    rows.push(el('div', 'hint', 'this run is ' + info.log));
+    rows.push(button('trace this run', () => openTrace(info.log)));
+  }
+  if (busy) rows.push(el('div', 'hint', 'a run is under way; resume when it is idle'));
+  for (const session of listed) {
+    const row = el('div', 'row-item');
+    const current = info && session.id === info.conversation;
+    row.append(el('span', 'what' + (current ? ' current' : ''), (session.name ? session.name + '  ' : '') + session.id + (current ? '  (current)' : '')));
+    row.append(el('span', 'meta', age(session.age_seconds) + ' ago · ' + (session.model || '?')));
+    if (session.traceable) row.append(button('trace', () => openTrace(session.id)));
+    if (session.resumable && !current) {
+      row.append(button('resume', async (event) => {
+        event.target.disabled = true;
+        try {
+          await api('/api/resume', { id: session.id });
+          showView('chat');
+        } catch (error) {
+          show('err', 'could not resume: ' + error.message);
+          event.target.disabled = false;
+        }
+      }, busy));
+    }
+    rows.push(row);
+  }
+  if (!listed.length) rows.push(el('div', 'hint', 'no sessions saved in this workspace'));
+  sessionsPanel.replaceChildren(...rows);
+}
+
+async function loadWorkspaces() {
+  let offered;
+  try {
+    offered = (await get('/api/workspaces')).workspaces;
+  } catch (error) {
+    workspacesPanel.replaceChildren(el('div', 'err', 'could not list workspaces: ' + error.message));
+    return;
+  }
+  const rows = [el('div', 'hint', 'The workspaces listed in your config file, and those used lately. Moving ends this session and starts one there, with the same flags.')];
+  for (const place of offered) {
+    const row = el('div', 'row-item');
+    row.append(el('span', 'what' + (place.current ? ' current' : ''), place.path));
+    const tags = [place.current && 'current', place.configured && 'configured', place.recent && 'recent'].filter(Boolean);
+    row.append(el('span', 'meta', tags.join(' · ')));
+    if (!place.current) {
+      row.append(button('move here', async (event) => {
+        if (!window.confirm('End this session and start one in ' + place.path + '?')) return;
+        event.target.disabled = true;
+        try {
+          await api('/api/workspace', { path: place.path });
+          showView('chat');
+        } catch (error) {
+          show('err', 'could not move: ' + error.message);
+          event.target.disabled = false;
+        }
+      }, busy));
+    }
+    rows.push(row);
+  }
+  workspacesPanel.replaceChildren(...rows);
+}
+
+function traceCall(call) {
+  const node = el('details', 'call' + (call.is_error || call.refusal ? ' bad' : ''));
+  const summary = el('summary', '', call.summary + '  ');
+  const timing = [];
+  if (call.decision === 'user') timing.push('approved after ' + took(call.decided_ms));
+  if (call.refusal) timing.push('refused after ' + took(call.decided_ms));
+  if (call.run_ms !== null && call.run_ms !== undefined) timing.push('ran ' + took(call.run_ms));
+  if (call.gist) timing.push(call.gist);
+  summary.append(el('span', 'took', timing.join(' · ')));
+  node.append(summary);
+  if (call.refusal) node.append(el('div', 'err', call.refusal));
+  node.append(el('pre', '', call.arguments));
+  if (call.output) node.append(el('pre', '', call.output));
+  return node;
+}
+
+function summaryLine(totals, wall) {
+  const parts = [wall === null || wall === undefined ? 'unfinished' : took(wall), totals.turns + ' turn(s)', totals.calls + ' call(s)', 'model ' + took(totals.model_ms), 'tools ' + took(totals.tools_ms)];
+  if (totals.approvals_ms) parts.push('approvals ' + took(totals.approvals_ms));
+  return parts.join(' · ');
+}
+
+async function openTrace(id) {
+  showView('trace');
+  tracePanel.replaceChildren(el('div', 'hint', 'reading ' + id + '…'));
+  let trajectory;
+  try {
+    trajectory = await get('/api/trace?id=' + encodeURIComponent(id));
+  } catch (error) {
+    tracePanel.replaceChildren(el('div', 'err', 'could not read ' + id + ': ' + error.message));
+    return;
+  }
+  const rows = [button('back to sessions', () => showView('sessions')), el('div', 'hint', id + ' · ' + summaryLine(trajectory.totals, trajectory.totals.wall_ms))];
+  for (const submission of trajectory.submissions) {
+    const block = el('div', 'sub');
+    block.append(el('div', 'asked', '› ' + (submission.text === null ? '(from before submissions were recorded)' : submission.text)));
+    block.append(el('div', 'sum', summaryLine(submission.totals, submission.wall_ms) + (submission.stop_reason ? ' · ' + submission.stop_reason : '')));
+    if (submission.error) block.append(el('div', 'err', submission.error));
+    for (const note of submission.notes) block.append(el('div', 'note', note));
+    for (const turn of submission.turns) {
+      const node = el('div', 'turn');
+      const head = ['turn ' + turn.number, 'model ' + (turn.model_ms === null ? 'unfinished' : took(turn.model_ms))];
+      if (turn.first_response_ms !== null) head.push('first response ' + took(turn.first_response_ms));
+      head.push(turn.usage.input_tokens + ' in', turn.usage.output_tokens + ' out');
+      if (turn.stop) head.push(turn.stop);
+      node.append(el('div', 'head', head.join(' · ')));
+      if (turn.text.trim()) node.append(el('div', 'said', turn.text.trim()));
+      for (const call of turn.calls) node.append(traceCall(call));
+      for (const note of turn.notes) node.append(el('div', 'note', note));
+      block.append(node);
+    }
+    rows.push(block);
+  }
+  if (trajectory.skipped) rows.push(el('div', 'hint', trajectory.skipped + ' line(s) of the log not read'));
+  tracePanel.replaceChildren(...rows);
+}
+
+for (const b of viewButtons) b.addEventListener('click', () => showView(b.dataset.view));
 
 connect();

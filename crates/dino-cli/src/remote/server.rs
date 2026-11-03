@@ -46,6 +46,7 @@ use tokio::sync::Semaphore;
 use super::AnswerError;
 use super::Frame;
 use super::Hub;
+use super::MoveError;
 use super::SubmitError;
 use super::Submitted;
 use super::Subscription;
@@ -271,21 +272,35 @@ async fn route(request: Request<Incoming>, shared: &Shared, peer: SocketAddr) ->
             &serde_json::json!({ "cancelled": hub.cancel() }),
         ),
         (Method::POST, "/api/approve") => approve(request, hub).await,
-        (_, "/api/events" | "/api/prompt" | "/api/cancel" | "/api/approve") => {
-            status(StatusCode::METHOD_NOT_ALLOWED)
-        }
+        (Method::GET, "/api/sessions") => sessions(hub),
+        (Method::GET, "/api/workspaces") => json(
+            StatusCode::OK,
+            &serde_json::json!({ "workspaces": hub.workspaces() }),
+        ),
+        (Method::GET, "/api/trace") => trace(hub, request.uri().query()).await,
+        (Method::POST, "/api/resume") => resume(request, hub).await,
+        (Method::POST, "/api/workspace") => workspace(request, hub).await,
+        (
+            _,
+            "/api/events" | "/api/prompt" | "/api/cancel" | "/api/approve" | "/api/sessions"
+            | "/api/workspaces" | "/api/trace" | "/api/resume" | "/api/workspace",
+        ) => status(StatusCode::METHOD_NOT_ALLOWED),
         _ => status(StatusCode::NOT_FOUND),
     }
 }
 
 /// The `after` a page sends to say which frame it last saw.
 fn after(query: Option<&str>) -> u64 {
+    parameter(query, "after")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn parameter<'a>(query: Option<&'a str>, name: &str) -> Option<&'a str> {
     query
         .into_iter()
         .flat_map(|query| query.split('&'))
-        .find_map(|pair| pair.strip_prefix("after="))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
 }
 
 fn event_chunk(frame: &Frame) -> Bytes {
@@ -370,8 +385,68 @@ async fn approve(request: Request<Incoming>, hub: &Hub) -> Response<Body> {
     }
 }
 
+fn sessions(hub: &Hub) -> Response<Body> {
+    json(
+        StatusCode::OK,
+        &serde_json::json!({ "sessions": hub.sessions() }),
+    )
+}
+
+/// A log's trajectory. Read off the runtime's threads: a long session's log
+/// runs to tens of megabytes.
+async fn trace(hub: &Hub, query: Option<&str>) -> Response<Body> {
+    let Some(path) = parameter(query, "id").and_then(|id| hub.log_path(id)) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let read = tokio::task::spawn_blocking(move || {
+        crate::trace::read(&path, crate::trace::CAP_BYTES)
+            .and_then(|trajectory| Ok(serde_json::to_vec(&trajectory)?))
+    })
+    .await;
+    match read {
+        Ok(Ok(body)) => respond(StatusCode::OK, "application/json", body),
+        _ => status(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+fn moved(result: Result<(), MoveError>) -> Response<Body> {
+    match result {
+        Ok(()) => json(StatusCode::ACCEPTED, &serde_json::json!({ "ok": true })),
+        Err(MoveError::NotOffered) => status(StatusCode::NOT_FOUND),
+        Err(MoveError::Busy) => status(StatusCode::CONFLICT),
+        Err(MoveError::Full) => status(StatusCode::TOO_MANY_REQUESTS),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeBody {
+    id: String,
+}
+
+async fn resume(request: Request<Incoming>, hub: &Hub) -> Response<Body> {
+    match read_json::<ResumeBody>(request).await {
+        Ok(body) => moved(hub.resume(&body.id)),
+        Err(code) => status(code),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceBody {
+    path: String,
+}
+
+async fn workspace(request: Request<Incoming>, hub: &Hub) -> Response<Body> {
+    match read_json::<WorkspaceBody>(request).await {
+        Ok(body) => moved(hub.switch(&body.path)),
+        Err(code) => status(code),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use dino_core::approval::ApprovalReply;
@@ -391,7 +466,7 @@ mod tests {
         address: SocketAddr,
         token: String,
         hub: Arc<Hub>,
-        prompts: mpsc::Receiver<String>,
+        prompts: mpsc::Receiver<super::super::Request>,
         task: tokio::task::JoinHandle<Infallible>,
     }
 
@@ -513,7 +588,10 @@ mod tests {
         )
         .await;
         assert_eq!((code, body.as_str()), (202, r#"{"queued":false}"#));
-        assert_eq!(server.prompts.recv().await.unwrap(), "run the tests");
+        assert_eq!(
+            server.prompts.recv().await.unwrap(),
+            super::super::Request::Prompt("run the tests".to_owned())
+        );
 
         server.hub.set_busy(true);
         let (_, _, body) = call(
@@ -631,6 +709,143 @@ mod tests {
         read_until(&mut stream, &mut seen, r#""outcome":"allowed""#).await;
     }
 
+    /// A workspace with one saved conversation and its log, described to the
+    /// hub as the current one.
+    fn workspace_with_a_session(server: &Running, name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("dino-serve-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join(".dino").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        std::fs::write(
+            sessions.join("s1.state.json"),
+            r#"{"provider":"anthropic","model_key":"claude-x","version":1,"payload":{}}"#,
+        )
+        .unwrap();
+        let lines = [
+            r#"{"record":"started","seq":0,"unix_millis":1000,"session":{"model_key":"claude-x"}}"#,
+            r#"{"record":"event","seq":1,"unix_millis":1000,"event":{"type":"submitted","text":"hello"}}"#,
+            r#"{"record":"event","seq":2,"unix_millis":1700,"event":{"type":"model","model_turn":1,"event":{"type":"finished","reason":"end_turn"}}}"#,
+        ];
+        std::fs::write(sessions.join("s1.jsonl"), lines.join("\n")).unwrap();
+        server.hub.describe(super::super::Info {
+            root: root.clone(),
+            ..super::super::Info::default()
+        });
+        root
+    }
+
+    #[tokio::test]
+    async fn a_page_lists_sessions_and_reads_a_trajectory_but_only_by_id() {
+        let server = running().await;
+        let root = workspace_with_a_session(&server, "trace");
+        let token = Some(server.token.as_str());
+
+        let (code, _, body) = call(&server, "GET", "/api/sessions", token, "").await;
+        assert_eq!(code, 200);
+        let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(listed["sessions"][0]["id"], "s1");
+        assert_eq!(listed["sessions"][0]["resumable"], true);
+
+        let (code, _, body) = call(&server, "GET", "/api/trace?id=s1", token, "").await;
+        assert_eq!(code, 200, "{body}");
+        let trajectory: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(trajectory["submissions"][0]["text"], "hello");
+        assert_eq!(trajectory["submissions"][0]["turns"][0]["model_ms"], 700);
+
+        std::fs::write(root.join("outside.jsonl"), "").unwrap();
+        for path in [
+            "/api/trace?id=../../outside",
+            "/api/trace?id=..%2F..%2Foutside",
+            "/api/trace?id=nothing",
+            "/api/trace",
+        ] {
+            assert_eq!(call(&server, "GET", path, token, "").await.0, 404, "{path}");
+        }
+        assert_eq!(call(&server, "GET", "/api/sessions", None, "").await.0, 401);
+        assert_eq!(
+            call(&server, "POST", "/api/sessions", token, "").await.0,
+            405
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_page_resumes_only_a_listed_conversation_and_only_while_idle() {
+        let mut server = running().await;
+        let root = workspace_with_a_session(&server, "resume");
+        let token = server.token.clone();
+        let token = Some(token.as_str());
+
+        let unknown = r#"{"id":"../s1"}"#;
+        assert_eq!(
+            call(&server, "POST", "/api/resume", token, unknown).await.0,
+            404
+        );
+        server.hub.set_busy(true);
+        let listed = r#"{"id":"s1"}"#;
+        assert_eq!(
+            call(&server, "POST", "/api/resume", token, listed).await.0,
+            409
+        );
+        server.hub.set_busy(false);
+        assert_eq!(
+            call(&server, "POST", "/api/resume", token, listed).await.0,
+            202
+        );
+        assert_eq!(
+            server.prompts.recv().await.unwrap(),
+            super::super::Request::Resume("s1".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_page_moves_only_to_a_workspace_it_was_offered() {
+        let mut server = running().await;
+        let root = workspace_with_a_session(&server, "move");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        server.hub.offer(super::super::Workspaces {
+            configured: vec![elsewhere.clone()],
+            recent: None,
+        });
+        let token = server.token.clone();
+        let token = Some(token.as_str());
+
+        let (code, _, body) = call(&server, "GET", "/api/workspaces", token, "").await;
+        assert_eq!(code, 200);
+        let offered: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(offered["workspaces"][0]["current"], true);
+        assert_eq!(
+            offered["workspaces"][1]["path"],
+            elsewhere.to_str().unwrap()
+        );
+
+        for refused in ["/", "/tmp", "", "elsewhere"] {
+            let body = serde_json::json!({ "path": refused }).to_string();
+            assert_eq!(
+                call(&server, "POST", "/api/workspace", token, &body)
+                    .await
+                    .0,
+                404,
+                "{refused}"
+            );
+        }
+        let body = serde_json::json!({ "path": elsewhere }).to_string();
+        assert_eq!(
+            call(&server, "POST", "/api/workspace", token, &body)
+                .await
+                .0,
+            202
+        );
+        assert_eq!(
+            server.prompts.recv().await.unwrap(),
+            super::super::Request::Workspace(elsewhere)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn connections_past_the_limit_are_dropped_not_queued() {
         let server = running().await;
@@ -716,5 +931,6 @@ mod tests {
         assert_eq!(after(Some("x=1&after=7")), 7);
         assert_eq!(after(Some("after=-1")), 0);
         assert_eq!(after(Some("after=many")), 0);
+        assert_eq!(after(Some("afterwards=3")), 0);
     }
 }
