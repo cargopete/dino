@@ -42,7 +42,9 @@ compatibility in the MVP.
 - Claude Max credential reuse before Anthropic explicitly supports third-party
   clients doing so.
 - A plugin marketplace, remote MCP catalogue, desktop application, cloud agent,
-  multi-agent orchestration, or background daemon.
+  multi-agent orchestration, or background daemon. (RFC-0020 later added
+  `dino serve`, a foreground session with a page, and section 2 there says why
+  that is neither.)
 - Automatic commits, pushes, pull requests, deployments or purchases.
 - Semantic indexing before the ordinary tool loop and eval harness work.
 

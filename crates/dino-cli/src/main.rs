@@ -11,6 +11,7 @@ mod listen;
 mod markdown;
 mod probe;
 mod recall;
+mod remote;
 mod render;
 mod replay;
 mod session;
@@ -41,6 +42,7 @@ use dino_core::ToolRuntime;
 use dino_core::ToolSet;
 use dino_core::approval::AllowAll;
 use dino_core::approval::ApprovalPolicy;
+use dino_core::approval::Approver;
 use dino_core::approval::Interactive;
 use dino_core::approval::ReadOnly;
 use dino_core::prompt::PromptContext;
@@ -103,6 +105,9 @@ enum Command {
     Config(PromptArgs),
     /// Print a past session from its log.
     Replay(crate::replay::ReplayArgs),
+    /// Run a session with no terminal, driven from a web page over Tailscale or
+    /// an SSH tunnel. RFC-0020.
+    Serve(ServeArgs),
     /// Show the palette and the opening drawing as this terminal draws them.
     Palette,
 }
@@ -186,6 +191,19 @@ struct RunArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct ServeArgs {
+    /// Address to listen on: a loopback or Tailscale address, and nothing else.
+    /// Defaults to this machine's Tailscale address, or localhost without one.
+    #[arg(long)]
+    bind: Option<std::net::IpAddr>,
+    /// Port to listen on. 0 picks a free one.
+    #[arg(long, default_value_t = 7878)]
+    port: u16,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(Debug, clap::Args)]
 struct ReviewArgs {
     /// Review the commits since this base, as `git diff <base>...HEAD`, rather
     /// than the uncommitted changes.
@@ -238,6 +256,7 @@ fn dispatch() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Replay(args)) => replay::run(&args),
+        Some(Command::Serve(args)) => on_runtime(serve(args)),
         Some(Command::Palette) => {
             style::enable(false);
             print!("{}", greeting::palette());
@@ -621,6 +640,7 @@ fn prepare(
     common: &CommonArgs,
     unattended: bool,
     extra: Vec<Box<dyn ToolRuntime>>,
+    remote: Option<&Arc<remote::Hub>>,
 ) -> Result<Prepared> {
     let session_id = SessionId::generate();
     let settings = settings(common, &session_id)?;
@@ -704,10 +724,10 @@ fn prepare(
         },
     )
     .with_policy(dino_core::approval::PlanGate::new(
-        policy(settings.mode, &sandbox_label, &settings.workspace),
+        policy(settings.mode, &sandbox_label, &settings.workspace, remote),
         Arc::clone(&planning),
     ))
-    .with_sink((renderer, log));
+    .with_sink(((renderer, log), remote::Tap(remote.map(Arc::clone))));
     let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
 
     Ok(Prepared {
@@ -730,7 +750,56 @@ fn prepare(
 }
 
 async fn session(common: CommonArgs) -> Result<ExitCode> {
-    let prepared = prepare(&common, false, Vec::new())?;
+    drive(common, None).await
+}
+
+/// What `dino serve` adds to a session: the hub the pages talk to, and the
+/// prompts they send.
+struct Remote {
+    hub: Arc<remote::Hub>,
+    prompts: tokio::sync::mpsc::Receiver<String>,
+}
+
+/// Listens for pages, then runs a session for them until the person at the
+/// terminal interrupts it.
+async fn serve(args: ServeArgs) -> Result<ExitCode> {
+    let address = remote::bind_address(args.bind, args.port)?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("cannot listen on {address}"))?;
+    let address = listener.local_addr().context("cannot read the address")?;
+    let token = remote::new_token()?;
+    let (hub, prompts) = remote::Hub::new();
+    // The token is in the fragment, which a browser keeps to itself.
+    eprintln!(
+        "{}",
+        style::paint(style::PURPLE, &format!("remote: http://{address}/#{token}"))
+    );
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            "the token is the only key: anyone who has it can drive this session"
+        )
+    );
+    let server = tokio::spawn(remote::serve(listener, Arc::clone(&hub), token));
+    let ended = drive(args.common, Some(Remote { hub, prompts })).await;
+    server.abort();
+    ended
+}
+
+async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
+    let hub = remote.as_ref().map(|remote| Arc::clone(&remote.hub));
+    let prepared = prepare(&common, false, Vec::new(), hub.as_ref())?;
+    if hub.is_some() && matches!(prepared.settings.mode, ApprovalMode::AllowAll) {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                "approvals are off, so a page may run anything the sandbox allows"
+            )
+        );
+    }
     let base = prepared.settings.clone();
     let context = prepared.context.clone();
     let definitions = prepared.definitions.clone();
@@ -750,7 +819,9 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
         let model = metered(&settings, prompt, definitions.clone(), &spending)?;
         Ok((model, name))
     });
-    let inbox = dino_core::Inbox::default();
+    let inbox = hub
+        .as_ref()
+        .map_or_else(dino_core::Inbox::default, |hub| hub.inbox());
     let mut session = Session {
         agent: prepared.agent.with_inbox(std::sync::Arc::clone(&inbox)),
         inbox,
@@ -783,8 +854,12 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
             style::enabled(),
             stdin().is_terminal(),
         ),
+        remote: hub,
     };
-    session.run().await?;
+    match remote {
+        Some(remote) => session.serve(remote.prompts).await?,
+        None => session.run().await?,
+    }
     eprintln!(
         "{}",
         style::paint(
@@ -978,7 +1053,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         .iter()
         .map(|progress| Box::new(progress.clone()) as Box<dyn ToolRuntime>)
         .collect();
-    let mut prepared = prepare(&args.common, true, extra)?;
+    let mut prepared = prepare(&args.common, true, extra, None)?;
     let request = request_text(args.prompt)?;
     eprintln!(
         "{}",
@@ -1499,17 +1574,35 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
     })
 }
 
-fn policy(mode: ApprovalMode, sandbox: &str, workspace: &Path) -> Box<dyn ApprovalPolicy> {
-    match mode {
-        ApprovalMode::Interactive => {
-            let interactive = Interactive::new(TerminalApprover::new(sandbox, workspace));
-            match settings::user_dir() {
-                Some(dir) => Box::new(
-                    interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)),
-                ),
-                None => Box::new(interactive),
-            }
+/// Asks `approver` about what the rules do not cover, and keeps the rules a
+/// person chose to keep.
+fn interactive_policy<A: Approver + 'static>(
+    approver: A,
+    workspace: &Path,
+) -> Box<dyn ApprovalPolicy> {
+    let interactive = Interactive::new(approver);
+    match settings::user_dir() {
+        Some(dir) => {
+            Box::new(interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)))
         }
+        None => Box::new(interactive),
+    }
+}
+
+/// With `remote`, approvals are asked on the pages and not at the terminal.
+fn policy(
+    mode: ApprovalMode,
+    sandbox: &str,
+    workspace: &Path,
+    remote: Option<&Arc<remote::Hub>>,
+) -> Box<dyn ApprovalPolicy> {
+    match mode {
+        ApprovalMode::Interactive => match remote {
+            Some(hub) => {
+                interactive_policy(remote::RemoteApprover::new(Arc::clone(hub)), workspace)
+            }
+            None => interactive_policy(TerminalApprover::new(sandbox, workspace), workspace),
+        },
         ApprovalMode::ReadOnly => Box::new(ReadOnly),
         ApprovalMode::AllowAll => Box::new(AllowAll),
     }

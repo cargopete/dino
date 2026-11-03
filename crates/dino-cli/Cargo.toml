@@ -20,9 +20,13 @@ path = "src/bin/dino-confine.rs"
 [dependencies]
 base64.workspace = true
 anyhow.workspace = true
+bytes.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 dino-core.workspace = true
 dino-eval.workspace = true
 dino-exec.workspace = true

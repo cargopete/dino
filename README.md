@@ -159,6 +159,13 @@ CI and evals.
   harness builds: the task, the record, why the last session ended, `git status`
   and the current `cargo check`. RFC-0018; not yet measured against the plain
   loop.
+- **Driving a session from another device.** `dino serve` runs a session with
+  no terminal and serves a small page: watch the stream, send a prompt, stop the
+  run and answer approvals from a phone. It listens only on loopback or a
+  Tailscale address, wants a fresh 256-bit token in a header on every request,
+  and offers a page fewer approval answers than the terminal (nothing that is
+  kept beyond the call's exact tool and subject, and no leaving the sandbox).
+  RFC-0020; the page has not been run in a browser.
 - **A turn budget.** `--max-turns` bounds a submission, 100 by default. The
   model is told the limit in its system prompt, sees the count from half-way, is
   counted down over its last three turns, and is told to make no calls in its
@@ -587,6 +594,7 @@ The command is `dino`; Dino is the project.
 - [RFC-0017: Open-weight first](docs/rfcs/RFC-0017-open-weight-first.md)
 - [RFC-0018: Handing a long task to a fresh session](docs/rfcs/RFC-0018-handover.md)
 - [RFC-0019: A 1 to 100 score for comparing models](docs/rfcs/RFC-0019-scoring.md)
+- [RFC-0020: Driving a session from another device](docs/rfcs/RFC-0020-remote-control.md)
 
 The RFCs are part of the project. Findings are labelled as measured, observed in
 source, documented by a provider, or inferred. Quantitative claims carry a date
