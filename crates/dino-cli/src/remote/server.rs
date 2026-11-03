@@ -104,14 +104,21 @@ fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
         .find(|ip| is_tailscale(*ip))
 }
 
+/// The macOS app puts its CLI here and not on PATH unless asked to.
+const TAILSCALE_APP_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+
 fn tailscale_address() -> Option<IpAddr> {
-    let output = std::process::Command::new("tailscale")
-        .args(["ip", "-4"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    parse_tailscale_ip(&String::from_utf8_lossy(&output.stdout))
+    ["tailscale", TAILSCALE_APP_CLI]
+        .into_iter()
+        .find_map(|cli| {
+            let output = std::process::Command::new(cli)
+                .args(["ip", "-4"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()
+                .filter(|output| output.status.success())?;
+            parse_tailscale_ip(&String::from_utf8_lossy(&output.stdout))
+        })
 }
 
 /// Where to listen.
