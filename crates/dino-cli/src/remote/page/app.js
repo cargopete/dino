@@ -124,7 +124,7 @@ function onApproval(approval) {
   if (approval.unconfined) {
     const warn = document.createElement('div');
     warn.className = 'warn';
-    warn.textContent = 'asks to run OUTSIDE the sandbox: ' + approval.unconfined + '. Refuse here; approving needs the terminal.';
+    warn.textContent = 'asks to run OUTSIDE the sandbox (full network, your credentials, every file): ' + approval.unconfined;
     card.append(warn);
   }
   const args = document.createElement('pre');

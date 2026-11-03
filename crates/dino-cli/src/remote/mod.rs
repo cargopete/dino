@@ -598,11 +598,9 @@ impl EventSink for Tap {
 
 /// Asks about a call on a page, and offers it less than the terminal would.
 ///
-/// The answers a page may give each cover this call or its exact tool and
-/// subject. A rule kept for later sessions, one for a whole program and one for
-/// every process are left to the terminal, and a call asking to leave the
-/// sandbox may only be refused: whoever holds the page's token holds a phone
-/// that can be lost, and these are the answers that outlast the loss.
+/// A page may give every answer the terminal can except a rule kept for later
+/// sessions: whoever holds the token holds a phone that can be lost, and that is
+/// the one answer that outlasts this session.
 pub struct RemoteApprover {
     hub: Arc<Hub>,
 }
@@ -620,11 +618,11 @@ fn wire_key(reply: &ApprovalReply) -> Option<&'static str> {
         ApprovalReply::Once => Some("once"),
         ApprovalReply::ForTurn => Some("turn"),
         ApprovalReply::ForSession => Some("session"),
+        ApprovalReply::ForProgram => Some("program"),
+        ApprovalReply::AllProcesses => Some("processes"),
+        ApprovalReply::AllEdits => Some("edits"),
         ApprovalReply::Reject(_) => Some("reject"),
-        ApprovalReply::Remember
-        | ApprovalReply::ForProgram
-        | ApprovalReply::AllProcesses
-        | ApprovalReply::AllEdits => None,
+        ApprovalReply::Remember => None,
     }
 }
 
@@ -649,16 +647,13 @@ impl Approver for RemoteApprover {
             context,
             change: None,
         };
-        let mut offered: Vec<(&'static str, ApprovalReply, String)> =
+        let offered: Vec<(&'static str, ApprovalReply, String)> =
             crate::approve::choices(&asking, crate::approve::always_label(action.class))
                 .into_iter()
                 .filter_map(|choice| {
                     wire_key(&choice.reply).map(|key| (key, choice.reply, choice.label))
                 })
                 .collect();
-        if context.unconfined.is_some() {
-            offered.retain(|(key, _, _)| *key == "reject");
-        }
         let arguments = serde_json::to_string_pretty(&call.arguments).unwrap_or_default();
         let approval = Approval {
             id: 0,
@@ -741,7 +736,7 @@ mod tests {
             .iter()
             .map(|choice| choice["key"].as_str().unwrap())
             .collect();
-        assert_eq!(keys, ["once", "session", "reject"]);
+        assert_eq!(keys, ["once", "session", "processes", "reject"]);
 
         let id = approval["id"].as_u64().unwrap();
         hub.answer(id, "once").unwrap();
@@ -751,7 +746,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broad_and_lasting_answers_are_never_offered_to_a_page() {
+    async fn a_rule_for_later_sessions_is_never_offered_to_a_page() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
         let approver = RemoteApprover::new(Arc::clone(&hub));
@@ -767,7 +762,7 @@ mod tests {
         });
         let approval = next_approval(&mut live).await;
         let id = approval["id"].as_u64().unwrap();
-        for refused in ["remember", "program", "processes", "nonsense"] {
+        for refused in ["remember", "nonsense"] {
             assert_eq!(hub.answer(id, refused), Err(AnswerError::NotOffered));
         }
         // The refusals decided nothing: the call is still waiting.
@@ -776,7 +771,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_outside_the_sandbox_can_only_be_refused_from_a_page() {
+    async fn a_call_outside_the_sandbox_can_be_run_once_from_a_page() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
         let approver = RemoteApprover::new(Arc::clone(&hub));
@@ -794,15 +789,42 @@ mod tests {
                 .await
         });
         let approval = next_approval(&mut live).await;
-        assert_eq!(
-            approval["choices"],
-            json!([{ "key": "reject", "label": "refuse" }])
-        );
+        let keys: Vec<&str> = approval["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|choice| choice["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, ["once", "reject"]);
         assert_eq!(approval["unconfined"], "needs the network");
+        hub.answer(approval["id"].as_u64().unwrap(), "once")
+            .unwrap();
+        assert_eq!(asked.await.unwrap(), ApprovalReply::Once);
+    }
+
+    #[tokio::test]
+    async fn a_page_may_allow_every_command_but_never_remember_a_rule() {
+        let (hub, _prompts) = Hub::new();
+        let mut live = hub.subscribe(0).live;
+        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let asked = tokio::spawn(async move {
+            approver
+                .ask(&call("c1"), &ToolAction::process("cargo test"))
+                .await
+        });
+        let approval = next_approval(&mut live).await;
+        let keys: Vec<&str> = approval["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|choice| choice["key"].as_str().unwrap())
+            .collect();
+        assert!(keys.contains(&"processes"), "{keys:?}");
+        assert!(!keys.contains(&"remember"), "{keys:?}");
         let id = approval["id"].as_u64().unwrap();
-        assert_eq!(hub.answer(id, "once"), Err(AnswerError::NotOffered));
-        hub.answer(id, "reject").unwrap();
-        assert!(matches!(asked.await.unwrap(), ApprovalReply::Reject(_)));
+        assert_eq!(hub.answer(id, "remember"), Err(AnswerError::NotOffered));
+        hub.answer(id, "processes").unwrap();
+        assert_eq!(asked.await.unwrap(), ApprovalReply::AllProcesses);
     }
 
     #[tokio::test]

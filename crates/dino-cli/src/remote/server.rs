@@ -685,7 +685,7 @@ mod tests {
         assert!(seen.contains(r#""subject":"cargo test""#), "{seen}");
 
         let token = Some(server.token.as_str());
-        let broad = r#"{"id":1,"choice":"processes"}"#;
+        let broad = r#"{"id":1,"choice":"remember"}"#;
         assert_eq!(
             call(&server, "POST", "/api/approve", token, broad).await.0,
             400

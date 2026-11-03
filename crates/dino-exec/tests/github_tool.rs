@@ -74,6 +74,10 @@ async fn each_command_maps_to_one_fixed_gh_invocation() {
         "pr list --state merged --limit 30"
     );
     assert_eq!(
+        ran(&tool, json!({"command": "issue_list", "limit": 500})).await,
+        "issue list --state open --limit 500"
+    );
+    assert_eq!(
         ran(
             &tool,
             json!({"command": "issue_view", "number": 58, "comments": true})
@@ -108,6 +112,9 @@ fn malformed_requests_are_refused_before_anything_runs() {
         json!({"command": "issue_view", "number": 0}),
         json!({"command": "issue_list", "number": 3}),
         json!({"command": "issue_list", "state": "merged"}),
+        json!({"command": "issue_list", "limit": 0}),
+        json!({"command": "issue_list", "limit": 1001}),
+        json!({"command": "issue_view", "number": 3, "limit": 5}),
         json!({"command": "issue_close", "number": 3}),
         json!({"command": "pr_view", "number": 1, "repo": "someone/else"}),
     ] {
