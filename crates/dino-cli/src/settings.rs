@@ -307,6 +307,61 @@ fn user_config_path() -> Option<PathBuf> {
     user_dir().map(|dir| dir.join("config.toml"))
 }
 
+/// Makes `key` the model a session starts on, in the user's file, leaving the
+/// rest of the file as written. Returns the file's path.
+///
+/// # Errors
+///
+/// Returns an error when there is no home directory, or the file cannot be
+/// read, parsed or written.
+pub fn save_default_model(key: &str) -> Result<PathBuf> {
+    let Some(path) = user_config_path() else {
+        bail!("no home directory to keep a config file in");
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let updated = with_model(&text, key);
+    if parse(&path, &updated)?.model.as_deref() != Some(key) {
+        bail!("could not set model in {}", path.display());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, updated)?;
+    Ok(path)
+}
+
+/// `text` with its top-level `model` set to `key`: that line replaced, or a
+/// line added at the top, where no table can have begun.
+fn with_model(text: &str, key: &str) -> String {
+    let setting = format!("model = {}", toml::Value::String(key.to_owned()));
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_table = false;
+    let mut replaced = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        in_table |= trimmed.starts_with('[');
+        let sets_model = trimmed
+            .strip_prefix("model")
+            .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if sets_model && !in_table && !replaced {
+            lines.push(setting.clone());
+            replaced = true;
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if !replaced {
+        lines.insert(0, setting);
+    }
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    updated
+}
+
 /// The user's own instructions, read into every interactive session.
 pub fn user_instructions_path() -> Option<PathBuf> {
     user_dir().map(|dir| dir.join("instructions.md"))
@@ -371,6 +426,21 @@ mod tests {
             project_path: None,
             user_path: None,
         }
+    }
+
+    #[test]
+    fn saving_the_default_model_keeps_the_rest_of_the_file() {
+        let text = "# mine\nmax_turns = 8\nmodel = \"claude-opus\"\n\n[budget]\ntask_usd = 5\n";
+        let updated = with_model(text, "claude-sonnet");
+        assert_eq!(
+            updated,
+            "# mine\nmax_turns = 8\nmodel = \"claude-sonnet\"\n\n[budget]\ntask_usd = 5\n"
+        );
+
+        let tabled = with_model("[budget]\ntask_usd = 5\n", "claude-sonnet");
+        let parsed = parse(Path::new("user"), &tabled).unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("claude-sonnet"));
+        assert_eq!(with_model("", "qwen3-8b"), "model = \"qwen3-8b\"\n");
     }
 
     #[test]

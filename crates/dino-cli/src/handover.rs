@@ -99,7 +99,7 @@ pub async fn run(
                     "{}",
                     crate::style::paint(
                         crate::style::FAINT,
-                        "  every item in the plan is done; the run is finished"
+                        "  every item in the plan is marked done, so the run ends here"
                     )
                 );
             }

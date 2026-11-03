@@ -74,6 +74,17 @@ async fn pipes_redirects_and_and_work() {
 }
 
 #[tokio::test]
+async fn a_long_command_line_is_not_echoed_in_its_result() {
+    let fixture = Fixture::new("long");
+    let line = format!("echo done # {}", "x".repeat(300));
+
+    let result = output(&fixture.tool(), json!({ "command": line })).await;
+
+    assert_eq!(result["stdout"], "done\n");
+    assert_eq!(result.get("command"), None);
+}
+
+#[tokio::test]
 async fn a_directory_inside_the_workspace_is_the_working_directory() {
     let fixture = Fixture::new("dir");
     let result = output(

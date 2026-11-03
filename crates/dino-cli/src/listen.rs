@@ -1,5 +1,6 @@
 //! Reading the keyboard while a run is under way: Esc interrupts it, and a
-//! line typed and entered goes to the model with its next tool results.
+//! line typed and entered goes to the model with its next tool results. A
+//! command entered waits for the run to end.
 //!
 //! The terminal is put in cbreak mode rather than raw mode: keys arrive one at
 //! a time without echo, but output still turns `\n` into a new line and ctrl-c
@@ -45,7 +46,17 @@ pub fn cooked<T>(read: impl FnOnce() -> T) -> T {
 /// the terminal.
 pub struct Listener {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<String>>,
+    thread: Option<JoinHandle<Stopped>>,
+}
+
+/// What a stopped listener leaves for the prompt.
+#[derive(Debug, Default)]
+pub struct Stopped {
+    /// Typed and not entered.
+    pub typed: String,
+    /// Entered lines kept from the model: the first command and all after it,
+    /// so they run after the run in the order typed.
+    pub held: Vec<String>,
 }
 
 impl Listener {
@@ -62,6 +73,7 @@ impl Listener {
         let stopping = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
             let mut line = Line::default();
+            let mut held = Vec::new();
             while !stopping.load(Ordering::Relaxed) {
                 let Ok(_keyboard) = KEYBOARD.try_lock() else {
                     std::thread::sleep(imp::POLL);
@@ -74,7 +86,9 @@ impl Listener {
                     match event {
                         Key::Interrupt => cancel.cancel(),
                         Key::Entered(text) => {
-                            if let Ok(mut inbox) = inbox.lock() {
+                            if !held.is_empty() || crate::session::is_command(&text) {
+                                held.push(text);
+                            } else if let Ok(mut inbox) = inbox.lock() {
                                 inbox.push(text);
                             }
                         }
@@ -82,11 +96,14 @@ impl Listener {
                 }
                 if let Ok(mut status) = status.lock() {
                     status.typed.clone_from(&line.text);
-                    status.queued = inbox.lock().map_or(0, |inbox| inbox.len());
+                    status.queued = inbox.lock().map_or(0, |inbox| inbox.len()) + held.len();
                 }
             }
             drop(terminal);
-            line.text
+            Stopped {
+                typed: line.text,
+                held,
+            }
         });
         Some(Self {
             stop,
@@ -94,8 +111,8 @@ impl Listener {
         })
     }
 
-    /// Stops listening and returns what was typed but not yet entered.
-    pub fn stop(mut self) -> String {
+    /// Stops listening and returns what was typed but not yet delivered.
+    pub fn stop(mut self) -> Stopped {
         self.stop.store(true, Ordering::Relaxed);
         self.thread
             .take()

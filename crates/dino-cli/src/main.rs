@@ -377,10 +377,8 @@ fn start_hook_output(
         ))
     });
     said.into_iter()
-        .map(|(command, text)| dino_core::prompt::Instructions {
-            source: format!("session_start: {command}"),
-            text,
-            truncated: false,
+        .map(|(command, text)| {
+            dino_core::prompt::Instructions::whole(format!("session_start: {command}"), text)
         })
         .collect()
 }
@@ -525,7 +523,11 @@ fn announce_instructions(context: &PromptContext) {
         .map(|item| {
             let source = render::short_path(Path::new(&item.source), Path::new(""));
             if item.truncated {
-                format!("{source} (truncated)")
+                format!(
+                    "{source} (cut at {} of {} bytes)",
+                    render::compact(item.text.len() as u64),
+                    render::compact(item.bytes as u64)
+                )
             } else {
                 source
             }
@@ -826,6 +828,7 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
         agent: prepared.agent.with_inbox(std::sync::Arc::clone(&inbox)),
         inbox,
         typed_ahead: String::new(),
+        queued: std::collections::VecDeque::new(),
         usage: prepared.usage,
         requests: prepared.requests,
         meter: Arc::clone(&prepared.spending.meter),

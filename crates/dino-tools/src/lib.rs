@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -610,6 +611,19 @@ impl WorkspaceTools {
         if let Some(depth) = arguments.depth {
             builder.max_depth(Some(depth));
         }
+        let skipped = Arc::new(Mutex::new(Vec::new()));
+        let skipping = Arc::clone(&skipped);
+        let walk_root = root.clone();
+        builder.filter_entry(move |entry| {
+            let path = entry.path();
+            let walk = path == walk_root
+                || !NOT_WALKED.iter().any(|tail| path.ends_with(tail))
+                || !entry.file_type().is_some_and(|kind| kind.is_dir());
+            if !walk && let Ok(mut skipped) = skipping.lock() {
+                skipped.push(path.to_path_buf());
+            }
+            walk
+        });
         let pattern = arguments.pattern.as_deref().map(glob_matcher).transpose()?;
 
         let mut entries = Vec::new();
@@ -656,12 +670,20 @@ impl WorkspaceTools {
             entries.push(listed);
         }
 
+        let skipped = skipped
+            .lock()
+            .map(|mut skipped| std::mem::take(&mut *skipped))
+            .unwrap_or_default()
+            .iter()
+            .map(|path| self.root.relative(path))
+            .collect::<Result<_, _>>()?;
         json_output(&ListOutput {
             path: relative.to_owned(),
             all: arguments.all,
             entries,
             total_entries,
             truncated,
+            not_walked: skipped,
         })
     }
 
@@ -1141,7 +1163,14 @@ struct ListOutput {
     /// Everything the walk saw, so a capped list never reads as a whole one.
     total_entries: usize,
     truncated: bool,
+    /// Directories left out and not walked into, even with `all`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    not_walked: Vec<String>,
 }
+
+/// Never walked into: git's own store, and other checkouts of the repository
+/// that would repeat it whole.
+const NOT_WALKED: [&str; 2] = [".git", ".claude/worktrees"];
 
 /// Applies every edit to `text`, each matched against the text as it was.
 fn replace_all(text: &str, edits: &[Edit]) -> Result<String, ToolError> {
@@ -1462,6 +1491,40 @@ mod tests {
         // as "not shown" rather than "not there".
         assert_eq!(ordinary["all"], false);
         assert_eq!(everything["all"], true);
+    }
+
+    #[test]
+    fn list_all_names_but_does_not_walk_git_or_other_worktrees() {
+        let workspace = TestWorkspace::new();
+        workspace.write("src/lib.rs", "one\n");
+        workspace.write(".git/HEAD", "ref: refs/heads/main\n");
+        workspace.write(".claude/worktrees/agent-1/src/lib.rs", "one\n");
+        workspace.write(".claude/settings.json", "{}\n");
+        let tools = workspace.tools();
+
+        let everything = output_json(
+            &tools
+                .execute_sync(&call("list", json!({"all": true})))
+                .unwrap(),
+        );
+
+        let paths: Vec<&str> = everything["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&".claude/settings.json"), "{paths:?}");
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with(".git/") || path.contains("worktrees")),
+            "{paths:?}"
+        );
+        assert_eq!(
+            everything["not_walked"],
+            json!([".claude/worktrees", ".git"])
+        );
     }
 
     #[test]

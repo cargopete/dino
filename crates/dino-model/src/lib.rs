@@ -524,6 +524,15 @@ fn terra_6_1() -> ModelProfile {
     }
 }
 
+/// Anthropic's list price. Dino's requests use the default 5-minute cache,
+/// whose writes bill at 1.25 times input; 1-hour writes, at twice, it never asks for.
+fn anthropic_price(input: f64, cached_input: f64, output: f64) -> Pricing {
+    Pricing {
+        cache_write: Some(input * 1.25),
+        ..Pricing::new(input, cached_input, output)
+    }
+}
+
 /// **Provider-documented, inspected 2026-10-28:** `claude-opus-5-5` has the
 /// same window and output as Opus 5, cannot disable thinking at any effort, and
 /// offers fast mode. Kept beside `claude-opus` so earlier eval results keep
@@ -534,7 +543,7 @@ fn claude_opus_5_5() -> ModelProfile {
         provider_model: "claude-opus-5-5".into(),
         display_name: "Claude Opus 5.5".into(),
         status: ProfileStatus::Development,
-        price: Some(Pricing::new(4.00, 0.20, 20.00)),
+        price: Some(anthropic_price(4.00, 0.20, 20.00)),
         ..claude_opus()
     }
 }
@@ -547,7 +556,7 @@ fn claude_sonnet_5_5() -> ModelProfile {
         provider_model: "claude-sonnet-5-5".into(),
         display_name: "Claude Sonnet 5.5".into(),
         status: ProfileStatus::Development,
-        price: Some(Pricing::new(2.00, 0.20, 10.00)),
+        price: Some(anthropic_price(2.00, 0.20, 10.00)),
         ..claude_sonnet()
     }
 }
@@ -561,7 +570,7 @@ fn claude_haiku_5_5() -> ModelProfile {
         provider_model: "claude-haiku-5-5".into(),
         display_name: "Claude Haiku 5.5".into(),
         status: ProfileStatus::Development,
-        price: Some(Pricing::new(0.10, 0.01, 0.50)),
+        price: Some(anthropic_price(0.10, 0.01, 0.50)),
         // Low against high on the #195 subset, four trials each: 97 vs 97 at half the cost.
         default_effort: Some(ReasoningEffort::Low),
         ..claude_sonnet()
@@ -971,6 +980,15 @@ mod tests {
         assert_eq!(priced, expected);
         let kimi = builtin_profile("kimi-k3.1-pro").and_then(|profile| profile.price);
         assert_eq!(kimi.and_then(|price| price.cache_write), Some(2.00));
+        for (key, write) in [
+            ("claude-opus-5.5", 5.00),
+            ("claude-sonnet-5.5", 2.50),
+            ("claude-haiku-5.5", 0.125),
+        ] {
+            let price = builtin_profile(key).and_then(|profile| profile.price);
+            let written = price.and_then(|price| price.cache_write).unwrap();
+            assert!((written - write).abs() < 1e-12, "{key}: {written}");
+        }
         for profile in builtin_profiles() {
             let beside = profile
                 .price

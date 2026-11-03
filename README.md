@@ -109,7 +109,8 @@ CI and evals.
   interrupts it, and a line typed and entered goes to the model with its next
   tool results, shown in the status row as queued until then; anything entered
   that no tool result came after is sent when the turn ends, and anything typed
-  but not entered starts the next prompt.
+  but not entered starts the next prompt. A command entered during a turn, and
+  anything after it, waits for the turn to end and then runs on its own.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events
@@ -134,11 +135,13 @@ CI and evals.
   so the model can go straight to a file instead of listing and searching first.
 - **Instructions.** `~/.config/dino/instructions.md` for your own rules, then
   any `AGENTS.md` between the git repository's root and a workspace inside it,
-  outermost first, then the workspace's `AGENTS.md` and `.dino/instructions.md`,
-  each capped at 16 KiB
-  and named when a session starts. They go below the built-in rules and cannot
-  change approvals or the sandbox. Evals read none of them, so a personal file
-  cannot move a measurement.
+  outermost first, then the workspace's `AGENTS.md` and `.dino/instructions.md`.
+  A directory with no `AGENTS.md` gives its `CLAUDE.md` instead. Your own file
+  is capped at 16 KiB and a repository's at 64 KiB; each is named when a session
+  starts, a cut one with how much was kept, and the model is told where it
+  stops and, for a workspace file, to read the rest. They go below the built-in
+  rules and cannot change approvals or the sandbox. Evals read none of them, so
+  a personal file cannot move a measurement.
 - **Review.** `dino review` reviews the uncommitted changes, and `dino review
   --base main` the commits since a base, for correctness bugs or a `--focus` of
   your own. Dino takes the diff itself and runs the model read-only, so a review
@@ -226,9 +229,13 @@ CI and evals.
   `task_end` hook runs when a task ends, finished or not, once the task has run
   `ping_after_seconds` (300 unless set), with `{status}` (`finished`, `failed`,
   `cancelled` or `stopped`) and `{message}` in its arguments and in
-  `DINO_STATUS` and `DINO_MESSAGE`. Unlike the others it runs outside the
+  `DINO_STATUS` and `DINO_MESSAGE`. `finished` means the model ended its turn,
+  not that the work was checked, and the message gives its last paragraph as
+  what it said. Unlike the others it runs outside the
   sandbox, so it can reach a webhook; a failure names the program, never its
-  arguments, which may hold a token. For Discord:
+  arguments, which may hold a token. A ping is attempted once and not retried:
+  a hook that exits 0 ran, which is not proof the message arrived, and a
+  process killed before its task ends sends none. For Discord:
   `command = ["curl", "-sS", "--form-string", "content={message}", "https://discord.com/api/webhooks/ID/TOKEN"]`.
 - **An eval harness.** `dino eval` runs a corpus of cases: a fixture workspace, a
   prompt, and assertions about the outcome. Assertions decide pass or fail;
@@ -490,9 +497,10 @@ Or put the model in `~/.config/dino/config.toml` and run `dino`. `dino config`
 prints every setting and where its value came from. `dino prompt` prints the
 system prompt a run would send, so its cost can be read rather than guessed.
 
-Inside a session: `/help`, `/status`, `/log`, `/exit`; `/clear` for a new
-conversation, `/model <key>` to switch model (in a new conversation, since
-history does not move between models), `/resume [id]` to list or continue a
+Inside a session: `/help`, `/status`, `/log`, `/exit` (or a bare `exit` or
+`quit`); `/clear` for a new conversation, `/model <key>` to switch model (in a
+new conversation, since history does not move between models; add `--default`
+to start later sessions on it too), `/resume [id]` to list or continue a
 saved one, `/diff` for the working tree and `/cost` for requests, tokens and
 cost. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost

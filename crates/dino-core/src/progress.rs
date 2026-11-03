@@ -187,7 +187,7 @@ impl Progress {
             ToolError::new(format!("cannot write {}: {error}", self.path.display()))
         })?;
         Ok(format!(
-            "Recorded. {} of {} done.\n{}",
+            "Recorded. {} of {} marked done.\n{}",
             record.done(),
             record.items.len(),
             record.render()
