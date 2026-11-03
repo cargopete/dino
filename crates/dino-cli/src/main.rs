@@ -21,6 +21,7 @@ mod spinner;
 mod style;
 mod summary;
 mod task;
+mod trace;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -105,6 +106,9 @@ enum Command {
     Config(PromptArgs),
     /// Print a past session from its log.
     Replay(crate::replay::ReplayArgs),
+    /// Show a past session's turns and calls with their inputs, outputs and
+    /// durations.
+    Trace(crate::trace::TraceArgs),
     /// Run a session with no terminal, driven from a web page over Tailscale or
     /// an SSH tunnel. RFC-0020.
     Serve(ServeArgs),
@@ -115,7 +119,7 @@ enum Command {
 // These are switches rather than a state machine because each one means one
 // thing to a person reading `--help`.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Default, clap::Args)]
+#[derive(Debug, Default, Clone, clap::Args)]
 struct CommonArgs {
     /// Model key from `dino models`. Defaults to `DINO_MODEL`.
     #[arg(long)]
@@ -264,6 +268,7 @@ fn dispatch() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Replay(args)) => replay::run(&args),
+        Some(Command::Trace(args)) => trace::run(&args),
         Some(Command::Serve(args)) => on_runtime(serve(args)),
         Some(Command::Palette) => {
             style::enable(false);
@@ -780,14 +785,15 @@ fn prepare(
 }
 
 async fn session(common: CommonArgs) -> Result<ExitCode> {
-    drive(common, None).await
+    drive(common, None).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
-/// What `dino serve` adds to a session: the hub the pages talk to, and the
-/// prompts they send.
+/// What `dino serve` adds to a session: the hub the pages talk to, and what
+/// they ask of it.
 struct Remote {
     hub: Arc<remote::Hub>,
-    prompts: tokio::sync::mpsc::Receiver<String>,
+    requests: tokio::sync::mpsc::Receiver<remote::Request>,
 }
 
 /// Listens for pages, then runs a session for them until the person at the
@@ -799,7 +805,11 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
         .with_context(|| format!("cannot listen on {address}"))?;
     let address = listener.local_addr().context("cannot read the address")?;
     let token = remote::new_token()?;
-    let (hub, prompts) = remote::Hub::new();
+    let (hub, requests) = remote::Hub::new();
+    hub.offer(remote::Workspaces {
+        configured: settings::configured_workspaces()?,
+        recent: settings::recent_workspaces_path(),
+    });
     // The token is in the fragment, which a browser keeps to itself.
     eprintln!(
         "{}",
@@ -813,14 +823,49 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
         )
     );
     let server = tokio::spawn(remote::serve(listener, Arc::clone(&hub), token));
-    let ended = drive(args.common, Some(Remote { hub, prompts })).await;
+    let mut remote = Remote {
+        hub: Arc::clone(&hub),
+        requests,
+    };
+    let mut common = args.common;
+    // Where to go back to when the workspace a page picked will not start.
+    let mut previous: Option<CommonArgs> = None;
+    let ended = loop {
+        match drive(common.clone(), Some(&mut remote)).await {
+            Ok(Some(workspace)) => {
+                hub.notice(&format!("moving to {}", workspace.display()));
+                let mut next = common.clone();
+                next.workspace = Some(workspace);
+                next.resume = None;
+                next.log = None;
+                previous = Some(std::mem::replace(&mut common, next));
+            }
+            Ok(None) => break Ok(ExitCode::SUCCESS),
+            Err(error) => match previous.take() {
+                Some(back) => {
+                    eprintln!("dino: {error:#}");
+                    hub.notice(&format!("could not start there: {error:#}"));
+                    common = back;
+                }
+                None => break Err(error),
+            },
+        }
+    };
     server.abort();
     ended
 }
 
-async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
+/// Runs one session, and returns the workspace a page asked to move to, if one
+/// did.
+async fn drive(
+    common: CommonArgs,
+    remote: Option<&mut Remote>,
+) -> Result<Option<std::path::PathBuf>> {
     let hub = remote.as_ref().map(|remote| Arc::clone(&remote.hub));
     let prepared = prepare(&common, false, Vec::new(), hub.as_ref())?;
+    if let Some(file) = settings::recent_workspaces_path() {
+        let _ = remote::note_workspace(&file, &prepared.settings.workspace);
+    }
     if hub.is_some() && matches!(prepared.settings.mode, ApprovalMode::AllowAll) {
         eprintln!(
             "{}",
@@ -893,10 +938,12 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
         ),
         remote: hub,
     };
-    match remote {
-        Some(remote) => session.serve(remote.prompts).await?,
-        None => session.run().await?,
-    }
+    let moving = if let Some(remote) = remote {
+        session.serve(&mut remote.requests).await?
+    } else {
+        session.run().await?;
+        None
+    };
     eprintln!(
         "{}",
         style::paint(
@@ -904,7 +951,7 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
             &format!("  {}", prepared.spending.meter.closing())
         )
     );
-    Ok(ExitCode::SUCCESS)
+    Ok(moving)
 }
 
 /// The largest diff put into a review request; past it the model reads files.

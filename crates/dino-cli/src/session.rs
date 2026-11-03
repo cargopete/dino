@@ -474,46 +474,81 @@ where
         Ok(())
     }
 
-    /// Runs prompts from the pages until the person at the terminal interrupts
-    /// while it is idle. There is no line editor and no slash command: a page
-    /// sends prompts and answers approvals, and the rest stays at the terminal.
+    /// Runs what the pages ask until the person at the terminal interrupts
+    /// while it is idle, or a page picks another workspace, which is returned.
+    /// There is no line editor and no slash command: a page sends prompts,
+    /// answers approvals and picks from lists, and the rest stays at the
+    /// terminal.
     ///
     /// # Errors
     ///
     /// Returns an error when this is not a remote session.
-    pub async fn serve(&mut self, mut prompts: tokio::sync::mpsc::Receiver<String>) -> Result<()> {
+    pub async fn serve(
+        &mut self,
+        requests: &mut tokio::sync::mpsc::Receiver<crate::remote::Request>,
+    ) -> Result<Option<std::path::PathBuf>> {
         let hub = self
             .remote
             .clone()
             .context("this session has no remote hub")?;
+        self.describe_to(&hub);
+        hub.set_busy(false);
+        println!("{}", self.opening());
+        loop {
+            let request = tokio::select! {
+                request = requests.recv() => request,
+                _ = tokio::signal::ctrl_c() => None,
+            };
+            let Some(request) = request else { break };
+            match request {
+                crate::remote::Request::Prompt(prompt) => {
+                    hub.set_busy(true);
+                    self.submit(prompt).await;
+                    while let Some(line) = self.queued.pop_front() {
+                        if is_command(&line) {
+                            println!(
+                                "{}",
+                                style::paint(
+                                    FAINT,
+                                    &format!("  {line}: not a command while serving")
+                                )
+                            );
+                        } else {
+                            self.submit(line).await;
+                        }
+                    }
+                }
+                crate::remote::Request::Resume(id) => {
+                    if self.resume(&id) {
+                        self.describe_to(&hub);
+                        hub.notice(&format!("resumed {id} on {}", self.model));
+                    } else {
+                        hub.notice(&format!("could not resume {id}; the terminal says why"));
+                    }
+                }
+                crate::remote::Request::Workspace(path) => return Ok(Some(path)),
+            }
+            hub.set_busy(false);
+        }
+        Ok(None)
+    }
+
+    fn describe_to(&self, hub: &crate::remote::Hub) {
+        let log = std::path::Path::new(&self.log_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".jsonl"))
+            .unwrap_or_default()
+            .to_owned();
         hub.describe(crate::remote::Info {
             model: self.model.clone(),
             workspace: self.workspace.clone(),
             sandbox: self.sandbox.clone(),
             approvals: self.approvals.clone(),
+            conversation: self.current_id(),
+            log,
+            root: self.workspace_root.clone(),
         });
-        println!("{}", self.opening());
-        loop {
-            let prompt = tokio::select! {
-                prompt = prompts.recv() => prompt,
-                _ = tokio::signal::ctrl_c() => None,
-            };
-            let Some(prompt) = prompt else { break };
-            hub.set_busy(true);
-            self.submit(prompt).await;
-            while let Some(line) = self.queued.pop_front() {
-                if is_command(&line) {
-                    println!(
-                        "{}",
-                        style::paint(FAINT, &format!("  {line}: not a command while serving"))
-                    );
-                } else {
-                    self.submit(line).await;
-                }
-            }
-            hub.set_busy(false);
-        }
-        Ok(())
     }
 
     /// Says something to the pages, when there are any.
@@ -546,7 +581,9 @@ where
                 println!("{}", self.save_default_model());
             }
             Input::Resume(None) => print!("{}", self.saved()),
-            Input::Resume(Some(wanted)) => self.resume(&wanted),
+            Input::Resume(Some(wanted)) => {
+                self.resume(&wanted);
+            }
             Input::Rename(name) => self.rename(name),
             Input::Diff => print!("{}", diff(&self.workspace_root)),
             Input::Plan(None) => println!(
@@ -1035,7 +1072,7 @@ where
         }
     }
 
-    fn resume(&mut self, wanted: &str) {
+    fn resume(&mut self, wanted: &str) -> bool {
         let found = match dino_core::resume::find(&self.workspace_root, wanted) {
             Ok(Some(found)) => found,
             Ok(None) => {
@@ -1046,11 +1083,11 @@ where
                         &format!("  no saved conversation is called {wanted}; /resume lists them")
                     )
                 );
-                return;
+                return false;
             }
             Err(error) => {
                 println!("{}", style::paint(style::WARN, &format!("  {error}")));
-                return;
+                return false;
             }
         };
         let (id, path) = found;
@@ -1074,8 +1111,12 @@ where
                     "{}",
                     style::paint(FAINT, &format!("  resumed {id} on {}", self.model))
                 );
+                true
             }
-            Err(error) => println!("{}", style::paint(style::WARN, &format!("  {error}"))),
+            Err(error) => {
+                println!("{}", style::paint(style::WARN, &format!("  {error}")));
+                false
+            }
         }
     }
 

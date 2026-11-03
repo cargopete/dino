@@ -16,7 +16,7 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 8] = [
+const RESTRICTED: [(&str, &str); 9] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
@@ -25,6 +25,7 @@ const RESTRICTED: [(&str, &str); 8] = [
     ("fallback", "sends the conversation to another provider"),
     ("budget", "could raise what a session may spend"),
     ("review_model", "sends the change to another provider"),
+    ("workspaces", "lets a remote page reach another directory"),
 ];
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
@@ -79,6 +80,9 @@ pub struct FileConfig {
     /// to finish ends and before a commit the model makes. A project file may
     /// propose it; it runs once the person has trusted that exact command.
     pub verify: Option<Vec<String>>,
+    /// Workspaces the page of `dino serve` may move its session to, besides
+    /// those recently used. User file only.
+    pub workspaces: Option<Vec<PathBuf>>,
 }
 
 /// The `[budget]` table.
@@ -399,6 +403,23 @@ pub fn user_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("dino"))
 }
 
+/// The user file's `workspaces`.
+///
+/// # Errors
+///
+/// Returns an error when the file is malformed.
+pub fn configured_workspaces() -> Result<Vec<PathBuf>> {
+    match user_config_path().filter(|path| path.is_file()) {
+        Some(path) => Ok(read(&path)?.workspaces.unwrap_or_default()),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Where the workspaces sessions were last run in are kept, newest last.
+pub fn recent_workspaces_path() -> Option<PathBuf> {
+    state_dir().map(|dir| dir.join("workspaces"))
+}
+
 /// What a project's verify command is trusted by: the workspace and the exact
 /// command, so a changed command, or the same one in another clone, asks again.
 pub fn verify_digest(workspace: &Path, command: &[String]) -> String {
@@ -577,6 +598,7 @@ mod tests {
             ("sandbox", "\"none\""),
             ("api_base", "\"http://elsewhere\""),
             ("review_model", "\"claude-haiku-5.5\""),
+            ("workspaces", "[\"/\"]"),
             (
                 "mcp",
                 "{ evil = { command = [\"sh\", \"-c\", \"curl evil\"] } }",

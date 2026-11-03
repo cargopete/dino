@@ -6,8 +6,13 @@
 //! prompt answered from the page, and the sink that feeds the hub. The network
 //! half, and every check on who may connect, is in [`server`]. RFC-0020.
 
+mod places;
 mod server;
 
+pub use places::Place;
+pub use places::SavedSession;
+pub use places::Workspaces;
+pub use places::note_workspace;
 pub use server::bind_address;
 pub use server::new_token;
 pub use server::serve;
@@ -15,6 +20,7 @@ pub use server::serve;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -60,12 +66,30 @@ const MAX_STRING_BYTES: usize = 16 * 1_024;
 const MAX_ARGUMENT_BYTES: usize = 8 * 1_024;
 
 /// What the page says about the session it controls.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Info {
     pub model: String,
     pub workspace: String,
     pub sandbox: String,
     pub approvals: String,
+    /// The saved conversation this session continues, by id.
+    pub conversation: String,
+    /// This run's log, by id, for its trajectory.
+    pub log: String,
+    #[serde(skip)]
+    pub root: PathBuf,
+}
+
+/// What a page asks of the session loop. Only ever sent while it is idle,
+/// apart from a prompt, which then waits its turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    Prompt(String),
+    /// Continue the saved conversation with this id, one the page was listed.
+    Resume(String),
+    /// End this session and start one in this workspace, one the page was
+    /// offered.
+    Workspace(PathBuf),
 }
 
 /// One message to a page: a sequence number and its JSON, built once.
@@ -160,6 +184,17 @@ pub enum Submitted {
     Queued,
 }
 
+/// Why a resume or a change of workspace was not taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveError {
+    /// Not among what the page was offered.
+    NotOffered,
+    /// A run is under way; it would be lost.
+    Busy,
+    /// Too many requests are already waiting.
+    Full,
+}
+
 /// Why an answer to an approval was not taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnswerError {
@@ -173,10 +208,11 @@ pub enum AnswerError {
 pub struct Hub {
     state: Mutex<State>,
     live: broadcast::Sender<Frame>,
-    commands: mpsc::Sender<String>,
+    commands: mpsc::Sender<Request>,
     inbox: Inbox,
     cancel: Notify,
-    info: OnceLock<Info>,
+    info: Mutex<Option<Info>>,
+    workspaces: OnceLock<Workspaces>,
 }
 
 /// What a page that has just connected is sent first, and then what follows.
@@ -188,7 +224,7 @@ pub struct Subscription {
 impl Hub {
     /// A hub, and the receiving end of the prompts sent to it.
     #[must_use]
-    pub fn new() -> (Arc<Self>, mpsc::Receiver<String>) {
+    pub fn new() -> (Arc<Self>, mpsc::Receiver<Request>) {
         let (commands, prompts) = mpsc::channel(WAITING);
         let (live, _) = broadcast::channel(LIVE);
         let hub = Arc::new(Self {
@@ -197,7 +233,8 @@ impl Hub {
             commands,
             inbox: Inbox::default(),
             cancel: Notify::new(),
-            info: OnceLock::new(),
+            info: Mutex::new(None),
+            workspaces: OnceLock::new(),
         });
         (hub, prompts)
     }
@@ -208,9 +245,33 @@ impl Hub {
         Arc::clone(&self.inbox)
     }
 
-    /// Says what the session is, for the page's heading. Once.
+    /// Says what the session is, for the page's heading. Again after a
+    /// resume or a change of workspace; pages hear it with the next state.
     pub fn describe(&self, info: Info) {
-        let _ = self.info.set(info);
+        *self
+            .info
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(info);
+    }
+
+    fn info(&self) -> Option<Info> {
+        self.info
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The current workspace, once a session has said which it is. Never the
+    /// process's directory, which an empty path would read as.
+    fn root(&self) -> Option<PathBuf> {
+        self.info()
+            .map(|info| info.root)
+            .filter(|root| root.is_absolute())
+    }
+
+    /// The workspaces a page may move the session to. Once, at start.
+    pub fn offer(&self, workspaces: Workspaces) {
+        let _ = self.workspaces.set(workspaces);
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -256,8 +317,14 @@ impl Hub {
     pub fn set_busy(&self, busy: bool) {
         let mut state = self.lock();
         state.busy = busy;
-        let info = self.info.get();
-        self.publish(&mut state, Payload::State { busy, info });
+        let info = self.info();
+        self.publish(
+            &mut state,
+            Payload::State {
+                busy,
+                info: info.as_ref(),
+            },
+        );
     }
 
     /// What a page connecting after `after` is owed: the frames since, every
@@ -278,11 +345,12 @@ impl Hub {
                 backlog.push_back(pending.frame.clone());
             }
         }
+        let info = self.info();
         let now = Framed {
             seq: state.seq,
             payload: Payload::State {
                 busy: state.busy,
-                info: self.info.get(),
+                info: info.as_ref(),
             },
         };
         if let Ok(json) = serde_json::to_string(&now) {
@@ -314,9 +382,70 @@ impl Hub {
             return Ok(Submitted::Queued);
         }
         self.commands
-            .try_send(text.to_owned())
+            .try_send(Request::Prompt(text.to_owned()))
             .map(|()| Submitted::Started)
             .map_err(|_| SubmitError::Full)
+    }
+
+    /// Asks the idle session to continue the saved conversation `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns why not: `id` is not a saved conversation of this workspace, or
+    /// a run is under way.
+    pub fn resume(&self, id: &str) -> Result<(), MoveError> {
+        if !self
+            .sessions()
+            .iter()
+            .any(|session| session.resumable && session.id == id)
+        {
+            return Err(MoveError::NotOffered);
+        }
+        self.request(Request::Resume(id.to_owned()))
+    }
+
+    /// Asks the idle session to make way for one in `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns why not: `path` is not among the workspaces offered, or a run is
+    /// under way.
+    pub fn switch(&self, path: &str) -> Result<(), MoveError> {
+        let offered = self.workspaces();
+        let place = offered
+            .iter()
+            .find(|place| place.path.to_str() == Some(path))
+            .ok_or(MoveError::NotOffered)?;
+        self.request(Request::Workspace(place.path.clone()))
+    }
+
+    /// The workspaces offered now, the current one first.
+    #[must_use]
+    pub fn workspaces(&self) -> Vec<Place> {
+        match (self.root(), self.workspaces.get()) {
+            (Some(root), Some(workspaces)) => workspaces.offered(&root),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The saved conversations and logs of the current workspace.
+    #[must_use]
+    pub fn sessions(&self) -> Vec<SavedSession> {
+        self.root()
+            .map_or_else(Vec::new, |root| places::sessions(&root))
+    }
+
+    /// Where the log `id` of the current workspace is, when it is one.
+    #[must_use]
+    pub fn log_path(&self, id: &str) -> Option<PathBuf> {
+        places::log_path(&self.root()?, id)
+    }
+
+    fn request(&self, request: Request) -> Result<(), MoveError> {
+        if self.lock().busy {
+            return Err(MoveError::Busy);
+        }
+        self.commands.try_send(request).map_err(|_| MoveError::Full)
     }
 
     /// Asks the run under way to stop. False when none is.
@@ -727,7 +856,10 @@ mod tests {
     fn a_prompt_goes_to_the_session_when_idle_and_to_the_inbox_when_busy() {
         let (hub, mut prompts) = Hub::new();
         assert_eq!(hub.submit("  fix the build  "), Ok(Submitted::Started));
-        assert_eq!(prompts.try_recv().unwrap(), "fix the build");
+        assert_eq!(
+            prompts.try_recv().unwrap(),
+            Request::Prompt("fix the build".to_owned())
+        );
 
         hub.set_busy(true);
         assert_eq!(hub.submit("and the tests"), Ok(Submitted::Queued));
@@ -786,6 +918,7 @@ mod tests {
             workspace: "/w".to_owned(),
             sandbox: "s".to_owned(),
             approvals: "a".to_owned(),
+            ..Info::default()
         });
         hub.notice("one");
         hub.notice("two");
