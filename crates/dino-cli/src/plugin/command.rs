@@ -234,6 +234,9 @@ fn clone(url: &str, rev: Option<&str>) -> Result<Fetched> {
         bail!("git could not clone {url}");
     }
     if let Some(rev) = rev {
+        if rev.starts_with('-') {
+            bail!("{rev:?} is not a revision");
+        }
         let status = git(&[
             "-C".as_ref(),
             fetched.dir.as_os_str(),

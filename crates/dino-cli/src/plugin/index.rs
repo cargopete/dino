@@ -143,7 +143,11 @@ fn fetch(url: &str) -> Result<String> {
         .enable_all()
         .build()?
         .block_on(async {
-            let response = reqwest::get(url)
+            // The checksums arrive with the index, so it must not come over plain HTTP.
+            let client = reqwest::Client::builder().https_only(true).build()?;
+            let response = client
+                .get(url)
+                .send()
                 .await
                 .with_context(|| format!("cannot fetch {url}"))?;
             if !response.status().is_success() {
