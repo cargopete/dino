@@ -130,7 +130,7 @@ struct CommonArgs {
     /// Session log path. Defaults to .dino/sessions/<id>.jsonl in the workspace.
     #[arg(long)]
     log: Option<PathBuf>,
-    /// Safety limit on model turns in one submission. Default 32.
+    /// Safety limit on model turns in one submission. Default 100.
     #[arg(long)]
     max_turns: Option<NonZeroU32>,
     /// Refuse every mutation and every process instead of asking.
