@@ -526,12 +526,19 @@ names a limit or says to see it through ("keep going", "until it's done",
 until a turn does no work or it calls `report_blocker`; and such a task fetches
 first, and tells the model when the branch is behind `origin`'s main. Such a task is
 also reviewed once before it ends, by `review_model` if set and by the model
-running it if not.
+running it if not; a review that finds a changed threshold, baseline or test
+assertion beside a verdict written into a document asks for the result under
+both readings. A task told to finish that ends on a question is sent back once
+to proceed with its recommendation. `/auto`, `--keep-going` or `keep_going =
+true` makes every submission such a task, and after a handback that proposed a
+next step, a bare "go", "yes" or "letsgooo" continues it as one.
 `/compact` asks the model for a structured summary, with changes gated off,
 starts a fresh conversation and puts the summary ahead of your next message;
 the old conversation stays resumable in full. `auto_compact = true` in a config
 file does the same on its own after any submission that fills the window past
-70%. `/plan <task>` investigates read-only and ends in a numbered plan; edits and
+70% or `auto_compact_tokens` (200,000 unless set). Unless `auto_compact = false`,
+a task seen through that ends past either mark is compacted with no request:
+its last report and `git log main..HEAD` go ahead of the next message. `/plan <task>` investigates read-only and ends in a numbered plan; edits and
 processes are refused below the model until you answer `y`, `n` drops it, and
 anything else is feedback for another round.
 Ctrl-C cancels the current

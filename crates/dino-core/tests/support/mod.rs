@@ -32,6 +32,8 @@ use serde_json::json;
 pub enum Turn {
     Events(Vec<ModelEvent>),
     Stream(ModelEventStream),
+    /// The request fails before anything streams.
+    Refused(ModelError),
 }
 
 pub struct ScriptedSession {
@@ -104,6 +106,7 @@ impl ModelSession for ScriptedSession {
                     Ok(Box::pin(stream::iter(events.into_iter().map(Ok))) as ModelEventStream)
                 }
                 Some(Turn::Stream(stream)) => Ok(stream),
+                Some(Turn::Refused(error)) => Err(error),
                 None => Err(ModelError::Protocol(
                     "scripted provider has no next turn".into(),
                 )),

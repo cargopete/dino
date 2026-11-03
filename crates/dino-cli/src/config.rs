@@ -77,11 +77,32 @@ impl ApprovalMode {
 }
 
 /// Whether a session compacts only when asked, or also on its own once the
-/// context window passes the warning mark.
+/// context passes the warning mark or a number of tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compaction {
     Manual,
-    Automatic,
+    /// Only a task seen through, between submissions, from its own report.
+    Tasks {
+        at_tokens: u64,
+    },
+    Automatic {
+        at_tokens: u64,
+    },
+}
+
+/// The context past which a session compacts on its own, whatever its window.
+/// Above it, every turn re-reads that much at cache price for little use.
+pub const AUTO_COMPACT_TOKENS: u64 = 200_000;
+
+impl Compaction {
+    /// The tokens past which it compacts, or `None` when only asked to.
+    #[must_use]
+    pub fn at_tokens(self) -> Option<u64> {
+        match self {
+            Self::Manual => None,
+            Self::Tasks { at_tokens } | Self::Automatic { at_tokens } => Some(at_tokens),
+        }
+    }
 }
 
 // Each switch is a separate setting a person can name in a config file.
@@ -111,6 +132,8 @@ pub struct RunSettings {
     /// Most reasoning tokens per turn, for a server that honours a budget.
     pub thinking_budget: Option<u32>,
     pub compaction: Compaction,
+    /// See every submission through, as `--keep-going` or `/auto` asks.
+    pub keep_going: bool,
     /// Overrides the endpoint for a self-served model.
     pub api_base: Option<String>,
     /// Asks a toggling model not to think. Absent leaves the server's default.
@@ -444,6 +467,7 @@ mod tests {
             mcp: Vec::new(),
             thinking_budget: None,
             compaction: Compaction::Manual,
+            keep_going: false,
             show_reasoning: false,
             api_base: None,
             disable_thinking: false,

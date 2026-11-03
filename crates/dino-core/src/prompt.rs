@@ -34,7 +34,8 @@ Working method:
   it there.
 - Prefer the compiler as evidence. Types, exhaustive matches and lifetimes tell
   you more about a change than a confident paragraph does.
-- Each response is one turn, and a run has a fixed number of them. Calls that
+- Each response is one turn, and each message from the person allows a fixed
+  number of them, counted from one again for every message. Calls that
   do not depend on each other belong in the same response: read every file you
   need at once, and make all the edits a step needs before checking it once.
   Calls in one response run in the order given, so the `cargo` command `test`
@@ -111,6 +112,8 @@ Tool discipline:
   prefer `exec` for a single program. Nothing a command starts outlives it, `&`
   included. For a server or watcher that must keep running between calls, use
   `background`: start it, read its `output`, and `stop` it when you are done.
+  For a build or CI run longer than `shell` allows, start it there and `wait`
+  on it rather than polling with `sleep`.
 - `todo` keeps a checklist for a task of several steps. Send the whole list
   each time, keep one item in progress, and mark items done as you finish them.
   An update goes in the same response as the next step's calls, or the last
@@ -124,6 +127,11 @@ Tool discipline:
 - If the task cannot be done as asked, because the request contradicts itself
   or the tests and code it must keep, call `report_blocker` with the evidence.
   Do not change a test or the spec to make the two agree.
+- A gate that a document the work follows says stops the work, such as a
+  measurement an RFC requires before going on, is a blocker when it fails:
+  call `report_blocker` with the result. It is not a step to work around by
+  changing the threshold, the baseline or the test. If you did change how a
+  gate is measured, give the result under the old reading and the new.
 - Processes may be confined. Where they are, they cannot write outside the
   workspace or reach the network, so anything needing either will fail for that
   reason rather than because you did it wrong. Say so plainly instead of trying
@@ -263,8 +271,10 @@ pub fn system_prompt(context: &PromptContext) -> String {
     if let Some(turns) = context.max_model_turns {
         let _ = writeln!(
             &mut prompt,
-            "- Model turns: at most {turns}. Each response you give is one. Near the end \
-             you will be told how many remain; finish and summarise rather than be cut off."
+            "- Model turns: at most {turns} for each submission, counted afresh every time \
+             the person sends a message; turns spent on earlier messages do not count. Each \
+             response you give is one. Near the end you will be told how many remain; finish \
+             and summarise rather than be cut off."
         );
     }
     if let Some(git) = &context.git {
@@ -450,7 +460,11 @@ mod tests {
 
         assert!(prompt.contains("- Workspace root: /tmp/workspace"));
         assert!(prompt.contains("- Available tools: read, search, apply_patch"));
-        assert!(prompt.contains("- Model turns: at most 40"), "{prompt}");
+        assert!(
+            prompt.contains("- Model turns: at most 40 for each submission"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("a run has a fixed number"), "{prompt}");
         assert!(prompt.contains("belong in the same response"), "{prompt}");
         assert!(prompt.contains("not in a response of its own"), "{prompt}");
         assert!(prompt.contains("- Approval mode: read-only"));

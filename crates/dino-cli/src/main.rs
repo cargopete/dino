@@ -160,7 +160,12 @@ struct CommonArgs {
     /// high, xhigh or max. Leaves the model's default when absent.
     #[arg(long)]
     effort: Option<dino_protocol::ReasoningEffort>,
-    /// Continue a previous session. Bare, the most recent in this workspace.
+    /// See every submission through, as if each said "keep going". `/auto`
+    /// switches it in a session.
+    #[arg(long)]
+    keep_going: bool,
+    /// Continue a previous session by id or /rename name. Bare, the most recent
+    /// in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 }
@@ -841,7 +846,10 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
         awaiting_plan: false,
         carried: None,
         recall: crate::recall::Recall::default(),
-        auto_compact: prepared.settings.compaction == config::Compaction::Automatic,
+        compaction: prepared.settings.compaction,
+        keep_going: prepared.settings.keep_going,
+        proposed: false,
+        max_turns: prepared.settings.max_turns.get(),
         context_full: prepared.context_full,
         status: prepared.status,
         model: prepared.settings.profile.display_name.clone(),
@@ -851,6 +859,9 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
         log_path: prepared.settings.log_path.display().to_string(),
         end_hooks: prepared.settings.task_end_hooks.clone(),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
+        name: resume::label(&prepared.state_path)
+            .ok()
+            .and_then(|label| label.name),
         state_path: prepared.state_path,
         greeting: greeting::shows(
             prepared.settings.greeting,
@@ -951,7 +962,7 @@ async fn begin_task(prepared: &mut Prepared, request: String) -> String {
         );
     }
     // A read-only run is a review or a question, not a task to see through.
-    let finishing = task::wants_to_finish(&request)
+    let finishing = (prepared.settings.keep_going || task::wants_to_finish(&request))
         && !matches!(prepared.settings.mode, ApprovalMode::ReadOnly);
     prepared.agent.set_keep_going(finishing);
     if finishing {
@@ -1160,11 +1171,10 @@ fn resume_from(requested: Option<&str>, workspace: &Path) -> Result<Option<(Stri
         };
         return Ok(Some(found));
     }
-    let path = resume::state_path(workspace, requested);
-    if !path.is_file() {
-        bail!("no session {requested:?} in {}", workspace.display());
+    match resume::find(workspace, requested)? {
+        Some(found) => Ok(Some(found)),
+        None => bail!("no session {requested:?} in {}", workspace.display()),
     }
-    Ok(Some((requested.to_owned(), path)))
 }
 
 /// Persists the session's native state, so it can be continued later.
@@ -1176,7 +1186,11 @@ pub(crate) fn save_state<S: ModelSession, T: dino_core::ToolRuntime>(
     // have expired anyway, and a one-shot against a provider without state is
     // still a complete run.
     match agent.session().export_state() {
-        Ok(state) => resume::save(path, &state).map_err(Into::into),
+        Ok(state) => {
+            // A resumed conversation keeps the name it was given.
+            let name = resume::label(path).ok().and_then(|label| label.name);
+            resume::save(path, &state, name.as_deref()).map_err(Into::into)
+        }
         Err(_) => Ok(()),
     }
 }
@@ -1196,7 +1210,8 @@ struct Resolved {
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
     reasoning_effort: (Option<dino_protocol::ReasoningEffort>, Source),
-    auto_compact: bool,
+    compaction: config::Compaction,
+    keep_going: (bool, Source),
     fallback: Vec<String>,
     review_model: Option<String>,
     budget: Option<spend::Budget>,
@@ -1320,9 +1335,8 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         max_diagnostics: layers
             .pick(|file| file.max_diagnostics.map(Some))
             .unwrap_or((None, Source::Default)),
-        auto_compact: layers
-            .pick(|file| file.auto_compact)
-            .is_some_and(|(on, _)| on),
+        compaction: compaction(&layers),
+        keep_going: switch(args.keep_going, |file| file.keep_going),
         fallback: layers
             .pick_user_only(|file| file.fallback.clone())
             .map(|(fallback, _)| fallback.keys())
@@ -1346,6 +1360,17 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         mcp: mcp_servers(&layers),
         layers,
     })
+}
+
+fn compaction(layers: &Layers) -> config::Compaction {
+    let at_tokens = layers
+        .pick(|file| file.auto_compact_tokens)
+        .map_or(config::AUTO_COMPACT_TOKENS, |(tokens, _)| tokens.get());
+    match layers.pick(|file| file.auto_compact) {
+        Some((true, _)) => config::Compaction::Automatic { at_tokens },
+        Some((false, _)) => config::Compaction::Manual,
+        None => config::Compaction::Tasks { at_tokens },
+    }
 }
 
 /// The user file's MCP servers. A project file cannot set any.
@@ -1376,6 +1401,20 @@ fn reasoning_effort(
         None => layers
             .pick(|file| file.reasoning_effort.map(Some))
             .unwrap_or((None, Source::Default)),
+    }
+}
+
+fn compaction_row(compaction: config::Compaction) -> String {
+    match compaction {
+        config::Compaction::Manual => "only when asked".to_owned(),
+        config::Compaction::Tasks { at_tokens } => format!(
+            "a task seen through, past {} tokens",
+            render::compact(at_tokens)
+        ),
+        config::Compaction::Automatic { at_tokens } => format!(
+            "past {} tokens or 70% of the window",
+            render::compact(at_tokens)
+        ),
     }
 }
 
@@ -1497,6 +1536,8 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         ),
         ("plain", switch(resolved.plain)),
         ("greeting", switch(resolved.greeting)),
+        ("keep going", switch(resolved.keep_going)),
+        ("compaction", compaction_row(resolved.compaction)),
         ("fallback", fallback),
         (
             "review model",
@@ -1561,11 +1602,8 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         task_limits: resolved.task_limits,
         mcp: resolved.mcp,
         thinking_budget: resolved.thinking_budget.0,
-        compaction: if resolved.auto_compact {
-            config::Compaction::Automatic
-        } else {
-            config::Compaction::Manual
-        },
+        compaction: resolved.compaction,
+        keep_going: resolved.keep_going.0,
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,
