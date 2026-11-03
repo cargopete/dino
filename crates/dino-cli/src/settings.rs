@@ -79,6 +79,9 @@ pub struct FileConfig {
     /// to finish ends and before a commit the model makes. A project file may
     /// propose it; it runs once the person has trusted that exact command.
     pub verify: Option<Vec<String>>,
+    /// The tools offered and the limits started under: standard, minimal or
+    /// review. Only ever narrows, so a project file may set it.
+    pub preset: Option<crate::preset::Preset>,
 }
 
 /// The `[budget]` table.
