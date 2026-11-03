@@ -225,8 +225,8 @@ struct ServeArgs {
     /// Defaults to this machine's Tailscale address, or localhost without one.
     #[arg(long)]
     bind: Option<std::net::IpAddr>,
-    /// Port to listen on. 0 picks a free one.
-    #[arg(long, default_value_t = 7878)]
+    /// Port to listen on. Defaults to a free one, so several can run at once.
+    #[arg(long, default_value_t = 0)]
     port: u16,
     #[command(flatten)]
     common: CommonArgs,
@@ -871,6 +871,10 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
         .await
         .with_context(|| format!("cannot listen on {address}"))?;
     let address = listener.local_addr().context("cannot read the address")?;
+    if address.ip().is_loopback() {
+        let port = address.port();
+        eprintln!("dino: from another machine: ssh -L {port}:localhost:{port} <this machine>");
+    }
     let token = remote::new_token()?;
     let (hub, requests) = remote::Hub::new();
     hub.offer(remote::Workspaces {

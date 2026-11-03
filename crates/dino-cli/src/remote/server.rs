@@ -128,10 +128,7 @@ pub fn bind_address(requested: Option<IpAddr>, port: u16) -> Result<SocketAddr> 
     let ip = match requested {
         Some(ip) => ip,
         None => tailscale_address().unwrap_or_else(|| {
-            eprintln!(
-                "dino: no Tailscale address found, so listening on localhost only. From \
-                 another machine: ssh -L {port}:localhost:{port} <this machine>"
-            );
+            eprintln!("dino: no Tailscale address found, so listening on localhost only.");
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         }),
     };
