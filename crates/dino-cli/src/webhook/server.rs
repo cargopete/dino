@@ -231,6 +231,7 @@ mod tests {
                 "body": null,
                 "head": { "sha": head },
                 "base": { "sha": "f".repeat(40) },
+                "author_association": "COLLABORATOR",
             },
             "repository": { "full_name": "cargopete/dino" },
         })

@@ -106,6 +106,9 @@ pub struct WebhookConfig {
     pub max_turns: Option<std::num::NonZeroU32>,
     /// Reviews started in any hour, past which deliveries are refused. Default 6.
     pub per_hour: Option<u32>,
+    /// Review pull requests from anyone, not only the repository's owner,
+    /// members and collaborators. Default false.
+    pub any_author: Option<bool>,
 }
 
 /// The `[budget]` table.

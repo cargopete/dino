@@ -16,6 +16,7 @@ repos = { "cargopete/dino" = "/Users/me/src/dino" }  # owner/name = a clone whos
 # secret = "..."      # or DINO_WEBHOOK_SECRET, which wins; at least 16 bytes
 # model = "claude-sonnet-5.5"  # default: review_model, then model
 # on_opened = true    # also review a pull request opened ready
+# any_author = false  # true reviews pull requests from outside the owner, members and collaborators
 # post = false        # post each review as a comment with `gh`
 # max_turns = 40
 # per_hour = 6        # reviews started in any hour
