@@ -1125,6 +1125,58 @@ async fn a_task_told_to_finish_sends_a_status_report_back_until_a_turn_does_no_w
 }
 
 #[tokio::test]
+async fn a_task_told_to_finish_is_given_the_rule_with_its_message() {
+    let mut agent = agent(vec![text_turn("done")]);
+    agent.set_keep_going(true);
+
+    agent.run("finish the wave").await.unwrap();
+
+    let TurnInput::User { content } = &agent.session().inputs[0] else {
+        panic!("{:?}", agent.session().inputs[0]);
+    };
+    assert!(
+        content.starts_with("finish the wave\n\n[dino: "),
+        "{content}"
+    );
+    assert!(content.contains("take it"), "{content}");
+    assert!(content.contains("report_blocker"), "{content}");
+    assert!(content.contains("no defensible default"), "{content}");
+}
+
+#[tokio::test]
+async fn a_task_told_to_finish_that_ends_on_a_question_is_told_to_proceed_once() {
+    let mut agent = agent(vec![
+        tool_turn(tool_call("call-1", "read", "a.rs")),
+        text_turn("a is done.\n\n**Should I start on b?**"),
+        text_turn("Should I start on b?"),
+    ]);
+    agent.set_keep_going(true);
+
+    let result = agent.run("finish the wave").await.unwrap();
+
+    assert_eq!(result.model_turns, 3);
+    assert_eq!(sent_back(&result), vec![2]);
+    let note = last_result(&agent.session().inputs[2]);
+    assert!(note.contains("Proceed with your recommendation"), "{note}");
+}
+
+#[tokio::test]
+async fn a_question_from_a_task_not_told_to_finish_goes_to_the_person() {
+    let mut agent = agent(vec![
+        tool_turn(tool_call("call-1", "read", "a.rs")),
+        text_turn("a is done. Should I start on b?"),
+    ]);
+
+    let result = agent.run("read a").await.unwrap();
+
+    assert_eq!(sent_back(&result), Vec::<u32>::new());
+    let TurnInput::User { content } = &agent.session().inputs[0] else {
+        panic!("{:?}", agent.session().inputs[0]);
+    };
+    assert_eq!(content, "read a");
+}
+
+#[tokio::test]
 async fn a_task_not_told_to_finish_ends_when_the_model_does() {
     let mut agent = Agent::new(
         ScriptedSession::new(vec![
@@ -1339,8 +1391,8 @@ async fn the_turn_count_rides_along_from_half_way() {
     agent.run("read them").await.unwrap();
 
     let inputs = &agent.session().inputs;
-    assert!(!note_of(&inputs[1]).contains("turns used"));
-    assert!(note_of(&inputs[2]).contains("2 of 4 model turns used"));
+    assert!(!note_of(&inputs[1]).contains("this submission"));
+    assert!(note_of(&inputs[2]).contains("this submission: turn 2 of 4."));
     assert_eq!(last_result(&inputs[2]), "fn main() {}");
 }
 

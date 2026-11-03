@@ -35,7 +35,10 @@ pub const SYSTEM_PROMPT: &str = "You review a change to a code repository. You d
 write it, and you see none of the conversation that produced it: only the task as it was \
 given, the change made since the work began, and the latest test and check results. Look \
 for what the change gets wrong against the task: a requirement it misses, an invariant or \
-existing behaviour it breaks, an edit outside what the task asked for. Raise only what you \
+existing behaviour it breaks, an edit outside what the task asked for. A threshold, \
+denominator, baseline or test assertion that changed alongside a verdict in a document, such \
+as a gate now met, is an objection: ask for the result under the old reading and the new in \
+the final report. Raise only what you \
 can point to in the task or the diff, each concrete enough to act on. Leave out style, \
 naming, and anything you cannot confirm from what you were given. If you find nothing of \
 that kind, reply with exactly NO OBJECTIONS. Otherwise reply with at most five objections, \
@@ -118,6 +121,7 @@ impl Reviewer {
             return None;
         }
         let request = request(task, &diff, checks, self.max_diff_bytes);
+        let moved = moved_gate(&diff);
         if let Ok(mut reviewed) = self.reviewed.lock() {
             *reviewed = Some(diff);
         }
@@ -128,6 +132,12 @@ impl Reviewer {
                 Err(error) => verdict.error = Some(error),
             },
             Err(error) => verdict.error = Some(error),
+        }
+        // Read off the diff rather than asked of the model, so a reviewer that
+        // fails or misses it does not wave a moved gate through.
+        if let Some(moved) = moved {
+            verdict.objections.insert(0, moved);
+            verdict.objections.truncate(MAX_OBJECTIONS);
         }
         Some(verdict)
     }
@@ -203,6 +213,92 @@ fn objections(reply: &str) -> Result<Vec<String>, String> {
         "the reviewer replied neither {NO_OBJECTIONS} nor a list: {}",
         capped_head(reply, 200)
     ))
+}
+
+const DOC_EXTENSIONS: [&str; 5] = ["md", "markdown", "rst", "txt", "adoc"];
+const GATE_WORDS: [&str; 6] = [
+    "gate",
+    "threshold",
+    "criterion",
+    "criteria",
+    "target",
+    "verdict",
+];
+const VERDICT_WORDS: [&str; 9] = [
+    "met", "meets", "pass", "passes", "passed", "fail", "fails", "failed", "missed",
+];
+const MEASURE_WORDS: [&str; 3] = ["threshold", "denominator", "baseline"];
+
+/// An objection when `diff` changes what decides a pass or fail (a test
+/// assertion, a comparison with a number, a document's threshold or baseline)
+/// and also writes a verdict on a gate into a document.
+#[must_use]
+pub fn moved_gate(diff: &str) -> Option<String> {
+    let mut path = "";
+    let (mut moved, mut verdict) = (None, None);
+    for line in diff.lines() {
+        if let Some(name) = line
+            .strip_prefix("+++ b/")
+            .or_else(|| line.strip_prefix("--- a/"))
+        {
+            path = name;
+            continue;
+        }
+        if line.starts_with("+++ ") || line.starts_with("--- ") {
+            continue;
+        }
+        let doc = Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| DOC_EXTENSIONS.contains(&extension));
+        if let Some(removed) = line.strip_prefix('-') {
+            let measures = if doc {
+                words(removed)
+                    .iter()
+                    .any(|word| MEASURE_WORDS.contains(&word.as_str()))
+            } else {
+                removed.contains("assert") || compares_to_a_number(removed)
+            };
+            if measures && moved.is_none() {
+                moved = Some(format!("{path}: `{}`", capped_head(removed.trim(), 120)));
+            }
+        } else if let Some(added) = line.strip_prefix('+')
+            && doc
+            && verdict.is_none()
+        {
+            let words = words(added);
+            let says = |set: &[&str]| words.iter().any(|word| set.contains(&word.as_str()));
+            if says(&GATE_WORDS) && says(&VERDICT_WORDS) {
+                verdict = Some(format!("{path}: \"{}\"", capped_head(added.trim(), 120)));
+            }
+        }
+    }
+    let (moved, verdict) = (moved?, verdict?);
+    Some(format!(
+        "the change moves what decides a pass or fail ({moved}) and writes a verdict into a \
+         document ({verdict}). Give the result under the old reading and the new in the final \
+         report. If a document says a failed gate stops the work, call report_blocker with the \
+         result instead."
+    ))
+}
+
+fn words(line: &str) -> Vec<String> {
+    line.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// A binary comparison with a literal. Formatted code spaces one, which tells
+/// it from a generic's angle brackets.
+fn compares_to_a_number(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        matches!(pair[0], "<" | "<=" | ">" | ">=")
+            && pair[1]
+                .trim_start_matches(['(', '-'])
+                .starts_with(|c: char| c.is_ascii_digit())
+    })
 }
 
 /// What the model is told when the reviewer objects.
@@ -477,6 +573,60 @@ mod tests {
         assert!(!checks.contains("1 failed") && !checks.contains("contents"));
         assert!(checks.find("cargo test") < checks.find("cargo clippy"));
         assert_eq!(task(&events), "fix it");
+    }
+
+    #[test]
+    fn a_moved_baseline_with_a_gate_declared_met_is_an_objection() {
+        let diff = "\
+--- a/docs/rfcs/0080-partial-sync.md
++++ b/docs/rfcs/0080-partial-sync.md
+@@ -243,4 +243,4 @@
+-## 11. S0 measured (2026-11-01): the gate is not met
++## 11. S0 measured (2026-11-01): the gate is met
+-The gate is under 0.10. The first measurement, against a bare insert, gave 5.3; that baseline
++The gate is under 0.10, so it is met, at 62 ns a row.
+";
+        let objection = moved_gate(diff).unwrap();
+        assert!(objection.contains("that baseline"), "{objection}");
+        assert!(objection.contains("the gate is met"), "{objection}");
+        assert!(objection.contains("old reading and the new"), "{objection}");
+
+        let code = "\
+--- a/src/shape.rs
++++ b/src/shape.rs
+@@ -1,1 +1,1 @@
+-    assert!(ratio < 0.10, \"{ratio}\");
++    assert!(ratio < 0.20, \"{ratio}\");
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,1 @@
++The cost gate passes.
+";
+        assert!(moved_gate(code).unwrap().contains("src/shape.rs"));
+    }
+
+    #[test]
+    fn a_verdict_alone_or_a_moved_assertion_alone_is_not_flagged() {
+        let verdict_only = "\
+--- a/docs/plan.md
++++ b/docs/plan.md
+@@ -1,1 +1,1 @@
+-S0: not measured yet
++S0: the gate is met at 0.04
+";
+        assert_eq!(moved_gate(verdict_only), None);
+        let code_only = "\
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,1 +1,1 @@
+-    assert_eq!(parse(\"1\"), 1);
++    assert_eq!(parse(\"1\"), Ok(1));
+";
+        assert_eq!(moved_gate(code_only), None);
+        assert!(!compares_to_a_number(
+            "let cache: HashMap<String, Vec<u8>> = x;"
+        ));
+        assert!(compares_to_a_number("if cost >= 10 {"));
     }
 
     #[test]
