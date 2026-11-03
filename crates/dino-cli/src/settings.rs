@@ -55,8 +55,15 @@ pub struct FileConfig {
     /// How hard a model that offers a choice thinks: none, low, medium, high,
     /// xhigh or max. Unset keeps each provider's default.
     pub reasoning_effort: Option<dino_protocol::ReasoningEffort>,
-    /// Compact on its own once the context window passes the warning mark.
+    /// Compact on its own once the context window passes the warning mark or
+    /// `auto_compact_tokens`. Unset, only a task seen through compacts on its
+    /// own, between submissions; false, nothing does.
     pub auto_compact: Option<bool>,
+    /// Context, in tokens, past which a session compacts on its own, whatever
+    /// the window. 200,000 when unset.
+    pub auto_compact_tokens: Option<std::num::NonZeroU64>,
+    /// See every submission through, as if each said "keep going".
+    pub keep_going: Option<bool>,
     /// Models to continue on, in order, when the provider refuses the account.
     /// One name is a list of one. User file only.
     pub fallback: Option<Fallback>,
@@ -68,6 +75,10 @@ pub struct FileConfig {
     /// Seconds a task must have run before its `task_end` hooks fire, so a ping
     /// means a long run and not a quick question. 300 when unset.
     pub ping_after_seconds: Option<u64>,
+    /// The workspace's own check, as an argument vector: run before a task told
+    /// to finish ends and before a commit the model makes. A project file may
+    /// propose it; it runs once the person has trusted that exact command.
+    pub verify: Option<Vec<String>>,
 }
 
 /// The `[budget]` table.
@@ -183,7 +194,8 @@ const fn sandboxed() -> bool {
 #[serde(deny_unknown_fields)]
 pub struct HookConfig {
     pub event: HookEvent,
-    /// An argument vector; `{path}` is replaced by the edited file.
+    /// An argument vector; `{path}` is replaced by the edited file, and
+    /// `{edition}` by the edition of the package it belongs to.
     pub command: Vec<String>,
     /// Only for files with this extension, such as `rs`.
     pub extension: Option<String>,
@@ -387,6 +399,53 @@ pub fn user_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("dino"))
 }
 
+/// What a project's verify command is trusted by: the workspace and the exact
+/// command, so a changed command, or the same one in another clone, asks again.
+pub fn verify_digest(workspace: &Path, command: &[String]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(workspace.as_os_str().as_encoded_bytes());
+    for word in command {
+        hasher.update([0]);
+        hasher.update(word.as_bytes());
+    }
+    let mut encoded = String::new();
+    for byte in hasher.finalize() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+/// Where the trusted digests are kept, one a line. In the user's directory,
+/// which a repository cannot write.
+pub fn trusted_verify_path() -> Option<PathBuf> {
+    user_dir().map(|dir| dir.join("trusted-verify"))
+}
+
+pub fn is_trusted(file: &Path, digest: &str) -> bool {
+    std::fs::read_to_string(file).is_ok_and(|text| text.lines().any(|line| line.trim() == digest))
+}
+
+/// Records `digest` as trusted.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be written.
+pub fn trust(file: &Path, digest: &str) -> Result<()> {
+    if is_trusted(file, digest) {
+        return Ok(());
+    }
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut text = std::fs::read_to_string(file).unwrap_or_default();
+    text.push_str(digest);
+    text.push('\n');
+    std::fs::write(file, text)?;
+    Ok(())
+}
+
 fn read(path: &Path) -> Result<FileConfig> {
     parse(path, &std::fs::read_to_string(path)?)
 }
@@ -505,6 +564,13 @@ mod tests {
     }
 
     #[test]
+    fn a_user_file_may_accept_edits() {
+        let parsed: FileConfig = toml::from_str("approvals = \"accept-edits\"\n").unwrap();
+
+        assert_eq!(parsed.approvals, Some(ApprovalMode::AcceptEdits));
+    }
+
+    #[test]
     fn a_project_file_may_not_weaken_a_boundary_or_redirect_a_credential() {
         for (key, value) in [
             ("approvals", "\"allow-all\""),
@@ -585,6 +651,21 @@ mod tests {
     }
 
     #[test]
+    fn keep_going_and_a_compaction_mark_in_tokens_are_read_and_zero_is_refused() {
+        let file = parse(
+            Path::new("x"),
+            "keep_going = true\nauto_compact_tokens = 150000\n",
+        )
+        .unwrap();
+        assert_eq!(file.keep_going, Some(true));
+        assert_eq!(
+            file.auto_compact_tokens.map(std::num::NonZeroU64::get),
+            Some(150_000)
+        );
+        assert!(parse(Path::new("x"), "auto_compact_tokens = 0\n").is_err());
+    }
+
+    #[test]
     fn a_budget_is_dollars_above_zero_and_a_share_to_warn_at() {
         let budget = |text: &str| {
             parse(Path::new("x"), text)
@@ -611,6 +692,37 @@ mod tests {
         }
         assert!(parse(Path::new("x"), "[budget]\nmonthly_usd = 9\n").is_err());
         assert!(refuse_restricted(Path::new("p"), "[budget]\ndaily_usd = 900\n").is_err());
+    }
+
+    #[test]
+    fn a_project_may_propose_a_verify_command_trusted_by_its_exact_digest() {
+        let text = "verify = [\"cargo\", \"clippy\", \"--all-targets\"]\n";
+        refuse_restricted(Path::new("/repo/.dino/config.toml"), text).unwrap();
+        let command = parse(Path::new("x"), text).unwrap().verify.unwrap();
+
+        let digest = verify_digest(Path::new("/repo"), &command);
+        let mut changed = command.clone();
+        changed.push("--fix".into());
+        assert_ne!(digest, verify_digest(Path::new("/repo"), &changed));
+        assert_ne!(digest, verify_digest(Path::new("/other"), &command));
+        assert_ne!(
+            verify_digest(Path::new("/repo"), &["a b".into()]),
+            verify_digest(Path::new("/repo"), &["a".into(), "b".into()])
+        );
+
+        let file = std::env::temp_dir()
+            .join(format!("dino-trust-{}", std::process::id()))
+            .join("trusted-verify");
+        assert!(!is_trusted(&file, &digest));
+        trust(&file, &digest).unwrap();
+        trust(&file, &digest).unwrap();
+        assert!(is_trusted(&file, &digest));
+        assert!(!is_trusted(
+            &file,
+            &verify_digest(Path::new("/repo"), &changed)
+        ));
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     #[test]

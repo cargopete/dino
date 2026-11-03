@@ -60,27 +60,39 @@ CI and evals.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
-  ambiguous edit, or one to a file that changed since the model last saw it.
+  ambiguous edit, or one to a file that changed since the model last saw it,
+  and does so before anyone is asked to approve it.
   `write_file` creates a file, or replaces one the model has read. `exec` runs
   one program with one argument vector, no shell; `shell` runs one command line
-  through `sh -c` in the same sandbox, approved line by line. `cargo` runs a closed set of
+  through `sh -c` in the same sandbox, approved line by line, and says so when a
+  line wrote a tracked file, since such an edit skips the hooks, the stale-file
+  check and the logged diff. `cargo` runs a closed set of
   subcommands and returns parsed diagnostics, so an `E0308` arrives as a level,
   a code, a file, a line and a column rather than as a page of compiler output.
+  In a workspace with a `rust-toolchain.toml` it runs through `rustup run
+  <channel>`, whatever `cargo` is first on PATH, and the result names the
+  toolchain. A test run that ran no test, a filter that matched nothing, says so
+  and is not taken for a pass.
   `report_blocker` lets the model stop and say a task contradicts itself,
   rather than bend a test to fit. `todo` keeps a checklist for a task of
   several steps, shown in the transcript as it changes. `remember` appends a
   dated note to `~/.config/dino/memory/`, one file for you and one per workspace,
-  both read back into later sessions. `skill` loads one of the skills in
+  both read back into later sessions, without asking. `skill` loads one of the skills in
   `~/.config/dino/skills/` or the repository's `.dino/skills/`, folders with a
   `SKILL.md` as Claude Code uses them; only their names and descriptions sit in
-  the system prompt. `github` reads the checkout's own issues and
-  pull requests through a fixed set of read-only `gh` commands, run by `dino`
-  rather than by a confined process, and is offered only where `gh` is
-  installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
+  the system prompt. `github` reads the checkout's own issues, pull requests
+  and CI (`pr_checks`, `checks_wait` until no check is pending, `run_list`,
+  `run_view` with `log_failed`) through a fixed set of read-only `gh` commands,
+  run by `dino` rather than by a confined process, and is offered only where
+  `gh` is installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
   host, because a URL can carry workspace text out; a redirect to another host
   is refused rather than followed past that approval.
 - **Approval enforced below the model.** Every call is classified read-only,
-  mutating, process or network. Read-only calls proceed. Anything else asks, and a session
+  mutating, process or network. Read-only calls proceed, and so do git commands
+  that only read (`status`, `log`, `diff`, `show`, `rev-parse`, `rev-list`,
+  `merge-base`, `blame`, `ls-files`, `ls-tree`, `branch --list`), through
+  `exec` or as a `shell` line of them piped into `head`, `tail`, `grep` and
+  the like. Anything else asks, and a session
   rule is keyed on the tool and the resolved target, never on a description of
   what a command probably does. A refusal returns to the model as an ordinary
   tool result under its original call ID, with what the person typed instead,
@@ -88,7 +100,10 @@ CI and evals.
   appeared are discarded and unknown keys ignored. Beyond once and always, it
   offers every pending call of the model's turn (`t`), one program whatever its
   arguments (`p`, for `exec` and `cargo` but never a `shell` line), and every
-  process this session (`s`, still sandboxed). An edit's prompt shows its diff
+  process this session (`s`, still sandboxed), and every edit in the workspace
+  this session (`e`); `approvals = "accept-edits"` in the user file, or
+  `--accept-edits`, starts there. Edits to files that change what other programs
+  run, such as `.cargo/config.toml` or `.git/hooks`, still ask. An edit's prompt shows its diff
   before it is applied, numbered from the file with two lines of context and the
   changed words picked out. Answering `r` keeps the rule for the
   workspace in `~/.config/dino/approvals/`, outside the repository, so a checkout
@@ -182,6 +197,15 @@ CI and evals.
   model that ends its turn while `cargo check` reports errors is sent back once
   with the first of them, and the countdown names them too. An interactive
   session hands the turn to you instead.
+- **A workspace's own check.** `verify`, an argument vector such as
+  `["sh", "-c", "cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"]`,
+  runs before a task you told to finish may end, and in `dino run`, sending the
+  model back once with the output when it fails. It also runs before any
+  `exec` or `shell` call that makes a `git commit`, and a failure refuses the
+  commit. A project's `.dino/config.toml` may propose it; it runs only once you
+  have trusted that exact command for that workspace, asked once at the
+  terminal and kept in `~/.config/dino/trusted-verify`, and a changed command
+  asks again. `dino config` shows it and where it came from.
 - **A reasoning budget for Qwen.** Qwen profiles cap reasoning at 4,096 tokens
   a turn, through vLLM's `thinking_token_budget`. Measured on the four slowest
   hard cases, it gave the same pass rate in 15% less time (RFC-0017 §8.7).
@@ -216,13 +240,19 @@ CI and evals.
   half times a turn's new tokens. Whether the Token Plan bills it that way is not
   yet known, so it is off by default.
 - **Hooks.** `[[hooks]]` in the user file run after the file tools edit a file,
-  inside the sandbox, with `{path}` for the file and an optional `extension`.
-  With `extension = "rs"`, this formats every Rust edit:
-  `command = ["sh", "-c", "rustfmt --edition 2024 --emit stdout < \"$1\" > \"$1.fmt\" && mv \"$1.fmt\" \"$1\"; s=$?; rm -f \"$1.fmt\"; exit $s", "sh", "{path}"]`.
+  inside the sandbox, with `{path}` for the file, `{edition}` for the edition
+  of the package it belongs to (from the nearest `Cargo.toml`, 2015 when it
+  names none) and an optional `extension`. With `extension = "rs"`, this
+  formats every Rust edit:
+  `command = ["sh", "-c", "rustfmt --edition \"$2\" --emit stdout < \"$1\" > \"$1.fmt\" && mv \"$1.fmt\" \"$1\"; s=$?; rm -f \"$1.fmt\"; exit $s", "sh", "{path}", "{edition}"]`.
   It goes through standard input because `rustfmt {path}` follows `mod`
   declarations: it fails on a parent written before its children, and
-  reformats children the model has not touched. The tool result says what ran, and says so when a
-  hook changed the file, so the model reads it again before the next edit. A
+  reformats children the model has not touched. A hook is first tried on a copy
+  of the file as it was before the edit, and is skipped when it would have
+  changed that too, so a file that was not formatted to begin with keeps the
+  lines the model did not touch. The tool result says what ran and what was
+  skipped, and says so when a hook changed the file, and a later patch
+  still applies if its `old_text` matches the file as the hook left it. A
   `before_end_turn` hook must pass before the model ends its turn, or it is sent
   back once with the output (`cargo clippy` makes a good one); a
   `session_start` hook runs once and what it prints goes into the prompt. A
@@ -522,12 +552,19 @@ names a limit or says to see it through ("keep going", "until it's done",
 until a turn does no work or it calls `report_blocker`; and such a task fetches
 first, and tells the model when the branch is behind `origin`'s main. Such a task is
 also reviewed once before it ends, by `review_model` if set and by the model
-running it if not.
+running it if not; a review that finds a changed threshold, baseline or test
+assertion beside a verdict written into a document asks for the result under
+both readings. A task told to finish that ends on a question is sent back once
+to proceed with its recommendation. `/auto`, `--keep-going` or `keep_going =
+true` makes every submission such a task, and after a handback that proposed a
+next step, a bare "go", "yes" or "letsgooo" continues it as one.
 `/compact` asks the model for a structured summary, with changes gated off,
 starts a fresh conversation and puts the summary ahead of your next message;
 the old conversation stays resumable in full. `auto_compact = true` in a config
 file does the same on its own after any submission that fills the window past
-70%. `/plan <task>` investigates read-only and ends in a numbered plan; edits and
+70% or `auto_compact_tokens` (200,000 unless set). Unless `auto_compact = false`,
+a task seen through that ends past either mark is compacted with no request:
+its last report and `git log main..HEAD` go ahead of the next message. `/plan <task>` investigates read-only and ends in a numbered plan; edits and
 processes are refused below the model until you answer `y`, `n` drops it, and
 anything else is feedback for another round.
 Ctrl-C cancels the current
@@ -541,7 +578,8 @@ persists to `.dino/history` and the conversation to `.dino/sessions`, so
 `dino --resume` picks it up where you left it and `dino replay` shows what
 happened.
 
-Mutations and processes ask before they happen. `--read-only` refuses both
+Mutations and processes ask before they happen. `--accept-edits` lets workspace
+edits through and asks about the rest; `--read-only` refuses both
 instead; `--dangerously-allow-all` (or `--dangerously-skip-permissions`) does not ask,
 which is a decision worth making deliberately. A sandboxed run has no network, so Cargo runs `--offline` and
 cannot fetch a dependency that is not already in the local registry cache: adding

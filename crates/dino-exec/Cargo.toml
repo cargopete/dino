@@ -12,10 +12,12 @@ dino-protocol.workspace = true
 dino-sandbox.workspace = true
 futures-util.workspace = true
 html2text.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true

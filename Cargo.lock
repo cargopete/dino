@@ -399,6 +399,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "terminal_size",
  "tokio",
@@ -457,10 +458,12 @@ dependencies = [
  "html2text",
  "nix",
  "pretty_assertions",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]

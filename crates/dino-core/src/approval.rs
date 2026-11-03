@@ -53,6 +53,9 @@ pub enum ApprovalReply {
     ForProgram,
     /// Allow, for this session, every process call, still inside the sandbox.
     AllProcesses,
+    /// Allow, for this session, every edit of a workspace file outside the
+    /// guarded paths.
+    AllEdits,
     /// Refuse, optionally saying why.
     Reject(Option<String>),
 }
@@ -184,6 +187,9 @@ pub struct Interactive<A> {
     /// Call ids allowed by a [`ApprovalReply::ForTurn`] answer.
     turn_allowed: Mutex<HashSet<String>>,
     all_processes: std::sync::atomic::AtomicBool,
+    all_edits: std::sync::atomic::AtomicBool,
+    /// Workspace-relative paths an edit to which asks whatever else was granted.
+    guarded: Vec<std::path::PathBuf>,
     saved: HashSet<String>,
     store: Option<Box<dyn RuleStore>>,
 }
@@ -196,6 +202,8 @@ impl<A> Interactive<A> {
             pending: Mutex::new(Vec::new()),
             turn_allowed: Mutex::new(HashSet::new()),
             all_processes: std::sync::atomic::AtomicBool::new(false),
+            all_edits: std::sync::atomic::AtomicBool::new(false),
+            guarded: Vec::new(),
             saved: HashSet::new(),
             store: None,
         }
@@ -206,6 +214,23 @@ impl<A> Interactive<A> {
     pub fn with_store(mut self, store: impl RuleStore + 'static) -> Self {
         self.saved = store.load().into_iter().collect();
         self.store = Some(Box::new(store));
+        self
+    }
+
+    /// Allows every edit outside the guarded paths from the start, as an
+    /// [`ApprovalReply::AllEdits`] answer would.
+    #[must_use]
+    pub fn accepting_edits(self) -> Self {
+        self.all_edits
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Edits beneath these workspace-relative paths ask every time, whatever
+    /// [`ApprovalReply::AllEdits`] covers.
+    #[must_use]
+    pub fn guarding(mut self, paths: Vec<std::path::PathBuf>) -> Self {
+        self.guarded = paths;
         self
     }
 
@@ -269,6 +294,10 @@ impl<A> Interactive<A> {
         if action.unconfined.is_some() {
             return None;
         }
+        // A note appended to the user's own memory file, which they read back.
+        if call.name == crate::memory::REMEMBER && action.class == ToolClass::Mutating {
+            return Some(DecisionSource::Policy);
+        }
         let key = action.rule_key(&call.name);
         if self.saved.contains(&key) {
             return Some(DecisionSource::SavedRule);
@@ -278,6 +307,9 @@ impl<A> Interactive<A> {
             && self
                 .all_processes
                 .load(std::sync::atomic::Ordering::Relaxed);
+        let by_edits = action.class == ToolClass::Mutating
+            && self.all_edits.load(std::sync::atomic::Ordering::Relaxed)
+            && !self.is_guarded(action);
         let by_turn = self
             .turn_allowed
             .lock()
@@ -285,11 +317,20 @@ impl<A> Interactive<A> {
         if self.holds_rule(&key)
             || by_program.is_some_and(|key| self.holds_rule(&key))
             || by_process
+            || by_edits
             || by_turn
         {
             return Some(DecisionSource::SessionRule);
         }
         None
+    }
+
+    fn is_guarded(&self, action: &ToolAction) -> bool {
+        action.subject.as_deref().is_none_or(|subject| {
+            self.guarded
+                .iter()
+                .any(|guarded| std::path::Path::new(subject).starts_with(guarded))
+        })
     }
 }
 
@@ -351,6 +392,15 @@ where
                 ApprovalReply::AllProcesses => {
                     if action.class == ToolClass::Process {
                         self.all_processes
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        self.grant_rule(key);
+                    }
+                    ApprovalDecision::allowed(DecisionSource::User)
+                }
+                ApprovalReply::AllEdits => {
+                    if action.class == ToolClass::Mutating {
+                        self.all_edits
                             .store(true, std::sync::atomic::Ordering::Relaxed);
                     } else {
                         self.grant_rule(key);
@@ -551,5 +601,52 @@ mod tests {
                 .await
                 .is_allowed()
         );
+    }
+
+    fn edit(id: &str, path: &str) -> (ToolCall, ToolAction) {
+        (
+            ToolCall {
+                id: id.into(),
+                name: "apply_patch".into(),
+                arguments: serde_json::Value::Null,
+            },
+            ToolAction::mutating(path),
+        )
+    }
+
+    #[tokio::test]
+    async fn every_edit_covers_later_edits_but_not_guarded_paths_or_processes() {
+        let policy = Interactive::new(Script::new(vec![ApprovalReply::AllEdits]))
+            .guarding(vec![".cargo/config.toml".into()]);
+        assert!(allowed(&policy, &edit("1", "src/lib.rs")).await);
+        assert!(allowed(&policy, &edit("2", "src/main.rs")).await);
+        assert!(!allowed(&policy, &edit("3", ".cargo/config.toml")).await);
+        assert!(!allowed(&policy, &exec("4", "cargo test")).await);
+        assert_eq!(policy.approver.asked.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn accepting_edits_asks_only_for_guarded_paths_and_processes() {
+        let policy = Interactive::new(Script::new(vec![]))
+            .accepting_edits()
+            .guarding(vec![".git/hooks".into()]);
+        assert!(allowed(&policy, &edit("1", "src/lib.rs")).await);
+        assert!(!allowed(&policy, &edit("2", ".git/hooks/pre-commit")).await);
+        assert!(!allowed(&policy, &exec("3", "cargo test")).await);
+        assert_eq!(policy.approver.asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_note_to_memory_is_kept_without_asking() {
+        let policy = Interactive::new(Script::new(vec![]));
+        let remember = ToolCall {
+            id: "1".into(),
+            name: crate::memory::REMEMBER.into(),
+            arguments: serde_json::Value::Null,
+        };
+        let note = ToolAction::mutating("/home/me/.config/dino/memory/repo.md");
+        let decision = policy.decide(&remember, &note).await;
+        assert_eq!(decision, ApprovalDecision::allowed(DecisionSource::Policy));
+        assert!(policy.approver.asked.lock().unwrap().is_empty());
     }
 }

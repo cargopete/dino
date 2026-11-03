@@ -173,6 +173,13 @@ pub(crate) fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
             ApprovalReply::AllProcesses,
         ));
     }
+    if asking.class == ToolClass::Mutating {
+        choices.push(choice(
+            'e',
+            "every edit in the workspace this session",
+            ApprovalReply::AllEdits,
+        ));
+    }
     choices.push(choice('n', "refuse", ApprovalReply::Reject(None)));
     choices
 }
@@ -375,6 +382,38 @@ impl crate::spend::Purse for TerminalPurse {
     }
 }
 
+/// Asks the person whether a project's proposed verify command may run. With
+/// nobody at the terminal, it may not.
+pub fn trust_verify(project_file: &Path, command: &[String]) -> bool {
+    if !stdin().is_terminal() {
+        return false;
+    }
+    eprintln!(
+        "\n{}  {} proposes a verify command, run before a task you said to finish ends \
+         and before each commit the model makes:\n    {}",
+        style::paint_with(EMBER, &[BOLD], "  verify"),
+        project_file.display(),
+        command.join(" ")
+    );
+    let choices = [
+        Choice {
+            key: 'y',
+            label: "trust this command in this workspace".to_owned(),
+            reply: ApprovalReply::Once,
+        },
+        Choice {
+            key: 'n',
+            label: "not now".to_owned(),
+            reply: ApprovalReply::Reject(None),
+        },
+    ];
+    let reply = match stderr().is_terminal().then(|| select(&choices)).flatten() {
+        Some(reply) => reply,
+        None => read_typed_answer(&choices),
+    };
+    matches!(reply, ApprovalReply::Once)
+}
+
 /// Restores the terminal however the selector exits.
 struct RawGuard;
 
@@ -557,6 +596,27 @@ impl RuleStore for FileRuleStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_edit_is_offered_for_an_edit_and_not_for_a_command() {
+        let keys = |class| {
+            let context = AskContext::default();
+            let asking = Asking {
+                summary: "",
+                tool: "apply_patch",
+                subject: "src/lib.rs",
+                class,
+                context: &context,
+                change: None,
+            };
+            choices(&asking, always_label(class))
+                .iter()
+                .map(|choice| choice.key)
+                .collect::<String>()
+        };
+        assert_eq!(keys(ToolClass::Mutating), "yaren");
+        assert_eq!(keys(ToolClass::Process), "yarsn");
+    }
 
     #[test]
     fn rules_round_trip_through_the_file_and_are_kept_per_workspace() {

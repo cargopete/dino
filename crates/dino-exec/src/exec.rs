@@ -143,6 +143,7 @@ impl ExecTool {
                 truncated: execution.truncated,
                 restored_protected_paths: execution.restored,
                 note,
+                wrote_tracked: None,
             });
         }
 
@@ -157,6 +158,7 @@ impl ExecTool {
                 || execution.stderr.len() > self.limits.max_output_bytes,
             restored_protected_paths: execution.restored,
             note,
+            wrote_tracked: None,
         })
     }
 }
@@ -223,10 +225,13 @@ impl ToolRuntime for ExecTool {
             return Err(ToolError::new(format!("unknown tool {:?}", call.name)));
         }
         let request = ExecRequest::parse(&call.arguments)?;
-        let subject = self.plan(&request)?.subject();
+        let plan = self.plan(&request)?;
         Ok(match self.unconfined(&request)? {
-            Some(reason) => ToolAction::unconfined_process(subject, reason),
-            None => ToolAction::process(subject),
+            Some(reason) => ToolAction::unconfined_process(plan.subject(), reason),
+            None if plan.program == "git" && crate::reads::git_reads_only(&plan.arguments) => {
+                ToolAction::read_only()
+            }
+            None => ToolAction::process(plan.subject()),
         })
     }
 
@@ -328,6 +333,9 @@ pub(crate) struct ExecOutput {
     /// Why the command failed, when the output alone would mislead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) note: Option<&'static str>,
+    /// Tracked files the command wrote, and what to use instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrote_tracked: Option<String>,
 }
 
 /// Longest command, in characters, that a result repeats.

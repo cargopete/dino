@@ -1132,6 +1132,27 @@ async fn a_model_that_stops_with_work_unfinished_is_sent_back_once() {
 }
 
 #[tokio::test]
+async fn a_task_check_is_asked_only_of_a_task_told_to_finish() {
+    let asked = std::sync::Arc::default();
+    let mut agent = agent(vec![
+        text_turn("done"),
+        text_turn("done"),
+        text_turn("fixed"),
+    ])
+    .with_finish_check(AllGood)
+    .with_task_check(AlwaysBroken(std::sync::Arc::clone(&asked)));
+
+    let result = agent.run("explain it").await.unwrap();
+    assert_eq!(sent_back(&result), Vec::<u32>::new());
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    agent.set_keep_going(true);
+    let result = agent.run("finish it").await.unwrap();
+    assert_eq!(sent_back(&result), vec![1]);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn a_task_told_to_finish_sends_a_status_report_back_until_a_turn_does_no_work() {
     let mut agent = Agent::new(
         ScriptedSession::new(vec![
@@ -1153,6 +1174,58 @@ async fn a_task_told_to_finish_sends_a_status_report_back_until_a_turn_does_no_w
     assert_eq!(sent_back(&result), vec![2, 4]);
     let note = last_result(&agent.session().inputs[2]);
     assert!(note.contains("report_blocker"), "{note}");
+}
+
+#[tokio::test]
+async fn a_task_told_to_finish_is_given_the_rule_with_its_message() {
+    let mut agent = agent(vec![text_turn("done")]);
+    agent.set_keep_going(true);
+
+    agent.run("finish the wave").await.unwrap();
+
+    let TurnInput::User { content } = &agent.session().inputs[0] else {
+        panic!("{:?}", agent.session().inputs[0]);
+    };
+    assert!(
+        content.starts_with("finish the wave\n\n[dino: "),
+        "{content}"
+    );
+    assert!(content.contains("take it"), "{content}");
+    assert!(content.contains("report_blocker"), "{content}");
+    assert!(content.contains("no defensible default"), "{content}");
+}
+
+#[tokio::test]
+async fn a_task_told_to_finish_that_ends_on_a_question_is_told_to_proceed_once() {
+    let mut agent = agent(vec![
+        tool_turn(tool_call("call-1", "read", "a.rs")),
+        text_turn("a is done.\n\n**Should I start on b?**"),
+        text_turn("Should I start on b?"),
+    ]);
+    agent.set_keep_going(true);
+
+    let result = agent.run("finish the wave").await.unwrap();
+
+    assert_eq!(result.model_turns, 3);
+    assert_eq!(sent_back(&result), vec![2]);
+    let note = last_result(&agent.session().inputs[2]);
+    assert!(note.contains("Proceed with your recommendation"), "{note}");
+}
+
+#[tokio::test]
+async fn a_question_from_a_task_not_told_to_finish_goes_to_the_person() {
+    let mut agent = agent(vec![
+        tool_turn(tool_call("call-1", "read", "a.rs")),
+        text_turn("a is done. Should I start on b?"),
+    ]);
+
+    let result = agent.run("read a").await.unwrap();
+
+    assert_eq!(sent_back(&result), Vec::<u32>::new());
+    let TurnInput::User { content } = &agent.session().inputs[0] else {
+        panic!("{:?}", agent.session().inputs[0]);
+    };
+    assert_eq!(content, "read a");
 }
 
 #[tokio::test]
@@ -1370,8 +1443,8 @@ async fn the_turn_count_rides_along_from_half_way() {
     agent.run("read them").await.unwrap();
 
     let inputs = &agent.session().inputs;
-    assert!(!note_of(&inputs[1]).contains("turns used"));
-    assert!(note_of(&inputs[2]).contains("2 of 4 model turns used"));
+    assert!(!note_of(&inputs[1]).contains("this submission"));
+    assert!(note_of(&inputs[2]).contains("this submission: turn 2 of 4."));
     assert_eq!(last_result(&inputs[2]), "fn main() {}");
 }
 
@@ -1856,4 +1929,111 @@ async fn a_loop_is_noted_beside_the_result_it_follows() {
 
     assert_eq!(noted(&agent, "called 3 times in a row"), vec![3]);
     assert_eq!(last_result(&agent.session().inputs[3]), "{}");
+}
+
+fn out_of_reach() -> Turn {
+    Turn::Refused(ModelError::Transport(
+        "error sending request for url (https://api.anthropic.com/v1/messages)".into(),
+    ))
+}
+
+fn outage(limit_millis: u64, first_millis: u64, cap_millis: u64) -> AgentConfig {
+    AgentConfig {
+        outage_limit: std::time::Duration::from_millis(limit_millis),
+        outage_first_delay: std::time::Duration::from_millis(first_millis),
+        outage_backoff_cap: std::time::Duration::from_millis(cap_millis),
+        ..AgentConfig::default()
+    }
+}
+
+fn waits(events: &[AgentEvent]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::WaitingForNetwork {
+                retry_in_seconds, ..
+            } => Some(*retry_in_seconds),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_model_out_of_reach_is_waited_for_and_the_turn_sent_again() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![out_of_reach(), out_of_reach(), text_turn("done")]),
+        ScriptedTools::default(),
+        outage(10_000, 1, 2),
+    );
+
+    let result = agent.run("hello").await.unwrap();
+
+    assert_eq!(result.text, "done");
+    assert_eq!(waits(&result.events).len(), 2);
+    let inputs = &agent.session().inputs;
+    assert_eq!(inputs.len(), 3);
+    assert!(inputs.iter().all(|input| input == &inputs[0]));
+}
+
+#[tokio::test]
+async fn a_model_out_of_reach_past_the_outage_limit_fails_the_run() {
+    let mut agent = Agent::new(
+        ScriptedSession::new((0..100).map(|_| out_of_reach()).collect()),
+        ScriptedTools::default(),
+        outage(40, 10, 10),
+    );
+
+    let error = agent.run("hello").await.unwrap_err();
+
+    assert!(
+        matches!(error, dino_core::AgentError::Unreachable { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("waiting for the model"),
+        "{error}"
+    );
+    let tries = agent.session().inputs.len();
+    assert!((3..=10).contains(&tries), "{tries} tries");
+}
+
+#[tokio::test]
+async fn a_refusal_a_repeat_cannot_fix_is_not_waited_for() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            Turn::Refused(ModelError::Http {
+                provider: "Anthropic",
+                status: 400,
+                body: "tool_use ids were found without tool_result blocks".into(),
+            }),
+            text_turn("never reached"),
+        ]),
+        ScriptedTools::default(),
+        outage(10_000, 1, 2),
+    );
+
+    let error = agent.run("hello").await.unwrap_err();
+
+    assert!(error.to_string().contains("400"), "{error}");
+    assert_eq!(agent.session().inputs.len(), 1);
+}
+
+#[tokio::test]
+async fn cancelling_while_waiting_for_the_network_keeps_the_conversation() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![out_of_reach(), text_turn("never reached")]),
+        ScriptedTools::default(),
+        outage(600_000, 60_000, 60_000),
+    );
+    let cancel = CancellationToken::new();
+    let signal = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        signal.cancel();
+    });
+
+    let result = agent.run_cancellable("hello", &cancel).await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::Cancelled);
+    assert_eq!(waits(&result.events), vec![60]);
 }

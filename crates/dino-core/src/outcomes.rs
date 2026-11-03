@@ -2,8 +2,8 @@
 //! sees only the calls.
 //!
 //! Two things are said, each once a run: that the suite passes with nothing
-//! edited since, and that one test keeps failing however it is patched.
-//! Neither stops anything.
+//! edited since, and that one test keeps failing however it is patched. A test
+//! run by hand that ran no test at all is said every time. None stops anything.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -82,6 +82,18 @@ impl OutcomeWatch {
     /// just been verified or a test has just been seen failing too often.
     pub fn record(&mut self, call: &ToolCall, output: &str) -> Option<String> {
         let ran = Ran::parse(output);
+        let note = self.record_kind(call, &ran);
+        note.or_else(|| {
+            // The cargo tool says so in its own result, from the untrimmed text.
+            let by_hand = call.name != "cargo" && runs_tests(call, ran.command.as_deref());
+            by_hand
+                .then(|| no_tests_ran(&ran.text))
+                .flatten()
+                .map(|said| format!("[dino: {said}]"))
+        })
+    }
+
+    fn record_kind(&mut self, call: &ToolCall, ran: &Ran) -> Option<String> {
         match kind(call) {
             Kind::Edit => {
                 self.edited = true;
@@ -234,16 +246,60 @@ fn cargo_words(words: &[&str]) -> Kind {
     }
 }
 
-/// What a command reported, from the `cargo`, `exec` or `shell` result.
-struct Ran {
-    exit_code: Option<i64>,
+/// Whether `call` runs `cargo test`, by the tool or by hand. `command` is the
+/// one a `background` result names, since its later calls carry only an id.
+pub(crate) fn runs_tests(call: &ToolCall, command: Option<&str>) -> bool {
+    let line = match call.name.as_str() {
+        "cargo" => return call.arguments.get("command").and_then(Value::as_str) == Some("test"),
+        "exec" => {
+            let words: Vec<&str> = call
+                .arguments
+                .get("command")
+                .and_then(Value::as_array)
+                .map(|words| words.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            return words.windows(2).any(|pair| pair == ["cargo", "test"]);
+        }
+        "shell" => call.arguments.get("command").and_then(Value::as_str),
+        "background" => command,
+        _ => None,
+    };
+    line.is_some_and(|line| line.contains("cargo test"))
+}
+
+/// What to say of `cargo test` output in which no test ran, or `None`. A
+/// filter that matched nothing exits 0 like a pass, and is not one.
+#[must_use]
+pub fn no_tests_ran(text: &str) -> Option<String> {
+    let tests = Tests::parse(text);
+    if tests.results == 0 || tests.any_failed || tests.passed_count > 0 {
+        return None;
+    }
+    Some(if tests.filtered_out > 0 {
+        format!(
+            "no test ran: 0 passed and 0 failed, {} filtered out. The filter or target matched \
+             nothing, so this is not a passing run.",
+            tests.filtered_out
+        )
+    } else {
+        "no test ran: the run found 0 tests, so this is not a passing run.".to_owned()
+    })
+}
+
+/// What a command reported, from the `cargo`, `exec`, `shell` or `background` result.
+pub(crate) struct Ran {
+    pub(crate) exit_code: Option<i64>,
     errors: Option<u64>,
     warnings: Option<u64>,
-    text: String,
+    pub(crate) text: String,
+    /// What a `background` process was started with.
+    pub(crate) command: Option<String>,
+    /// Whether a `background` process is still going.
+    pub(crate) running: bool,
 }
 
 impl Ran {
-    fn parse(output: &str) -> Self {
+    pub(crate) fn parse(output: &str) -> Self {
         let value: Value = serde_json::from_str(output).unwrap_or_default();
         let count = |name: &str| value.get("counts")?.get(name)?.as_u64();
         let text = ["output", "stdout", "stderr"]
@@ -256,6 +312,11 @@ impl Ran {
             errors: count("errors"),
             warnings: count("warnings"),
             text,
+            command: value
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            running: value.get("running").and_then(Value::as_bool) == Some(true),
         }
     }
 
@@ -272,31 +333,36 @@ impl Ran {
 
 /// The per-test lines and summaries of a `cargo test` run.
 #[derive(Debug, Default)]
-struct Tests {
+pub(crate) struct Tests {
     results: usize,
     passed_count: u64,
+    filtered_out: u64,
     any_failed: bool,
     passed: Vec<String>,
     failed: Vec<String>,
 }
 
 impl Tests {
-    fn parse(text: &str) -> Self {
+    pub(crate) fn parse(text: &str) -> Self {
         let mut tests = Self::default();
         for line in text.lines().map(str::trim) {
             if let Some(summary) = line.strip_prefix("test result: ") {
                 tests.results += 1;
                 tests.any_failed |= !summary.starts_with("ok.");
-                tests.passed_count += summary
-                    .split(';')
-                    .find_map(|part| {
-                        part.trim()
-                            .trim_start_matches("ok.")
-                            .trim()
-                            .strip_suffix(" passed")
-                    })
-                    .and_then(|number| number.trim().parse::<u64>().ok())
-                    .unwrap_or(0);
+                let count = |suffix: &str| {
+                    summary
+                        .split(';')
+                        .find_map(|part| {
+                            part.trim()
+                                .trim_start_matches("ok.")
+                                .trim()
+                                .strip_suffix(suffix)
+                        })
+                        .and_then(|number| number.trim().parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                tests.passed_count += count(" passed");
+                tests.filtered_out += count(" filtered out");
             } else if let Some(test) = line.strip_prefix("test ") {
                 if let Some(name) = test.strip_suffix(" ... FAILED") {
                     tests.failed.push(name.to_owned());
@@ -308,7 +374,7 @@ impl Tests {
         tests
     }
 
-    fn all_passed(&self) -> bool {
+    pub(crate) fn all_passed(&self) -> bool {
         self.results > 0 && !self.any_failed && self.failed.is_empty() && self.passed_count > 0
     }
 }
@@ -442,6 +508,37 @@ mod tests {
         );
         assert_eq!(watch.record(&narrowed, &passing()), None);
         assert!(watch.record(&cargo("clippy"), &clean()).is_none());
+    }
+
+    #[test]
+    fn a_test_run_by_hand_that_ran_nothing_is_said_every_time() {
+        let mut watch = OutcomeWatch::default();
+        let filtered = call(
+            "shell",
+            json!({"command": "cargo test --test skill_refs -- a b 2>&1 | tail"}),
+        );
+        let nothing = tests_output(
+            0,
+            &[
+                "running 0 tests",
+                "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out",
+            ],
+        );
+        for _ in 0..2 {
+            let note = watch.record(&filtered, &nothing).unwrap();
+            assert!(note.contains("6 filtered out"), "{note}");
+        }
+        assert_eq!(watch.record(&filtered, &passing()), None);
+        let started = json!({"id": 1, "command": "cargo test zzz", "running": false,
+            "exit_code": 0, "output": "test result: ok. 0 passed; 0 failed; 0 ignored"});
+        let note = watch
+            .record(
+                &call("background", json!({"op": "output", "id": 1})),
+                &started.to_string(),
+            )
+            .unwrap();
+        assert!(note.contains("found 0 tests"), "{note}");
+        assert_eq!(watch.record(&cargo("test"), &nothing), None);
     }
 
     #[test]

@@ -154,6 +154,59 @@ pub fn wants_to_finish(message: &str) -> bool {
             .any(|phrase| lower.contains(phrase))
 }
 
+/// Whether a message is only a go-ahead: "go", "yes", "do it", "letsgooo".
+#[must_use]
+pub fn is_go_ahead(message: &str) -> bool {
+    const WORDS: [&str; 26] = [
+        "go", "yes", "yep", "yeah", "yup", "y", "ok", "okay", "k", "sure", "ahead", "do", "it",
+        "please", "proceed", "continue", "carry", "on", "lets", "letsgo", "then", "for", "sounds",
+        "good", "fine", "agreed",
+    ];
+    // "letsgooo" and "yesss" are the words with their letters held down.
+    fn squeezed(word: &str) -> String {
+        let mut out = String::with_capacity(word.len());
+        for c in word.chars() {
+            if !out.ends_with(c) {
+                out.push(c);
+            }
+        }
+        out
+    }
+    let lower = message.to_lowercase().replace(['\'', '\u{2019}'], "");
+    let words: Vec<String> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(squeezed)
+        .collect();
+    !words.is_empty()
+        && words.len() <= 6
+        && words
+            .iter()
+            .all(|word| WORDS.iter().any(|known| squeezed(known) == *word))
+}
+
+/// Whether a run's closing paragraph hands back with a next step in hand: a
+/// question, or an offer to go on.
+#[must_use]
+pub fn proposes_next_step(text: &str) -> bool {
+    const OFFERS: [&str; 7] = [
+        "say go",
+        "should i",
+        "shall i",
+        "want me to",
+        "next is",
+        "next step",
+        "i recommend",
+    ];
+    let closing = text
+        .trim()
+        .rsplit("\n\n")
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    dino_core::ends_in_question(&closing) || OFFERS.iter().any(|offer| closing.contains(offer))
+}
+
 #[must_use]
 pub fn duration_text(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -187,6 +240,12 @@ impl Task {
             defaults,
             state: Mutex::new(None),
         }
+    }
+
+    /// The limits a task runs under when its message names none.
+    #[must_use]
+    pub fn defaults(&self) -> Limits {
+        self.defaults
     }
 
     /// Starts the clock, under the limits `message` names or else the defaults.
@@ -584,6 +643,47 @@ mod tests {
         for message in ["what does this function do?", "letsgoo", "fix the typo"] {
             assert!(!wants_to_finish(message), "{message}");
         }
+    }
+
+    #[test]
+    fn a_short_affirmative_is_a_go_ahead_and_anything_more_is_not() {
+        for message in [
+            "go",
+            "letsgo",
+            "letsgoo",
+            "letsgooo!",
+            "Let\u{2019}s go",
+            "yes",
+            "yesss",
+            "ok, do it",
+            "go ahead please",
+            "sounds good, carry on",
+        ] {
+            assert!(is_go_ahead(message), "{message}");
+        }
+        for message in [
+            "",
+            "no",
+            "yes but start with limits",
+            "go and fix the parser",
+            "🚀",
+        ] {
+            assert!(!is_go_ahead(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_handback_that_asks_or_offers_proposes_a_next_step() {
+        for text in [
+            "S0 is done.\n\nNext is S1. Say go and I'll start there.",
+            "Limits are wired.\n\n**Should I carry on in that order?**",
+            "Measured.\n\nShould I measure that next?",
+        ] {
+            assert!(proposes_next_step(text), "{text}");
+        }
+        assert!(!proposes_next_step(
+            "Should I? I did.\n\nEverything is done and checked."
+        ));
     }
 
     #[test]

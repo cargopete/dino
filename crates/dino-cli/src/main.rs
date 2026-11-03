@@ -132,6 +132,9 @@ struct CommonArgs {
     /// Refuse every mutation and every process instead of asking.
     #[arg(long, conflicts_with = "dangerously_allow_all")]
     read_only: bool,
+    /// Make edits to workspace files without asking; processes still ask.
+    #[arg(long, conflicts_with_all = ["dangerously_allow_all", "read_only"])]
+    accept_edits: bool,
     /// Approve everything without asking. Consider this carefully. Also
     /// spelled --dangerously-skip-permissions.
     #[arg(long, alias = "dangerously-skip-permissions")]
@@ -157,7 +160,12 @@ struct CommonArgs {
     /// high, xhigh or max. Leaves the model's default when absent.
     #[arg(long)]
     effort: Option<dino_protocol::ReasoningEffort>,
-    /// Continue a previous session. Bare, the most recent in this workspace.
+    /// See every submission through, as if each said "keep going". `/auto`
+    /// switches it in a session.
+    #[arg(long)]
+    keep_going: bool,
+    /// Continue a previous session by id or /rename name. Bare, the most recent
+    /// in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 }
@@ -304,7 +312,7 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let tools = tool_set(
         &workspace,
         sandbox,
-        &interactive_options(&workspace, Vec::new(), None, Vec::new()),
+        &interactive_options(&workspace, Vec::new(), None, Vec::new(), None),
         Vec::new(),
     )?;
     let context = prompt_context(
@@ -339,7 +347,8 @@ fn tool_set(
 }
 
 /// What must be true before the model may end its turn: the user's
-/// before-end-turn hooks, and for a run nobody watches, a clean build.
+/// before-end-turn hooks, and for a run nobody watches, a clean build and the
+/// workspace's verify command.
 fn finish_checks(
     settings: &RunSettings,
     sandbox: &Arc<dyn Sandbox>,
@@ -358,7 +367,19 @@ fn finish_checks(
     {
         checks.push(Box::new(build));
     }
+    if unattended && let Some(verify) = verify_check(settings, sandbox) {
+        checks.push(Box::new(verify));
+    }
     Ok(checks)
+}
+
+fn verify_check(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Option<dino_exec::Verify> {
+    let command = settings.verify.clone()?;
+    Some(dino_exec::Verify::new(
+        command,
+        &settings.workspace,
+        Arc::clone(sandbox),
+    ))
 }
 
 /// What each session-start hook printed, as instructions under its command.
@@ -399,6 +420,7 @@ fn session_tool_set(
             settings.protected.clone(),
             settings.max_diagnostics,
             settings.hooks.clone(),
+            settings.verify.clone(),
         ),
         mcp,
     )
@@ -477,6 +499,7 @@ fn interactive_options(
     protected: Vec<PathBuf>,
     max_diagnostics: Option<usize>,
     hooks: Vec<dino_exec::Hook>,
+    verify: Option<Vec<String>>,
 ) -> dino_eval::ToolOptions {
     dino_eval::ToolOptions {
         protected,
@@ -488,6 +511,7 @@ fn interactive_options(
         web: true,
         skip_edit_check: false,
         escalation: true,
+        verify,
     }
 }
 
@@ -595,6 +619,10 @@ fn guarded(
         agent
     } else {
         agent.with_finish_check(dino_core::FirstUnfinished::new(checks))
+    };
+    let agent = match verify_check(settings, sandbox).filter(|_| !unattended) {
+        Some(verify) => agent.with_task_check(verify),
+        None => agent,
     };
     Ok(match &settings.review {
         Some(review) => agent.with_reviewer(Arc::new(dino_core::review::Reviewer::new(
@@ -841,7 +869,10 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
         awaiting_plan: false,
         carried: None,
         recall: crate::recall::Recall::default(),
-        auto_compact: prepared.settings.compaction == config::Compaction::Automatic,
+        compaction: prepared.settings.compaction,
+        keep_going: prepared.settings.keep_going,
+        proposed: false,
+        max_turns: prepared.settings.max_turns.get(),
         context_full: prepared.context_full,
         status: prepared.status,
         model: prepared.settings.profile.display_name.clone(),
@@ -851,6 +882,9 @@ async fn drive(common: CommonArgs, remote: Option<Remote>) -> Result<ExitCode> {
         log_path: prepared.settings.log_path.display().to_string(),
         end_hooks: prepared.settings.task_end_hooks.clone(),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
+        name: resume::label(&prepared.state_path)
+            .ok()
+            .and_then(|label| label.name),
         state_path: prepared.state_path,
         greeting: greeting::shows(
             prepared.settings.greeting,
@@ -951,7 +985,7 @@ async fn begin_task(prepared: &mut Prepared, request: String) -> String {
         );
     }
     // A read-only run is a review or a question, not a task to see through.
-    let finishing = task::wants_to_finish(&request)
+    let finishing = (prepared.settings.keep_going || task::wants_to_finish(&request))
         && !matches!(prepared.settings.mode, ApprovalMode::ReadOnly);
     prepared.agent.set_keep_going(finishing);
     if finishing {
@@ -1160,11 +1194,10 @@ fn resume_from(requested: Option<&str>, workspace: &Path) -> Result<Option<(Stri
         };
         return Ok(Some(found));
     }
-    let path = resume::state_path(workspace, requested);
-    if !path.is_file() {
-        bail!("no session {requested:?} in {}", workspace.display());
+    match resume::find(workspace, requested)? {
+        Some(found) => Ok(Some(found)),
+        None => bail!("no session {requested:?} in {}", workspace.display()),
     }
-    Ok(Some((requested.to_owned(), path)))
 }
 
 /// Persists the session's native state, so it can be continued later.
@@ -1176,7 +1209,11 @@ pub(crate) fn save_state<S: ModelSession, T: dino_core::ToolRuntime>(
     // have expired anyway, and a one-shot against a provider without state is
     // still a complete run.
     match agent.session().export_state() {
-        Ok(state) => resume::save(path, &state).map_err(Into::into),
+        Ok(state) => {
+            // A resumed conversation keeps the name it was given.
+            let name = resume::label(path).ok().and_then(|label| label.name);
+            resume::save(path, &state, name.as_deref()).map_err(Into::into)
+        }
         Err(_) => Ok(()),
     }
 }
@@ -1196,7 +1233,8 @@ struct Resolved {
     max_diagnostics: (Option<usize>, Source),
     thinking_budget: (Option<u32>, Source),
     reasoning_effort: (Option<dino_protocol::ReasoningEffort>, Source),
-    auto_compact: bool,
+    compaction: config::Compaction,
+    keep_going: (bool, Source),
     fallback: Vec<String>,
     review_model: Option<String>,
     budget: Option<spend::Budget>,
@@ -1204,9 +1242,50 @@ struct Resolved {
     end_turn_hooks: Vec<dino_exec::Hook>,
     start_hooks: Vec<dino_exec::Hook>,
     task_end_hooks: Vec<task::EndHook>,
+    verify: Option<(Vec<String>, Source)>,
     task_limits: task::Limits,
     mcp: Vec<dino_exec::McpServer>,
     layers: Layers,
+}
+
+/// The verify command, if it may run: the user's own, or a project's the
+/// person has trusted, now or before, in exactly this form.
+fn trusted_verify(
+    proposed: Option<(Vec<String>, Source)>,
+    project_file: Option<&Path>,
+    workspace: &Path,
+) -> Option<Vec<String>> {
+    let (command, source) = proposed?;
+    let Some(project_file) = project_file.filter(|_| source == Source::ProjectFile) else {
+        return Some(command);
+    };
+    let digest = settings::verify_digest(workspace, &command);
+    let store = settings::trusted_verify_path()?;
+    if settings::is_trusted(&store, &digest) {
+        return Some(command);
+    }
+    if approve::trust_verify(project_file, &command) {
+        if let Err(error) = settings::trust(&store, &digest) {
+            eprintln!(
+                "{}",
+                style::paint(style::WARN, &format!("could not record the trust: {error}"))
+            );
+        }
+        return Some(command);
+    }
+    eprintln!(
+        "{}",
+        style::paint(
+            style::WARN,
+            &format!(
+                "{} proposes the verify command `{}`, which is not trusted and will not run; \
+                 start an interactive session here to trust it",
+                project_file.display(),
+                command.join(" ")
+            )
+        )
+    );
+    None
 }
 
 /// The user file's hooks for one event. A project file cannot set any.
@@ -1259,6 +1338,8 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         (ApprovalMode::AllowAll, Source::Flag)
     } else if args.read_only {
         (ApprovalMode::ReadOnly, Source::Flag)
+    } else if args.accept_edits {
+        (ApprovalMode::AcceptEdits, Source::Flag)
     } else if let Some(found) = layers.pick_user_only(|file| file.approvals) {
         found
     } else {
@@ -1318,9 +1399,8 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         max_diagnostics: layers
             .pick(|file| file.max_diagnostics.map(Some))
             .unwrap_or((None, Source::Default)),
-        auto_compact: layers
-            .pick(|file| file.auto_compact)
-            .is_some_and(|(on, _)| on),
+        compaction: compaction(&layers),
+        keep_going: switch(args.keep_going, |file| file.keep_going),
         fallback: layers
             .pick_user_only(|file| file.fallback.clone())
             .map(|(fallback, _)| fallback.keys())
@@ -1340,10 +1420,24 @@ fn resolve(args: &CommonArgs, workspace: &Path) -> Result<Resolved> {
         end_turn_hooks: hooks_for(&layers, settings::HookEvent::BeforeEndTurn),
         start_hooks: hooks_for(&layers, settings::HookEvent::SessionStart),
         task_end_hooks: end_hooks(&layers),
+        verify: layers
+            .pick(|file| file.verify.clone())
+            .filter(|(command, _)| !command.is_empty()),
         task_limits: layers.task_limits()?,
         mcp: mcp_servers(&layers),
         layers,
     })
+}
+
+fn compaction(layers: &Layers) -> config::Compaction {
+    let at_tokens = layers
+        .pick(|file| file.auto_compact_tokens)
+        .map_or(config::AUTO_COMPACT_TOKENS, |(tokens, _)| tokens.get());
+    match layers.pick(|file| file.auto_compact) {
+        Some((true, _)) => config::Compaction::Automatic { at_tokens },
+        Some((false, _)) => config::Compaction::Manual,
+        None => config::Compaction::Tasks { at_tokens },
+    }
 }
 
 /// The user file's MCP servers. A project file cannot set any.
@@ -1374,6 +1468,27 @@ fn reasoning_effort(
         None => layers
             .pick(|file| file.reasoning_effort.map(Some))
             .unwrap_or((None, Source::Default)),
+    }
+}
+
+fn verify_row(verify: Option<&(Vec<String>, Source)>) -> String {
+    verify.map_or_else(
+        || "unset".to_owned(),
+        |(command, source)| format!("{}  ({})", command.join(" "), source.label()),
+    )
+}
+
+fn compaction_row(compaction: config::Compaction) -> String {
+    match compaction {
+        config::Compaction::Manual => "only when asked".to_owned(),
+        config::Compaction::Tasks { at_tokens } => format!(
+            "a task seen through, past {} tokens",
+            render::compact(at_tokens)
+        ),
+        config::Compaction::Automatic { at_tokens } => format!(
+            "past {} tokens or 70% of the window",
+            render::compact(at_tokens)
+        ),
     }
 }
 
@@ -1495,6 +1610,8 @@ fn print_config(args: &PromptArgs) -> Result<()> {
         ),
         ("plain", switch(resolved.plain)),
         ("greeting", switch(resolved.greeting)),
+        ("keep going", switch(resolved.keep_going)),
+        ("compaction", compaction_row(resolved.compaction)),
         ("fallback", fallback),
         (
             "review model",
@@ -1504,6 +1621,7 @@ fn print_config(args: &PromptArgs) -> Result<()> {
                 .map_or_else(|| "off".to_owned(), |key| format!("{key}  (user file)")),
         ),
         ("budget", budget_row(resolved.budget)),
+        ("verify", verify_row(resolved.verify.as_ref())),
         (
             "task budget",
             format!(
@@ -1543,6 +1661,11 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         Some(path) => path.clone(),
         None => config::default_log_path(&workspace, session_id.as_str()),
     };
+    let verify = trusted_verify(
+        resolved.verify,
+        resolved.layers.project_path.as_deref(),
+        &workspace,
+    );
     Ok(RunSettings {
         profile,
         workspace,
@@ -1556,14 +1679,12 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         end_turn_hooks: resolved.end_turn_hooks,
         start_hooks: resolved.start_hooks,
         task_end_hooks: resolved.task_end_hooks,
+        verify,
         task_limits: resolved.task_limits,
         mcp: resolved.mcp,
         thinking_budget: resolved.thinking_budget.0,
-        compaction: if resolved.auto_compact {
-            config::Compaction::Automatic
-        } else {
-            config::Compaction::Manual
-        },
+        compaction: resolved.compaction,
+        keep_going: resolved.keep_going.0,
         show_reasoning: resolved.show_reasoning.0,
         api_base: resolved.api_base.0,
         disable_thinking: resolved.no_thinking.0,
@@ -1582,8 +1703,18 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
 fn interactive_policy<A: Approver + 'static>(
     approver: A,
     workspace: &Path,
+    accept_edits: bool,
 ) -> Box<dyn ApprovalPolicy> {
-    let interactive = Interactive::new(approver);
+    let guarded = dino_sandbox::EXECUTABLE_CONFIG
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let interactive = Interactive::new(approver).guarding(guarded);
+    let interactive = if accept_edits {
+        interactive.accepting_edits()
+    } else {
+        interactive
+    };
     match settings::user_dir() {
         Some(dir) => {
             Box::new(interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)))
@@ -1600,12 +1731,21 @@ fn policy(
     remote: Option<&Arc<remote::Hub>>,
 ) -> Box<dyn ApprovalPolicy> {
     match mode {
-        ApprovalMode::Interactive => match remote {
-            Some(hub) => {
-                interactive_policy(remote::RemoteApprover::new(Arc::clone(hub)), workspace)
+        ApprovalMode::Interactive | ApprovalMode::AcceptEdits => {
+            let accept_edits = mode == ApprovalMode::AcceptEdits;
+            match remote {
+                Some(hub) => interactive_policy(
+                    remote::RemoteApprover::new(Arc::clone(hub)),
+                    workspace,
+                    accept_edits,
+                ),
+                None => interactive_policy(
+                    TerminalApprover::new(sandbox, workspace),
+                    workspace,
+                    accept_edits,
+                ),
             }
-            None => interactive_policy(TerminalApprover::new(sandbox, workspace), workspace),
-        },
+        }
         ApprovalMode::ReadOnly => Box::new(ReadOnly),
         ApprovalMode::AllowAll => Box::new(AllowAll),
     }
@@ -1650,6 +1790,13 @@ mod tests {
     #[test]
     fn skip_permissions_still_conflicts_with_read_only() {
         assert!(parsed(&["--dangerously-skip-permissions", "--read-only"]).is_err());
+    }
+
+    #[test]
+    fn accept_edits_conflicts_with_the_other_approval_flags() {
+        assert!(parsed(&["--accept-edits"]).unwrap().common.accept_edits);
+        assert!(parsed(&["--accept-edits", "--read-only"]).is_err());
+        assert!(parsed(&["--accept-edits", "--dangerously-allow-all"]).is_err());
     }
 
     #[test]

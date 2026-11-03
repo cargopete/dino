@@ -224,6 +224,62 @@ async fn a_test_run_leaves_out_progress_and_passing_tests_unless_asked() {
 }
 
 #[tokio::test]
+async fn a_filter_that_matches_no_test_is_said_not_to_be_a_pass() {
+    let fixture = Fixture::new("#[test]\nfn passes() {}\n");
+
+    let output = parse(
+        &fixture
+            .tool()
+            .execute(&call(
+                json!({"command": "test", "filter": "nothing_by_this_name"}),
+            ))
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(output["exit_code"], 0);
+    let said = output["no_tests"].as_str().unwrap();
+    assert!(said.contains("1 filtered out"), "{said}");
+    let ran = parse(
+        &fixture
+            .tool()
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+    assert!(ran.get("no_tests").is_none(), "{ran}");
+}
+
+/// Uses the toolchain rustup is running these tests under, so nothing is
+/// installed; under a cargo rustup did not start there is nothing to pin.
+#[tokio::test]
+async fn a_pinned_workspace_runs_its_own_toolchain_and_says_which() {
+    let Ok(channel) = std::env::var("RUSTUP_TOOLCHAIN") else {
+        return;
+    };
+    let fixture = Fixture::new("#[test]\nfn passes() {}\n");
+    fs::write(
+        fixture.path.join("rust-toolchain.toml"),
+        format!("[toolchain]\nchannel = \"{channel}\"\n"),
+    )
+    .unwrap();
+
+    let output = parse(
+        &fixture
+            .tool()
+            .execute(&call(json!({"command": "test"})))
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(output["exit_code"], 0, "{output}");
+    assert_eq!(
+        output["toolchain"],
+        format!("{channel} (from rust-toolchain.toml, through rustup)")
+    );
+}
+
+#[tokio::test]
 async fn metadata_is_summarised_rather_than_returned_whole() {
     let fixture = Fixture::new("pub fn two() -> u32 { 2 }\n");
 

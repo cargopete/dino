@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use dino_core::ToolError;
 use dino_core::ToolFuture;
@@ -23,6 +24,7 @@ use serde_json::json;
 /// Writes `edited` into the named file, as `write_file` would.
 struct Writer {
     root: PathBuf,
+    rewritten: Arc<Mutex<Vec<String>>>,
 }
 
 impl ToolRuntime for Writer {
@@ -41,6 +43,10 @@ impl ToolRuntime for Writer {
             Ok(ToolOutput::success(json!({"written": true}).to_string()))
         })
     }
+
+    fn rewritten(&self, path: &str) {
+        self.rewritten.lock().unwrap().push(path.to_owned());
+    }
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -58,8 +64,19 @@ fn call(name: &str) -> ToolCall {
 }
 
 fn hooked(root: &PathBuf, hooks: Vec<Hook>) -> AfterEdit {
+    hooked_telling(root, hooks, Arc::default())
+}
+
+fn hooked_telling(
+    root: &PathBuf,
+    hooks: Vec<Hook>,
+    rewritten: Arc<Mutex<Vec<String>>>,
+) -> AfterEdit {
     AfterEdit::new(
-        Box::new(Writer { root: root.clone() }),
+        Box::new(Writer {
+            root: root.clone(),
+            rewritten,
+        }),
         hooks,
         root,
         Arc::new(Unconfined),
@@ -76,9 +93,11 @@ fn argv(parts: &[&str]) -> Hook {
 #[tokio::test]
 async fn a_hook_that_changes_the_file_says_so() {
     let root = fixture("change");
-    let tool = hooked(
+    let rewritten = Arc::default();
+    let tool = hooked_telling(
         &root,
         vec![argv(&["sh", "-c", "printf formatted > {path}"])],
+        Arc::clone(&rewritten),
     );
 
     let output = tool.execute(&call("write_file")).await.unwrap();
@@ -91,9 +110,14 @@ async fn a_hook_that_changes_the_file_says_so() {
         output["hooks"]["note"]
             .as_str()
             .unwrap()
-            .contains("read it again")
+            .contains("as it is now")
     );
     assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "formatted");
+    assert_eq!(
+        *rewritten.lock().unwrap(),
+        ["a.txt"],
+        "the file tool is told"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -111,6 +135,92 @@ async fn a_failing_hook_reports_its_output_and_the_edit_stands() {
     assert_eq!(output["hooks"]["after_edit"][0]["exit_code"], 3);
     assert_eq!(output["hooks"]["after_edit"][0]["output"], "bad syntax");
     assert_eq!(output["hooks"]["changed_file"], false);
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "edited");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_hook_runs_only_on_a_file_that_was_already_clean_under_it() {
+    let root = fixture("clean");
+    let tool = hooked(
+        &root,
+        vec![argv(&[
+            "sh",
+            "-c",
+            "printf formatted > \"$1\"",
+            "sh",
+            "{path}",
+        ])],
+    );
+
+    fs::write(root.join("a.txt"), "messy").unwrap();
+    let output = tool.execute(&call("apply_patch")).await.unwrap();
+    let output: Value = serde_json::from_str(&output.content).unwrap();
+    assert!(
+        output["hooks"]["after_edit"][0]["skipped"]
+            .as_str()
+            .unwrap()
+            .contains("not clean"),
+        "{output}"
+    );
+    assert_eq!(output["hooks"]["changed_file"], false);
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "edited");
+
+    fs::write(root.join("a.txt"), "formatted").unwrap();
+    let output = tool.execute(&call("apply_patch")).await.unwrap();
+    let output: Value = serde_json::from_str(&output.content).unwrap();
+    assert_eq!(output["hooks"]["after_edit"][0]["exit_code"], 0, "{output}");
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "formatted");
+    let leftovers = fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("dino-hook-{}-", std::process::id()))
+        })
+        .count();
+    assert_eq!(leftovers, 0, "the copies are removed");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn the_edition_placeholder_is_the_packages_edition_and_only_ever_a_year() {
+    let root = fixture("edition");
+    let hook = argv(&[
+        "sh",
+        "-c",
+        "printf \"$2\" > \"$1\"",
+        "sh",
+        "{path}",
+        "{edition}",
+    ]);
+    let tool = hooked(&root, vec![hook]);
+
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"a\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    tool.execute(&call("write_file")).await.unwrap();
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "2021");
+
+    fs::remove_file(root.join("a.txt")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"a\"\nedition = \"2021; rm -rf ~\"\n",
+    )
+    .unwrap();
+    let output = tool.execute(&call("write_file")).await.unwrap();
+    let output: Value = serde_json::from_str(&output.content).unwrap();
+    assert!(
+        output["hooks"]["after_edit"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a year"),
+        "{output}"
+    );
     assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "edited");
     let _ = fs::remove_dir_all(&root);
 }
@@ -253,5 +363,56 @@ async fn hooks_wait_for_the_turns_last_edit_to_a_file() {
     let output: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(output["hooks"]["after_edit"][0]["exit_code"], 0, "{output}");
     assert_eq!(fs::read_to_string(root.join("runs.log")).unwrap(), "ran\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_commit_waits_for_the_verify_command_and_a_failure_refuses_it() {
+    use dino_core::FinishCheck;
+    use dino_exec::BeforeCommit;
+    use dino_exec::Verify;
+
+    let root = fixture("verify");
+    let verify = |script: &str| {
+        Verify::new(
+            vec!["sh".into(), "-c".into(), script.into()],
+            &root,
+            Arc::new(Unconfined),
+        )
+    };
+    let commit = ToolCall {
+        id: "call-1".into(),
+        name: "shell".into(),
+        arguments: json!({"path": "a.txt", "command": "git add -A && git commit -m x"}),
+    };
+
+    let failing = BeforeCommit::new(
+        Box::new(Writer {
+            root: root.clone(),
+            rewritten: Arc::default(),
+        }),
+        verify("echo '2 warnings' >&2; exit 1"),
+    );
+    let refused = failing.execute(&commit).await.unwrap();
+    assert!(refused.is_error);
+    assert!(
+        refused.content.contains("Not committed") && refused.content.contains("2 warnings"),
+        "{}",
+        refused.content
+    );
+    assert!(!root.join("a.txt").exists(), "the commit did not run");
+    let unfinished = verify("exit 1").unfinished().await.unwrap();
+    assert!(unfinished.contains("verify command"), "{unfinished}");
+
+    let passing = BeforeCommit::new(
+        Box::new(Writer {
+            root: root.clone(),
+            rewritten: Arc::default(),
+        }),
+        verify("true"),
+    );
+    assert!(!passing.execute(&commit).await.unwrap().is_error);
+    assert!(root.join("a.txt").exists());
+    assert_eq!(verify("true").unfinished().await, None);
     let _ = fs::remove_dir_all(&root);
 }
