@@ -121,6 +121,9 @@ pub enum ChatServer {
     DashScope,
     /// Moonshot's Kimi platform: `reasoning_effort`, and `thinking` to turn it off.
     Moonshot,
+    /// Ollama's Chat Completions surface: `reasoning_effort` of `none` turns thinking off,
+    /// and no other thinking control is honoured.
+    Ollama,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

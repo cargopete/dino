@@ -323,12 +323,14 @@ fn qwen_config(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<QwenConfig> {
     let is_fallback = settings.profile.key != profile.key;
-    // A model with an endpoint of its own never takes the Qwen one,
-    // so its key cannot be sent to another provider.
+    // A model with a keyed endpoint of its own never takes the Qwen one, so
+    // its key cannot be sent to another provider. A keyless local one may be
+    // pointed at another machine.
     let hosted = dino_model::hosted_endpoint(&profile.key);
-    let api_base = match (hosted, &settings.api_base) {
-        (Some(hosted), _) => hosted.api_base.to_owned(),
-        (None, Some(api_base)) => api_base.clone(),
+    let api_base = match (hosted, settings.api_base.clone()) {
+        (Some(hosted), None) => hosted.api_base.to_owned(),
+        (Some(hosted), Some(_)) if hosted.key_variable.is_some() => hosted.api_base.to_owned(),
+        (_, Some(api_base)) => api_base,
         (None, None) => require_env(env, "QWEN_API_BASE", profile, is_fallback)?,
     };
     let mut config = QwenConfig::new(api_base, profile.clone());
@@ -339,7 +341,10 @@ fn qwen_config(
     };
     config.reasoning_effort = effort;
     config.api_key = match hosted {
-        Some(hosted) => Some(require_env(env, hosted.key_variable, profile, is_fallback)?),
+        Some(hosted) => match hosted.key_variable {
+            Some(variable) => Some(require_env(env, variable, profile, is_fallback)?),
+            None => None,
+        },
         None => env("QWEN_API_KEY").filter(|key| !key.is_empty()),
     };
     config.thinking_budget = Some(thinking_budget(settings.thinking_budget));
@@ -558,6 +563,24 @@ mod tests {
             .expect("an explicit endpoint needs no environment variable");
 
         assert_eq!(session.profile().provider_model, "qwen3:8b");
+    }
+
+    #[test]
+    fn a_local_model_takes_no_key_and_may_be_pointed_elsewhere() {
+        let profile = builtin_profile("qwen3.6-35b-a3b-abliterated").expect("built-in profile");
+        let leaky = |name: &str| (name == "QWEN_API_KEY").then(|| "sk-plan".to_owned());
+        let mut settings = settings(profile);
+
+        let session = build_session_from(&settings, String::new(), Vec::new(), &leaky)
+            .expect("a local endpoint needs no environment");
+        assert_eq!(
+            session.profile().provider_model,
+            "huihui_ai/qwen3.6-abliterated:35b"
+        );
+
+        settings.api_base = Some("http://thinkpad.local:11434/v1".into());
+        build_session_from(&settings, String::new(), Vec::new(), &leaky)
+            .expect("the endpoint flag moves a keyless model");
     }
 
     #[test]

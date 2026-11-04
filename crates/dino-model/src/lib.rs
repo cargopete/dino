@@ -426,14 +426,16 @@ pub const DEFAULT_PROFILE: &str = "kimi-k3.1-pro";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostedEndpoint {
     pub api_base: &'static str,
-    pub key_variable: &'static str,
+    /// Absent for a server on this machine, which takes no key.
+    pub key_variable: Option<&'static str>,
 }
 
 #[must_use]
 pub fn hosted_endpoint(key: &str) -> Option<HostedEndpoint> {
     let (api_base, key_variable) = match key {
-        "kimi-k3.1-pro" => ("https://api.moonshot.ai/v1", "MOONSHOT_API_KEY"),
-        "grok-4.7" => ("https://api.x.ai/v1", "XAI_API_KEY"),
+        "kimi-k3.1-pro" => ("https://api.moonshot.ai/v1", Some("MOONSHOT_API_KEY")),
+        "grok-4.7" => ("https://api.x.ai/v1", Some("XAI_API_KEY")),
+        "qwen3.6-35b-a3b-abliterated" => ("http://127.0.0.1:11434/v1", None),
         _ => return None,
     };
     Some(HostedEndpoint {
@@ -466,6 +468,7 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         qwen_coder_30b(),
         qwen_3_6_27b(),
         qwen_3_6_35b_a3b(),
+        qwen_3_6_35b_a3b_abliterated(),
         qwen_3_8_27b(),
         qwen_3_7_plus(),
         qwen_3_8_max(),
@@ -718,6 +721,24 @@ fn qwen_3_6_35b_a3b() -> ModelProfile {
     qwen_3_6("qwen3.6-35b-a3b", "Qwen/Qwen3.6-35B-A3B", "Qwen3.6 35B-A3B")
 }
 
+/// The same weights with their refusals ablated, under Ollama's tag. **Measured
+/// 2026-11-04** on Ollama 0.32.15: tool calls arrive structured, reasoning in
+/// `reasoning`, 30 tok/s decode on an RTX 2000 Ada with most of the model in
+/// RAM. The window is whatever `OLLAMA_CONTEXT_LENGTH` says, and Ollama
+/// truncates past it in silence, so none is claimed here.
+fn qwen_3_6_35b_a3b_abliterated() -> ModelProfile {
+    let mut profile = qwen_3_6(
+        "qwen3.6-35b-a3b-abliterated",
+        "huihui_ai/qwen3.6-abliterated:35b",
+        "Qwen3.6 35B-A3B abliterated (Ollama)",
+    );
+    profile.context_window_tokens = None;
+    profile.tool_call_parser = None;
+    profile.reasoning_parser = None;
+    profile.chat_server = ChatServer::Ollama;
+    profile
+}
+
 /// Apache-2.0 weights at `Qwen/Qwen3.8-27B`. The server must serve them under
 /// the name `qwen3.8-27b`. **Observed 2026-10-19** on vLLM 0.32.0 with the
 /// recipe's parsers: tool calls arrive structured and reasoning separately.
@@ -954,7 +975,7 @@ mod tests {
             .map(|profile| profile.key.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(unique_keys.len(), all.len());
-        assert_eq!(all.len(), 21);
+        assert_eq!(all.len(), 22);
         assert!(builtin_profile(DEFAULT_PROFILE).is_some());
     }
 
@@ -1005,6 +1026,9 @@ mod tests {
             assert!(hosted_endpoint(key).is_some(), "{key}");
         }
         assert_eq!(hosted_endpoint("qwen3.7-max"), None);
+        let local = hosted_endpoint("qwen3.6-35b-a3b-abliterated").unwrap();
+        assert_eq!(local.key_variable, None);
+        assert!(local.api_base.starts_with("http://127.0.0.1:"));
     }
 
     #[test]

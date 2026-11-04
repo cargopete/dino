@@ -515,6 +515,7 @@ substring. An adapter may expose less than a model can do and never more.
 | `qwen3-coder-30b-a3b` | Qwen Chat Completions | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | development |
 | `qwen3.6-27b` | Qwen Chat Completions | `Qwen/Qwen3.6-27B` | development |
 | `qwen3.6-35b-a3b` | Qwen Chat Completions | `Qwen/Qwen3.6-35B-A3B` | development |
+| `qwen3.6-35b-a3b-abliterated` | Qwen Chat Completions (Ollama) | `huihui_ai/qwen3.6-abliterated:35b` | development, local |
 | `qwen3-8b` | Qwen Chat Completions | `qwen3:8b` | development, not a coding target |
 | `qwen3.7-plus` | Qwen Chat Completions (DashScope) | `qwen3.7-plus` | development, hosted |
 
@@ -541,7 +542,11 @@ something has measured that too.
 Qwen's reference serving stacks are vLLM and SGLang. Ollama and other local
 runtimes may follow once they pass the same conformance suite. `qwen3-8b` is
 present so the loop can be driven by real inference on a laptop; it is not a
-coding target and never will be.
+coding target and never will be. `qwen3.6-35b-a3b-abliterated` is the same
+Qwen3.6 35B-A3B weights with their refusals ablated, as Ollama tags them. It
+speaks Ollama's dialect, where `reasoning_effort = "none"` is the one thinking
+switch honoured, and it defaults to Ollama on this machine, so it needs no key
+and no `--api-base` unless the server is elsewhere.
 
 `qwen3.7-plus` is Alibaba's hosted model, for anyone without a GPU. It speaks
 DashScope's dialect: thinking controls at the top level, no vLLM extensions,
@@ -693,8 +698,13 @@ dino --model qwen3-8b --api-base http://thinkpad.local:11434/v1 \
 ```
 
 Ollama serves a context far smaller than the model's native window unless
-`num_ctx` is raised, and it truncates rather than complaining. RFC-0003 section
-3.1 records what has and has not been measured there.
+`OLLAMA_CONTEXT_LENGTH` is raised, and it truncates rather than complaining.
+RFC-0003 section 3.1 records what has and has not been measured there. The
+abliterated Qwen3.6 reaches Ollama on this machine without flags:
+
+```console
+dino --model qwen3.6-35b-a3b-abliterated --no-thinking
+```
 
 The interface uses the Bedrock palette: lavender for what the machine printed,
 ember orange for what a person wrote, sandstone and stone grey for chrome, every
