@@ -242,6 +242,7 @@ impl QwenSession {
             ChatServer::Vllm => self.insert_vllm_controls(&mut body),
             ChatServer::DashScope => self.insert_dashscope_controls(&mut body),
             ChatServer::Moonshot => self.insert_moonshot_controls(&mut body),
+            ChatServer::Ollama => self.insert_ollama_controls(&mut body),
         }
         if !self.config.tools.is_empty() {
             let tools = self
@@ -277,6 +278,32 @@ impl QwenSession {
         if let Some(budget) = self.config.thinking_budget {
             body.insert("thinking_token_budget".into(), json!(budget));
         }
+        self.insert_sampling(body);
+        if matches!(self.config.profile.reasoning, ReasoningSupport::Toggle) {
+            let mut template = serde_json::Map::new();
+            if let Some(enable_thinking) = self.config.enable_thinking {
+                template.insert("enable_thinking".into(), json!(enable_thinking));
+            }
+            if self.config.preserve_thinking {
+                template.insert("preserve_thinking".into(), json!(true));
+            }
+            if !template.is_empty() {
+                body.insert("chat_template_kwargs".into(), Value::Object(template));
+            }
+        }
+    }
+
+    /// Measured 2026-11-04 on Ollama 0.32.15: `reasoning_effort` of `none` is
+    /// the one thinking switch its Chat Completions surface honours. `think`,
+    /// `chat_template_kwargs` and a budget are all accepted and ignored.
+    fn insert_ollama_controls(&self, body: &mut serde_json::Map<String, Value>) {
+        self.insert_sampling(body);
+        if self.config.enable_thinking == Some(false) {
+            body.insert("reasoning_effort".into(), json!("none"));
+        }
+    }
+
+    fn insert_sampling(&self, body: &mut serde_json::Map<String, Value>) {
         let profile_sampling = if matches!(self.config.profile.reasoning, ReasoningSupport::Toggle)
             && self.config.enable_thinking == Some(false)
         {
@@ -305,18 +332,6 @@ impl QwenSession {
             }
             if let Some(repetition_penalty) = sampling.repetition_penalty {
                 body.insert("repetition_penalty".into(), json!(repetition_penalty));
-            }
-        }
-        if matches!(self.config.profile.reasoning, ReasoningSupport::Toggle) {
-            let mut template = serde_json::Map::new();
-            if let Some(enable_thinking) = self.config.enable_thinking {
-                template.insert("enable_thinking".into(), json!(enable_thinking));
-            }
-            if self.config.preserve_thinking {
-                template.insert("preserve_thinking".into(), json!(true));
-            }
-            if !template.is_empty() {
-                body.insert("chat_template_kwargs".into(), Value::Object(template));
             }
         }
     }
@@ -1483,6 +1498,34 @@ mod tests {
         let assistant = &body["messages"][0];
         assert_eq!(assistant["role"], "assistant");
         assert!(assistant.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn ollama_takes_reasoning_effort_none_and_nothing_vllm_sends_for_thinking() {
+        let body = |enable_thinking: Option<bool>| {
+            let profile = crate::builtin_profile("qwen3.6-35b-a3b-abliterated").unwrap();
+            let mut config = QwenConfig::new("http://127.0.0.1:11434/v1", profile);
+            config.enable_thinking = enable_thinking;
+            config.thinking_budget = Some(4_096);
+            QwenSession::new(config).unwrap().request_body(&[]).unwrap()
+        };
+
+        let off = body(Some(false));
+        assert_eq!(off["model"], "huihui_ai/qwen3.6-abliterated:35b");
+        assert_eq!(off["reasoning_effort"], "none");
+        assert_eq!(off["temperature"], 0.7, "non-thinking sampling");
+        for other in [
+            "chat_template_kwargs",
+            "thinking_token_budget",
+            "enable_thinking",
+            "thinking",
+        ] {
+            assert!(!off.contains_key(other), "sent {other}");
+        }
+        let default = body(None);
+        assert!(!default.contains_key("reasoning_effort"));
+        assert_eq!(default["temperature"], 0.6);
+        assert_eq!(default["top_k"], 20);
     }
 
     #[test]

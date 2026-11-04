@@ -105,6 +105,19 @@ OpenAI-compatible surface is not known to honour `chat_template_kwargs`, so
 `--no-thinking` may be sent and ignored. The request Dino sends has been
 verified locally; what Ollama does with it has not.
 
+**Measured 2026-11-04** on Ollama 0.32.15 with `qwen3.6-35b-a3b-abliterated`.
+Ollama's OpenAI surface ignores `chat_template_kwargs` and `think`, and honours
+only `reasoning_effort: "none"`, so Ollama is now its own `ChatServer` and that
+is what `--no-thinking` sends there. Tool calls arrive structured and reasoning
+streams in `reasoning`. The served window is `OLLAMA_CONTEXT_LENGTH` and is not
+reported through `/v1/models`, so the profile claims none. `dino probe` passed
+every check on the ThinkPad at 24,576 tokens, with the context canary at
+20,000. One anomaly is on record: in three of about twenty-five turns with
+thinking on, Ollama ended the response cleanly without `[DONE]` after exactly
+67 generated tokens of the same prompt and then cancelled its own runner task.
+The same request replayed from Python or through a relay never did it. Dino
+reports it as a protocol failure; the cause is Ollama's, and unfound.
+
 ## 4. OpenAI Responses
 
 **Provider-documented on 2026-08-23:** `gpt-5.6-terra` supports the Responses

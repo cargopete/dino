@@ -579,10 +579,17 @@ fn excerpt(text: &str) -> String {
 }
 
 async fn check_context(host: &mut impl ProbeHost, options: &ProbeOptions) -> Result<Check> {
+    // The canary measures recall, and a model that thinks first spends the
+    // whole answer cap on it: Qwen3.6 on Ollama wrote 256 tokens of reasoning
+    // and no code. Off where the profile can be told.
+    let thinking = match options.reasoning {
+        ReasoningSupport::Toggle => Thinking::Off,
+        _ => Thinking::Default,
+    };
     let mut session = host.open(SessionRequest {
         system: CONTEXT_SYSTEM.to_owned(),
         tools: Vec::new(),
-        thinking: Thinking::Default,
+        thinking,
         max_output_tokens: MAX_OUTPUT_TOKENS,
     })?;
     // A server that will not say still leaves the catalogue window to measure

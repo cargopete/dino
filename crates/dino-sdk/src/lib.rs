@@ -98,7 +98,10 @@ fn connect_with(
             let (api_base, api_key) = match dino_model::hosted_endpoint(model) {
                 Some(hosted) => (
                     hosted.api_base.to_owned(),
-                    Some(needs(hosted.key_variable)?),
+                    match hosted.key_variable {
+                        Some(variable) => Some(needs(variable)?),
+                        None => None,
+                    },
                 ),
                 None => (needs("QWEN_API_BASE")?, env("QWEN_API_KEY")),
             };
