@@ -706,7 +706,7 @@ fn render_turn(out: &mut String, turn: &Turn, full: bool, width: usize) {
     let text = turn.text.trim();
     if !text.is_empty() {
         let limit = if full { usize::MAX } else { 3 };
-        write_block(out, text, limit, width, MUTED);
+        write_block(out, text, limit, width, MUTED, full);
     }
     for call in &turn.calls {
         render_call(out, call, full, width);
@@ -773,27 +773,37 @@ fn render_call(out: &mut String, call: &Call, full: bool, width: usize) {
         );
     }
     if full {
-        write_block(out, &call.arguments, usize::MAX, width, FAINT);
+        write_block(out, &call.arguments, usize::MAX, width, FAINT, full);
     }
     if let Some(output) = call
         .output
         .as_ref()
         .filter(|output| !output.trim().is_empty())
     {
-        let limit = if full { 40 } else { 3 };
-        write_block(out, output.trim_end(), limit, width, FAINT);
+        let limit = if full { usize::MAX } else { 3 };
+        write_block(out, output.trim_end(), limit, width, FAINT, full);
     }
 }
 
-fn write_block(out: &mut String, text: &str, limit: usize, width: usize, colour: style::Colour) {
+/// With `full`, each line is left whole for the terminal to wrap; otherwise it
+/// is cut to the terminal width.
+fn write_block(
+    out: &mut String,
+    text: &str,
+    limit: usize,
+    width: usize,
+    colour: style::Colour,
+    full: bool,
+) {
     let lines: Vec<&str> = text.lines().collect();
     let shown = calls::shown(lines.len(), limit);
     for line in &lines[..shown] {
-        let _ = writeln!(
-            out,
-            "      {}",
-            style::paint(colour, &calls::cut(line, width.saturating_sub(6)))
-        );
+        let line = if full {
+            (*line).to_owned()
+        } else {
+            calls::cut(line, width.saturating_sub(6))
+        };
+        let _ = writeln!(out, "      {}", style::paint(colour, &line));
     }
     if shown < lines.len() {
         let _ = writeln!(
@@ -1039,6 +1049,52 @@ mod tests {
         );
         assert!(text.contains("7 passed"), "{text}");
         assert!(text.contains("approvals 7.0s"), "{text}");
+    }
+
+    #[test]
+    fn full_output_is_neither_cut_to_width_nor_capped_at_40_lines() {
+        use std::fmt::Write as _;
+        let long = "y".repeat(200);
+        let mut body = long.clone();
+        for n in 0..50 {
+            write!(body, "\nline {n}").unwrap();
+        }
+        let content = json!({ "stdout": body, "stderr": "" }).to_string();
+        let mut lines = session();
+        lines[9] = record(
+            12_500,
+            &json!({ "type": "tool_finished", "model_turn": 1,
+                "result": { "call_id": "c1", "output": { "is_error": false, "content": content } } }),
+        );
+        let mut builder = Builder::new(FULL_CAP_BYTES);
+        for line in &lines {
+            builder.line(line);
+        }
+        let trajectory = builder.finish();
+
+        let full = visible(&render("s1", &trajectory, 0, true, 100));
+        assert!(
+            full.contains(&long),
+            "the long line survives whole with --full"
+        );
+        assert!(
+            full.contains("line 49"),
+            "the 50th line is shown with --full"
+        );
+        assert!(
+            !full.contains("more line(s)"),
+            "nothing is hidden with --full: {full}"
+        );
+
+        let trimmed = visible(&render("s1", &trajectory, 0, false, 100));
+        assert!(
+            !trimmed.contains(&long),
+            "the long line is cut without --full"
+        );
+        assert!(
+            trimmed.contains("more line(s)"),
+            "output is capped without --full"
+        );
     }
 
     #[test]
