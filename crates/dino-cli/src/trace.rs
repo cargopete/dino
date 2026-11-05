@@ -1053,10 +1053,11 @@ mod tests {
 
     #[test]
     fn full_output_is_neither_cut_to_width_nor_capped_at_40_lines() {
+        use std::fmt::Write as _;
         let long = "y".repeat(200);
         let mut body = long.clone();
         for n in 0..50 {
-            body.push_str(&format!("\nline {n}"));
+            write!(body, "\nline {n}").unwrap();
         }
         let content = json!({ "stdout": body, "stderr": "" }).to_string();
         let mut lines = session();
