@@ -54,12 +54,21 @@ pub async fn review(job: &Job, config: &Config) -> Result<PathBuf> {
     remove_checkout(&job.clone, &checkout).await;
     let reviewed = check_out_and_review(job, config, &record, &checkout).await;
     remove_checkout(&job.clone, &checkout).await;
-    let text = reviewed?;
-    std::fs::write(&record, &text).with_context(|| format!("cannot write {}", record.display()))?;
+    let reviewed = reviewed?;
+    std::fs::write(&record, &reviewed.record)
+        .with_context(|| format!("cannot write {}", record.display()))?;
     if config.post {
-        post(job, &text).await?;
+        post(job, &reviewed.body).await?;
     }
     Ok(record)
+}
+
+/// A finished review: the full local `record`, which carries the model and the
+/// session's spending, and the `body` alone, which is what is safe to post to a
+/// public pull request.
+struct Reviewed {
+    record: String,
+    body: String,
 }
 
 async fn check_out_and_review(
@@ -67,9 +76,9 @@ async fn check_out_and_review(
     config: &Config,
     record: &Path,
     checkout: &Path,
-) -> Result<String> {
+) -> Result<Reviewed> {
     let diff = check_out(job, checkout).await?;
-    let (text, model, closing) = run_session(job, config, checkout, &diff, record).await?;
+    let (body, model, closing) = run_session(job, config, checkout, &diff, record).await?;
     let mut recorded = format!(
         "# {}#{} at {}\n\nA read-only review on {model}, from delivery {}. {closing}.\n\n",
         job.repo,
@@ -77,11 +86,14 @@ async fn check_out_and_review(
         job.short_head(),
         job.delivery
     );
-    recorded.push_str(&text);
+    recorded.push_str(&body);
     if !recorded.ends_with('\n') {
         recorded.push('\n');
     }
-    Ok(recorded)
+    Ok(Reviewed {
+        record: recorded,
+        body,
+    })
 }
 
 /// Fetches the pull request into its clone, checks its head out at

@@ -283,6 +283,12 @@ impl Recent {
             }
         }
     }
+
+    fn forget(&mut self, key: &str) {
+        if self.known.remove(key) {
+            self.order.retain(|seen| seen != key);
+        }
+    }
 }
 
 /// Whether a review may start.
@@ -342,6 +348,14 @@ impl Gate {
         self.deliveries.insert(job.delivery.clone());
         self.heads.insert(head);
         Admit::Admitted
+    }
+
+    /// Forgets a job whose review did not finish, so redelivering it (GitHub's
+    /// "Redeliver" button, or a fresh event) is admitted again. The hour's
+    /// count stays spent, since the attempt did consume a slot.
+    pub fn forget(&mut self, job: &Job) {
+        self.heads.forget(&job.head_key());
+        self.deliveries.forget(&job.delivery);
     }
 }
 
@@ -656,6 +670,20 @@ mod tests {
         // Refused for the limit, so not taken as seen.
         let later = now + Duration::from_secs(60 * 60);
         assert_eq!(gate.admit(&job("d4", &third), later), Admit::Admitted);
+    }
+
+    #[test]
+    fn a_forgotten_head_is_admitted_again() {
+        let mut gate = Gate::new(10);
+        let now = Instant::now();
+        assert_eq!(gate.admit(&job("d1", HEAD), now), Admit::Admitted);
+        assert_eq!(gate.admit(&job("d2", HEAD), now), Admit::AlreadyReviewed);
+        // The review failed, so forget it; a redelivery with a new id is taken.
+        gate.forget(&job("d1", HEAD));
+        assert_eq!(gate.admit(&job("d3", HEAD), now), Admit::Admitted);
+        // And the same delivery id resent is taken, not treated as a duplicate.
+        gate.forget(&job("d3", HEAD));
+        assert_eq!(gate.admit(&job("d3", HEAD), now), Admit::Admitted);
     }
 
     #[test]

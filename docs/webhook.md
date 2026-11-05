@@ -46,8 +46,9 @@ in its own checkout.
 ## What a review can and cannot do
 
 - A delivery is read only once its `X-Hub-Signature-256` HMAC verifies, compared
-  in constant time. Repeats of a delivery id, and second deliveries for a head
-  already reviewed, are answered and ignored. Past `per_hour`, or with four
+  in constant time. Repeats of a delivery id, and further deliveries for a head
+  already in hand or reviewed, are answered and ignored; a review that fails to
+  run is forgotten, so redelivering it is taken. Past `per_hour`, or with four
   reviews waiting, a delivery is refused with 429 or 503 and not remembered, so
   redelivering it later works.
 - Commit names from the payload must be 40 or 64 hex digits before they reach
@@ -63,10 +64,12 @@ in its own checkout.
   it. That is a prompt, not a boundary: the boundary is that the session can
   only read.
 - Reviews are recorded under `$XDG_STATE_HOME/dino/webhook/` (default
-  `~/.local/state/dino/webhook/`), with the session log beside each. With
-  `post = true`, the review goes to the pull request through `gh pr comment`,
-  under a line saying it is automated and unchecked, with `@mentions` broken so
-  nobody is notified by text the pull request put there.
+  `~/.local/state/dino/webhook/`), with the session log beside each. The record
+  also carries the model and this session's spending. With `post = true`, only
+  the review body goes to the pull request through `gh pr comment`, under a line
+  saying it is automated and unchecked, with `@mentions` broken so nobody is
+  notified by text the pull request put there; the model and spending are not
+  posted.
 
 Not yet run against GitHub itself; tested with signed deliveries to a local
 listener and a stub model.
