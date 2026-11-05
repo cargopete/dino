@@ -189,10 +189,19 @@ pub fn prepare(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env_clear();
-    // Its own group, so whatever it starts in the background can be ended with
-    // it rather than outliving the call.
+    // Its own session, and so its own group: whatever it starts in the background
+    // ends with it. Off the terminal, a password prompt fails at once; on it, the
+    // kernel stops the child for reading and the call never returns.
     #[cfg(unix)]
-    command.process_group(0);
+    #[allow(unsafe_code)]
+    // SAFETY: setsid is async-signal-safe and touches nothing of the parent's.
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(drop)
+                .map_err(std::io::Error::from)
+        });
+    }
     for (name, value) in child_environment(sandbox) {
         command.env(name, value);
     }
