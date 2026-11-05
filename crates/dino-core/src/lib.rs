@@ -468,6 +468,9 @@ const PROCEED_NOTE: &str = "[dino: you ended on a question, and this task is to 
      through. Proceed with your recommendation, and record the decision where the work is \
      tracked. If only the person can answer it, call report_blocker and say so.]";
 
+const ACT_NOTE: &str = "[dino: you said what you would do next and ended your turn \
+     without doing it. Do it now, with the tools.]";
+
 const CUT_OFF_NOTE: &str = "[dino: your last response was cut off because the context \
      window filled. Older tool results have been elided to make room. Carry on from where you \
      stopped, and keep each response short.]";
@@ -588,6 +591,7 @@ pub struct Agent<S, T> {
     keep_going_mark: usize,
     /// The turn this run was sent back at for ending on a question, if it was.
     asked_back: Option<u32>,
+    urged_to_act: Option<u32>,
     /// Messages the person typed during a run, for its next tool results.
     inbox: Option<Inbox>,
 }
@@ -625,6 +629,7 @@ where
             keep_going: false,
             keep_going_mark: 0,
             asked_back: None,
+            urged_to_act: None,
             inbox: None,
         }
     }
@@ -927,6 +932,7 @@ where
         self.outcomes.reset();
         self.keep_going_mark = 0;
         self.asked_back = None;
+        self.urged_to_act = None;
     }
 
     /// Settles every call of a turn in order, noticing a reported blocker.
@@ -1064,6 +1070,9 @@ where
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, AgentError> {
+        if let Some(note) = self.act_note(model_turn, events)? {
+            return Ok(Some(note));
+        }
         if let Some(note) = self
             .send_back_unfinished(model_turn, events, cancel)
             .await?
@@ -1071,6 +1080,30 @@ where
             return Ok(Some(note));
         }
         self.keep_going_note(model_turn, events)
+    }
+
+    /// The note that sends a model back, once a run, when its turn ends on a
+    /// promise to act rather than the act.
+    fn act_note(
+        &mut self,
+        model_turn: u32,
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<Option<String>, AgentError> {
+        if self.urged_to_act.is_some()
+            || model_turn >= self.config.max_model_turns.get()
+            || !announces_action(&turn_text(events, model_turn))
+        {
+            return Ok(None);
+        }
+        self.urged_to_act = Some(model_turn);
+        self.emit(
+            AgentEvent::SentBack {
+                model_turn,
+                reason: ACT_NOTE.to_owned(),
+            },
+            events,
+        )?;
+        Ok(Some(ACT_NOTE.to_owned()))
     }
 
     /// The note that sends a model back to a task it was told to finish, when it
@@ -1686,6 +1719,46 @@ pub fn ends_in_question(text: &str) -> bool {
     text.trim_end()
         .trim_end_matches(['*', '_', '`', '"', '\'', ')', '\u{201d}'])
         .ends_with('?')
+}
+
+/// Whether `text` closes on what its author is about to do, which a turn that
+/// then ends without a tool call has not done.
+#[must_use]
+pub fn announces_action(text: &str) -> bool {
+    let text = text
+        .trim_end()
+        .trim_end_matches(['*', '_', '`', '"', '\'', ')', '\u{201d}']);
+    if text.ends_with(':') {
+        return true;
+    }
+    let line = text.lines().map(str::trim).rfind(|line| !line.is_empty());
+    let line = line.unwrap_or_default();
+    let last = [". ", "! ", "? "]
+        .iter()
+        .filter_map(|stop| line.rfind(stop).map(|at| at + stop.len()))
+        .max()
+        .map_or(line, |at| &line[at..])
+        .trim_start_matches(['*', '_', '-', '#', ' '])
+        .to_lowercase()
+        .replace('\u{2019}', "'");
+    let last = [
+        "now, ", "now ", "first, ", "first ", "next, ", "next ", "okay, ", "ok, ",
+    ]
+    .iter()
+    .find_map(|lead| last.strip_prefix(lead))
+    .unwrap_or(&last);
+    !text.ends_with('?')
+        && !last.starts_with("let me know")
+        && [
+            "let me ",
+            "let's ",
+            "i'll ",
+            "i will ",
+            "i'm going to ",
+            "i am going to ",
+        ]
+        .iter()
+        .any(|start| last.starts_with(start))
 }
 
 /// The text of the last turn that wrote any: what a run ended by saying.
