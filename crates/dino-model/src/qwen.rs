@@ -177,19 +177,48 @@ impl QwenSession {
             let response = request
                 .send()
                 .await
-                .map_err(|error| crate::send_error(&error))?;
+                .map_err(|error| self.send_error(&error))?;
             if response.status().is_success() {
                 return Ok(response);
             }
             let error = crate::http_error("Qwen endpoint", response).await;
-            match &error {
-                ModelError::Http { status, body, .. } if refuses_account(*status, body) => {
+            match error {
+                ModelError::Http { status, ref body, .. } if refuses_account(status, body) => {
                     Err(ModelError::Account(error.to_string()))
+                }
+                // Ollama answers a model it has not pulled with a 404 that names
+                // the model; point the user at `ollama pull`.
+                ModelError::Http {
+                    provider,
+                    status: 404,
+                    body,
+                } if self.config.profile.chat_server == ChatServer::Ollama => {
+                    let model = &self.config.profile.provider_model;
+                    Err(ModelError::Http {
+                        provider,
+                        status: 404,
+                        body: format!(
+                            "{body}\nOllama does not have the model {model}; pull it first: ollama pull {model}"
+                        ),
+                    })
                 }
                 _ => Err(error),
             }
         })
         .await
+    }
+
+    /// [`crate::send_error`], with Ollama's "server is not running" message
+    /// told how to start it.
+    fn send_error(&self, error: &reqwest::Error) -> ModelError {
+        match crate::send_error(error) {
+            ModelError::Offline(message)
+                if self.config.profile.chat_server == ChatServer::Ollama =>
+            {
+                ModelError::Offline(format!("{message}; start it with `ollama serve`"))
+            }
+            other => other,
+        }
     }
 
     fn explicit_cache(&self) -> bool {
@@ -1741,7 +1770,10 @@ mod tests {
     const SSE_HELLO: &str = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
     fn quick_retries(base: String) -> QwenSession {
-        let profile = crate::builtin_profile("qwen3.8-27b").unwrap();
+        quick_retries_with(base, crate::builtin_profile("qwen3.8-27b").unwrap())
+    }
+
+    fn quick_retries_with(base: String, profile: crate::ModelProfile) -> QwenSession {
         let mut config = QwenConfig::new(base, profile);
         config.retry = RetryPolicy {
             attempts: 3,
@@ -1905,6 +1937,53 @@ mod tests {
             .unwrap();
 
         assert!(error.to_string().contains("does not exist"), "{error}");
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_local_server_that_is_not_running_fails_fast_with_a_hint() {
+        // A loopback port nobody listens on: bind to claim a free one, drop it.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let profile = crate::builtin_profile("qwen3.6-35b-a3b-abliterated").unwrap();
+        // The full five-attempt, two-second policy: a transient classification
+        // would spend thirty seconds here, so a quick return proves fast-fail.
+        let mut session =
+            QwenSession::new(QwenConfig::new(format!("http://{addr}/v1"), profile)).unwrap();
+
+        let started = std::time::Instant::now();
+        let error = session
+            .next(TurnInput::User { content: "hi".into() })
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(error, ModelError::Offline(_)), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("not running"), "{message}");
+        assert!(message.contains("ollama serve"), "{message}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn ollamas_404_for_a_model_not_pulled_suggests_ollama_pull() {
+        let body = r#"{"error":{"message":"model 'huihui_ai/qwen3.6-abliterated:35b' not found"}}"#;
+        let (base, server) = serve_in_turn(vec![status("404 Not Found", body)]).await;
+        let profile = crate::builtin_profile("qwen3.6-35b-a3b-abliterated").unwrap();
+        let mut session = quick_retries_with(base, profile);
+
+        let error = session
+            .next(TurnInput::User { content: "hi".into() })
+            .await
+            .err()
+            .unwrap();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("ollama pull huihui_ai/qwen3.6-abliterated:35b"),
+            "{message}"
+        );
         assert_eq!(server.await.unwrap(), 1);
     }
 
