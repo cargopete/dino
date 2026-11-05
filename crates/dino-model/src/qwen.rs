@@ -1954,7 +1954,9 @@ mod tests {
 
         let started = std::time::Instant::now();
         let error = session
-            .next(TurnInput::User { content: "hi".into() })
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
             .await
             .err()
             .unwrap();
@@ -1963,7 +1965,11 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("not running"), "{message}");
         assert!(message.contains("ollama serve"), "{message}");
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -1974,7 +1980,9 @@ mod tests {
         let mut session = quick_retries_with(base, profile);
 
         let error = session
-            .next(TurnInput::User { content: "hi".into() })
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
             .await
             .err()
             .unwrap();

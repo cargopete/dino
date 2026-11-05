@@ -216,7 +216,10 @@ impl JsonlSessionLog {
             options.mode(0o600);
         }
         let file = options.open(&path).map_err(|error| {
-            SinkError::new(format!("cannot open session log {}: {error}", path.display()))
+            SinkError::new(format!(
+                "cannot open session log {}: {error}",
+                path.display()
+            ))
         })?;
         Self::begin(Box::new(BufWriter::new(file)), path, session)
     }
@@ -330,8 +333,7 @@ mod tests {
 
     #[test]
     fn a_fresh_log_is_owner_readable_only() {
-        let path =
-            std::env::temp_dir().join(format!("dino-log-perm-{}.jsonl", std::process::id()));
+        let path = std::env::temp_dir().join(format!("dino-log-perm-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let _log = JsonlSessionLog::create(&path, meta()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
