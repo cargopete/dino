@@ -750,6 +750,8 @@ mod tests {
         let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(listed["sessions"][0]["id"], "s1");
         assert_eq!(listed["sessions"][0]["resumable"], true);
+        assert_eq!(listed["sessions"][0]["first_prompt"], "hello");
+        assert_eq!(listed["sessions"][0]["submissions"], 1);
 
         let (code, _, body) = call(&server, "GET", "/api/trace?id=s1", token, "").await;
         assert_eq!(code, 200, "{body}");

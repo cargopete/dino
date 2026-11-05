@@ -127,11 +127,19 @@ pub struct SavedSession {
     pub name: Option<String>,
     pub model: Option<String>,
     pub age_seconds: u64,
+    /// The session's first prompt, cut to a line, so a page can tell one id
+    /// from another. Absent when nothing was submitted or the log is unread.
+    pub first_prompt: Option<String>,
+    /// How many prompts the session's log holds.
+    pub submissions: usize,
     /// A saved conversation, which a session can continue.
     pub resumable: bool,
     /// A log, whose trajectory can be read.
     pub traceable: bool,
 }
+
+/// The most of a first prompt kept for the list, in characters.
+const PROMPT_COLUMNS: usize = 120;
 
 /// Whether `id` could name a session file, and nothing outside the directory.
 fn plausible(id: &str) -> bool {
@@ -183,7 +191,17 @@ pub fn sessions(root: &Path) -> Vec<SavedSession> {
     let now = SystemTime::now();
     listed
         .into_iter()
-        .map(|(id, (modified, resumable, traceable))| {
+        .filter_map(|(id, (modified, resumable, traceable))| {
+            let (first_prompt, submissions) = if traceable {
+                prompts(&directory.join(format!("{id}.jsonl")))
+            } else {
+                (None, 0)
+            };
+            // A log with no submission is the empty one every serve start writes
+            // before a prompt; leave it out unless it is also a saved conversation.
+            if traceable && !resumable && submissions == 0 {
+                return None;
+            }
             let label = resumable
                 .then(|| dino_core::resume::label(&directory.join(format!("{id}.state.json"))))
                 .and_then(Result::ok);
@@ -195,16 +213,71 @@ pub fn sessions(root: &Path) -> Vec<SavedSession> {
                         .then(|| logged_model(&directory.join(format!("{id}.jsonl"))))
                         .flatten()
                 });
-            SavedSession {
+            Some(SavedSession {
                 name: label.and_then(|label| label.name),
                 model,
                 age_seconds: now.duration_since(modified).map_or(0, |age| age.as_secs()),
+                first_prompt,
+                submissions,
                 id,
                 resumable,
                 traceable,
-            }
+            })
         })
         .collect()
+}
+
+/// A log's first prompt, cut to a line, and how many prompts it holds. Reads
+/// the file once; a submission record is small, so only matching lines parse.
+fn prompts(path: &Path) -> (Option<String>, usize) {
+    use std::io::BufRead as _;
+    let Ok(file) = std::fs::File::open(path) else {
+        return (None, 0);
+    };
+    let mut first = None;
+    let mut count = 0usize;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        if !line.contains(r#""submitted""#) {
+            continue;
+        }
+        if let Some(text) = submitted(&line) {
+            count += 1;
+            if first.is_none() {
+                first = text.lines().next().map(|line| cut(line.trim(), PROMPT_COLUMNS));
+            }
+        }
+    }
+    (first, count)
+}
+
+/// The text of a `submitted` event line, or `None` for any other record. The
+/// outer value is `Some` only when the line is a submission.
+fn submitted(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("record")?.as_str()? != "event" {
+        return None;
+    }
+    let event = value.get("event")?;
+    if event.get("type")?.as_str()? != "submitted" {
+        return None;
+    }
+    Some(
+        event
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+/// At most `columns` characters of `text`, ending in `…` when it was cut.
+fn cut(text: &str, columns: usize) -> String {
+    if text.chars().count() <= columns {
+        return text.to_owned();
+    }
+    let mut kept: String = text.chars().take(columns.saturating_sub(1)).collect();
+    kept.push('…');
+    kept
 }
 
 /// The model a log's opening record names, read from its first line only.
@@ -246,8 +319,15 @@ mod tests {
         std::fs::canonicalize(root).unwrap()
     }
 
+    /// A log line for a `submitted` event with the given text.
+    fn submission(text: &str) -> String {
+        serde_json::json!({ "record": "event", "seq": 1, "unix_millis": 2,
+            "event": { "type": "submitted", "text": text } })
+        .to_string()
+    }
+
     #[test]
-    fn a_session_is_listed_once_with_its_name_model_and_what_can_be_done_with_it() {
+    fn a_session_is_listed_once_with_its_name_model_prompt_and_what_can_be_done_with_it() {
         let root = scratch("sessions");
         let sessions = root.join(".dino").join("sessions");
         std::fs::write(
@@ -257,12 +337,21 @@ mod tests {
         .unwrap();
         std::fs::write(
             sessions.join("a1-2.jsonl"),
-            r#"{"record":"started","seq":0,"unix_millis":1,"session":{"model_key":"claude-x"}}"#,
+            format!(
+                "{}\n{}\n{}\n",
+                r#"{"record":"started","seq":0,"unix_millis":1,"session":{"model_key":"claude-x"}}"#,
+                submission("first ask\nsecond line"),
+                submission("later ask"),
+            ),
         )
         .unwrap();
         std::fs::write(
             sessions.join("b3-4.jsonl"),
-            "{\"record\":\"started\",\"seq\":0,\"unix_millis\":1,\"session\":{\"model_key\":\"qwen\"}}\n",
+            format!(
+                "{}\n{}\n",
+                r#"{"record":"started","seq":0,"unix_millis":1,"session":{"model_key":"qwen"}}"#,
+                submission("index the contract"),
+            ),
         )
         .unwrap();
         std::fs::write(sessions.join("notes.txt"), "").unwrap();
@@ -273,9 +362,43 @@ mod tests {
         assert_eq!(listed.len(), 2, "{listed:?}");
         assert_eq!(listed[0].id, "a1-2");
         assert_eq!(listed[0].name.as_deref(), Some("wave"));
+        assert_eq!(listed[0].first_prompt.as_deref(), Some("first ask"));
+        assert_eq!(listed[0].submissions, 2);
         assert!(listed[0].resumable && listed[0].traceable);
         assert_eq!(listed[1].model.as_deref(), Some("qwen"));
+        assert_eq!(listed[1].first_prompt.as_deref(), Some("index the contract"));
+        assert_eq!(listed[1].submissions, 1);
         assert!(!listed[1].resumable && listed[1].traceable);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_log_with_no_submission_is_left_out_but_a_saved_one_stays() {
+        let root = scratch("empty");
+        let sessions = root.join(".dino").join("sessions");
+        // What every `dino serve` start writes before a prompt: a log, no state.
+        std::fs::write(
+            sessions.join("empty1.jsonl"),
+            "{\"record\":\"started\",\"seq\":0,\"unix_millis\":1,\"session\":{\"model_key\":\"m\"}}\n",
+        )
+        .unwrap();
+        // A saved conversation with no submission in its log is still a real one.
+        std::fs::write(
+            sessions.join("saved1.state.json"),
+            r#"{"provider":"anthropic","model_key":"m","version":1,"payload":{},"name":null}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("saved1.jsonl"),
+            "{\"record\":\"started\",\"seq\":0,\"unix_millis\":1,\"session\":{\"model_key\":\"m\"}}\n",
+        )
+        .unwrap();
+
+        let listed = super::sessions(&root);
+        let ids: Vec<&str> = listed.iter().map(|session| session.id.as_str()).collect();
+        assert_eq!(ids, ["saved1"], "{listed:?}");
+        assert_eq!(listed[0].submissions, 0);
+        assert_eq!(listed[0].first_prompt, None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

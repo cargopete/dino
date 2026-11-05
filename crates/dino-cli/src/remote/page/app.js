@@ -321,8 +321,12 @@ async function loadSessions() {
   for (const session of listed) {
     const row = el('div', 'row-item');
     const current = info && session.id === info.conversation;
-    row.append(el('span', 'what' + (current ? ' current' : ''), (session.name ? session.name + '  ' : '') + session.id + (current ? '  (current)' : '')));
-    row.append(el('span', 'meta', age(session.age_seconds) + ' ago · ' + (session.model || '?')));
+    const label = session.name || session.first_prompt || session.id;
+    row.append(el('span', 'what' + (current ? ' current' : ''), label + (current ? '  (current)' : '')));
+    const meta = [age(session.age_seconds) + ' ago', session.model || '?'];
+    meta.push(session.submissions === 1 ? '1 prompt' : session.submissions + ' prompts');
+    if (session.name || session.first_prompt) meta.push(session.id);
+    row.append(el('span', 'meta', meta.join(' · ')));
     if (session.traceable) row.append(button('trace', () => openTrace(session.id)));
     if (session.resumable && !current) {
       row.append(button('resume', async (event) => {
