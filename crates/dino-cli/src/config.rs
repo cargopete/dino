@@ -343,6 +343,10 @@ fn qwen_config(
     config.api_key = match hosted {
         Some(hosted) => match hosted.key_variable {
             Some(variable) => Some(require_env(env, variable, profile, is_fallback)?),
+            // Moved off loopback, it is usually behind an authenticating proxy.
+            None if settings.api_base.is_some() => {
+                env("OLLAMA_API_KEY").filter(|key| !key.is_empty())
+            }
             None => None,
         },
         None => env("QWEN_API_KEY").filter(|key| !key.is_empty()),
@@ -581,6 +585,41 @@ mod tests {
         settings.api_base = Some("http://thinkpad.local:11434/v1".into());
         build_session_from(&settings, String::new(), Vec::new(), &leaky)
             .expect("the endpoint flag moves a keyless model");
+    }
+
+    #[test]
+    fn a_local_model_moved_elsewhere_takes_the_ollama_key_and_never_the_qwen_one() {
+        let profile = builtin_profile("qwen3.6-35b-a3b-abliterated").expect("built-in profile");
+        let both = |name: &str| match name {
+            "QWEN_API_KEY" => Some("sk-plan".to_owned()),
+            "OLLAMA_API_KEY" => Some("sk-pod".to_owned()),
+            _ => None,
+        };
+        let plan_only = |name: &str| (name == "QWEN_API_KEY").then(|| "sk-plan".to_owned());
+        let mut settings = settings(profile);
+        let key = |settings: &RunSettings, env: &dyn Fn(&str) -> Option<String>| {
+            let effort = effort_for(settings, &settings.profile, false).unwrap();
+            qwen_config(
+                settings,
+                &settings.profile,
+                effort,
+                String::new(),
+                Vec::new(),
+                env,
+            )
+            .unwrap()
+            .api_key
+        };
+
+        assert_eq!(
+            key(&settings, &both),
+            None,
+            "the loopback server takes no key"
+        );
+
+        settings.api_base = Some("https://pod-8080.proxy.runpod.net/ollama/v1".into());
+        assert_eq!(key(&settings, &both).as_deref(), Some("sk-pod"));
+        assert_eq!(key(&settings, &plan_only), None);
     }
 
     #[test]

@@ -546,7 +546,9 @@ coding target and never will be. `qwen3.6-35b-a3b-abliterated` is the same
 Qwen3.6 35B-A3B weights with their refusals ablated, as Ollama tags them. It
 speaks Ollama's dialect, where `reasoning_effort = "none"` is the one thinking
 switch honoured, and it defaults to Ollama on this machine, so it needs no key
-and no `--api-base` unless the server is elsewhere.
+and no `--api-base` unless the server is elsewhere. Pointed elsewhere, it sends
+`OLLAMA_API_KEY` if set, for an Ollama behind an authenticating proxy such as
+Open WebUI's `/ollama/v1`; `QWEN_API_KEY` never goes to it.
 
 `qwen3.7-plus` is Alibaba's hosted model, for anyone without a GPU. It speaks
 DashScope's dialect: thinking controls at the top level, no vLLM extensions,
