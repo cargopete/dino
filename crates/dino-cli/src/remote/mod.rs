@@ -754,6 +754,7 @@ mod tests {
             also_pending: vec!["other".to_owned()],
             program: Some("cargo".to_owned()),
             unconfined: None,
+            ..AskContext::default()
         };
         let asked = tokio::spawn(async move {
             approver
