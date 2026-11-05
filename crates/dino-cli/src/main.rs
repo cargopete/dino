@@ -2230,7 +2230,9 @@ mod tests {
     fn the_models_table_aligns_every_row_to_the_longest_key() {
         let profiles = builtin_profiles();
         assert!(
-            profiles.iter().any(|p| p.key == "qwen3.6-35b-a3b-abliterated"),
+            profiles
+                .iter()
+                .any(|p| p.key == "qwen3.6-35b-a3b-abliterated"),
             "the longest-keyed model is still in the table"
         );
         let longest = profiles.iter().map(|p| p.key.len()).max().unwrap();
