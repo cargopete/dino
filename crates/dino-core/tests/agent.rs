@@ -263,7 +263,7 @@ async fn a_call_carrying_an_elision_marker_is_refused_unrun() {
         "[dino elided 352 bytes of this earlier argument. The call ran as sent; read the \
          file if you need what it wrote.]"
     );
-    let mut agent = agent(vec![tool_turn(call), text_turn("I will read it")]).with_policy(AllowAll);
+    let mut agent = agent(vec![tool_turn(call), text_turn("I read it")]).with_policy(AllowAll);
 
     let result = agent.run("patch it").await.unwrap();
 
@@ -2061,4 +2061,40 @@ async fn cancelling_while_waiting_for_the_network_keeps_the_conversation() {
 
     assert_eq!(result.stop_reason, StopReason::Cancelled);
     assert_eq!(waits(&result.events), vec![60]);
+}
+
+#[tokio::test]
+async fn a_turn_that_promises_to_act_and_stops_is_sent_back_once() {
+    let mut agent = agent(vec![
+        text_turn("Let me start by understanding the current state of the project."),
+        text_turn("I'll read the code now."),
+        text_turn("I'll read the code now."),
+    ]);
+
+    let result = agent.run("carry on").await.unwrap();
+
+    assert_eq!(result.model_turns, 2);
+    assert_eq!(sent_back(&result), vec![1]);
+    let note = last_result(&agent.session().inputs[1]);
+    assert!(note.contains("Do it now"), "{note}");
+}
+
+#[test]
+fn only_a_promise_to_act_counts_as_one() {
+    for promise in [
+        "Let me start by understanding the current state of the project.",
+        "Done with a.\n\nNow I'll run the tests:",
+        "**I'm going to check the config next.**",
+        "Okay, let's look at main.rs",
+    ] {
+        assert!(dino_core::announces_action(promise), "{promise}");
+    }
+    for answer in [
+        "All tests pass. Let me know if you want anything else.",
+        "The bug is in parse(). Shall I fix it?",
+        "Fixed and verified.",
+        "I'll leave that to you, since it needs your password.\n\nEverything else is done.",
+    ] {
+        assert!(!dino_core::announces_action(answer), "{answer}");
+    }
 }
