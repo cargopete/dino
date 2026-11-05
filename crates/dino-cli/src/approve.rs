@@ -148,6 +148,14 @@ pub(crate) fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
             choice('n', "refuse", ApprovalReply::Reject(None)),
         ];
     }
+    // A guarded path asks every time, so no rule can be kept for it: offering
+    // one would be a promise this cannot honour.
+    if asking.context.guarded {
+        return vec![
+            choice('y', "once", ApprovalReply::Once),
+            choice('n', "refuse", ApprovalReply::Reject(None)),
+        ];
+    }
     let mut choices = vec![choice('y', "once", ApprovalReply::Once)];
     let others = asking.context.also_pending.len();
     if others > 0 {
@@ -637,6 +645,27 @@ mod tests {
         };
         assert_eq!(keys(ToolClass::Mutating), "yaren");
         assert_eq!(keys(ToolClass::Process), "yarsn");
+    }
+
+    #[test]
+    fn a_guarded_subject_offers_only_once_and_refuse() {
+        let context = AskContext {
+            guarded: true,
+            ..AskContext::default()
+        };
+        let asking = Asking {
+            summary: "",
+            tool: "schedule_create",
+            subject: ".dino/schedules/daily.json",
+            class: ToolClass::Mutating,
+            context: &context,
+            change: None,
+        };
+        let keys: String = choices(&asking, always_label(ToolClass::Mutating))
+            .iter()
+            .map(|choice| choice.key)
+            .collect();
+        assert_eq!(keys, "yn");
     }
 
     #[test]

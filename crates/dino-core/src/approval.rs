@@ -71,6 +71,9 @@ pub struct AskContext {
     /// The model's reason, when the call asks to run outside the sandbox. Only
     /// a one-off yes or a refusal is offered then.
     pub unconfined: Option<String>,
+    /// Set when the subject is a guarded path, which asks every time. No rule
+    /// can be kept for it, so only a one-off yes or a refusal is offered.
+    pub guarded: bool,
 }
 
 /// A frontend that can ask a person about a proposed action.
@@ -298,8 +301,12 @@ impl<A> Interactive<A> {
         if call.name == crate::memory::REMEMBER && action.class == ToolClass::Mutating {
             return Some(DecisionSource::Policy);
         }
+        // A guarded path asks every time, whatever rule was granted or saved:
+        // the schedule store lives under one, and the README promises every
+        // schedule change asks.
+        let guarded = action.class == ToolClass::Mutating && self.is_guarded(action);
         let key = action.rule_key(&call.name);
-        if self.saved.contains(&key) {
+        if !guarded && self.saved.contains(&key) {
             return Some(DecisionSource::SavedRule);
         }
         let by_program = program_of(call, action).map(|program| program_key(&call.name, &program));
@@ -309,12 +316,13 @@ impl<A> Interactive<A> {
                 .load(std::sync::atomic::Ordering::Relaxed);
         let by_edits = action.class == ToolClass::Mutating
             && self.all_edits.load(std::sync::atomic::Ordering::Relaxed)
-            && !self.is_guarded(action);
-        let by_turn = self
-            .turn_allowed
-            .lock()
-            .is_ok_and(|allowed| allowed.contains(&call.id));
-        if self.holds_rule(&key)
+            && !guarded;
+        let by_turn = !guarded
+            && self
+                .turn_allowed
+                .lock()
+                .is_ok_and(|allowed| allowed.contains(&call.id));
+        if (!guarded && self.holds_rule(&key))
             || by_program.is_some_and(|key| self.holds_rule(&key))
             || by_process
             || by_edits
@@ -368,6 +376,7 @@ where
             also_pending,
             program: program.clone(),
             unconfined: None,
+            guarded: action.class == ToolClass::Mutating && self.is_guarded(action),
         };
         let call = call.clone();
         let action = action.clone();
@@ -634,6 +643,45 @@ mod tests {
         assert!(!allowed(&policy, &edit("2", ".git/hooks/pre-commit")).await);
         assert!(!allowed(&policy, &exec("3", "cargo test")).await);
         assert_eq!(policy.approver.asked.lock().unwrap().len(), 2);
+    }
+
+    fn schedule_create(id: &str) -> (ToolCall, ToolAction) {
+        (
+            ToolCall {
+                id: id.into(),
+                name: "schedule_create".into(),
+                arguments: serde_json::Value::Null,
+            },
+            ToolAction::mutating(".dino/schedules/daily.json"),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_session_rule_never_covers_a_guarded_schedule_create() {
+        let policy = Interactive::new(Script::new(vec![
+            ApprovalReply::ForSession,
+            ApprovalReply::Once,
+        ]))
+        .guarding(vec![".dino/schedules".into()]);
+        // The person says "always for this file" on the first create.
+        assert!(allowed(&policy, &schedule_create("1")).await);
+        // The next create still asks, and is allowed only by the fresh answer:
+        // a guarded path is never covered by a remembered rule.
+        assert!(allowed(&policy, &schedule_create("2")).await);
+        let asked = policy.approver.asked.lock().unwrap();
+        assert_eq!(asked.len(), 2, "the second create asked again");
+        assert!(asked[0].1.guarded, "the ask carries the guarded flag");
+    }
+
+    #[tokio::test]
+    async fn a_saved_rule_never_covers_a_guarded_schedule_create() {
+        let mut policy = Interactive::new(Script::new(vec![ApprovalReply::Reject(None)]))
+            .guarding(vec![".dino/schedules".into()]);
+        let create = schedule_create("1");
+        // Even with the matching key already saved from a past session, it asks.
+        policy.saved.insert(create.1.rule_key(&create.0.name));
+        assert!(!allowed(&policy, &create).await);
+        assert_eq!(policy.approver.asked.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
