@@ -1072,15 +1072,24 @@ mod tests {
         let trajectory = builder.finish();
 
         let full = visible(&render("s1", &trajectory, 0, true, 100));
-        assert!(full.contains(&long), "the long line survives whole with --full");
-        assert!(full.contains("line 49"), "the 50th line is shown with --full");
+        assert!(
+            full.contains(&long),
+            "the long line survives whole with --full"
+        );
+        assert!(
+            full.contains("line 49"),
+            "the 50th line is shown with --full"
+        );
         assert!(
             !full.contains("more line(s)"),
             "nothing is hidden with --full: {full}"
         );
 
         let trimmed = visible(&render("s1", &trajectory, 0, false, 100));
-        assert!(!trimmed.contains(&long), "the long line is cut without --full");
+        assert!(
+            !trimmed.contains(&long),
+            "the long line is cut without --full"
+        );
         assert!(
             trimmed.contains("more line(s)"),
             "output is capped without --full"

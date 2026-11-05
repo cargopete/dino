@@ -243,7 +243,10 @@ fn prompts(path: &Path) -> (Option<String>, usize) {
         if let Some(text) = submitted(&line) {
             count += 1;
             if first.is_none() {
-                first = text.lines().next().map(|line| cut(line.trim(), PROMPT_COLUMNS));
+                first = text
+                    .lines()
+                    .next()
+                    .map(|line| cut(line.trim(), PROMPT_COLUMNS));
             }
         }
     }
@@ -366,7 +369,10 @@ mod tests {
         assert_eq!(listed[0].submissions, 2);
         assert!(listed[0].resumable && listed[0].traceable);
         assert_eq!(listed[1].model.as_deref(), Some("qwen"));
-        assert_eq!(listed[1].first_prompt.as_deref(), Some("index the contract"));
+        assert_eq!(
+            listed[1].first_prompt.as_deref(),
+            Some("index the contract")
+        );
         assert_eq!(listed[1].submissions, 1);
         assert!(!listed[1].resumable && listed[1].traceable);
         let _ = std::fs::remove_dir_all(&root);
