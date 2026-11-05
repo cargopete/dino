@@ -60,11 +60,7 @@ pub async fn serve(
     gate: Arc<Mutex<Gate>>,
     jobs: mpsc::Sender<Job>,
 ) -> Infallible {
-    let shared = Arc::new(Shared {
-        config,
-        gate,
-        jobs,
-    });
+    let shared = Arc::new(Shared { config, gate, jobs });
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
