@@ -971,8 +971,14 @@ async fn webhook(args: WebhookArgs) -> Result<ExitCode> {
         )
     );
     let config = Arc::new(config);
+    let gate = Arc::new(std::sync::Mutex::new(webhook::Gate::new(config.per_hour)));
     let (jobs, mut queue) = tokio::sync::mpsc::channel(WEBHOOK_QUEUE);
-    let server = tokio::spawn(webhook::serve(listener, Arc::clone(&config), jobs));
+    let server = tokio::spawn(webhook::serve(
+        listener,
+        Arc::clone(&config),
+        Arc::clone(&gate),
+        jobs,
+    ));
     loop {
         let job = tokio::select! {
             job = queue.recv() => job,
@@ -987,18 +993,25 @@ async fn webhook(args: WebhookArgs) -> Result<ExitCode> {
                 job.short_head(),
                 record.display()
             ),
-            Err(error) => eprintln!(
-                "{}",
-                style::paint(
-                    style::WARN,
-                    &format!(
-                        "dino: webhook: {}#{} at {}: {error:#}",
-                        job.repo,
-                        job.number,
-                        job.short_head()
+            Err(error) => {
+                // Forget it so a redelivery is taken; a failed fetch, outage or
+                // full disk should not wedge the head until restart.
+                gate.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .forget(&job);
+                eprintln!(
+                    "{}",
+                    style::paint(
+                        style::WARN,
+                        &format!(
+                            "dino: webhook: {}#{} at {}: {error:#}",
+                            job.repo,
+                            job.number,
+                            job.short_head()
+                        )
                     )
-                )
-            ),
+                );
+            }
         }
     }
     server.abort();

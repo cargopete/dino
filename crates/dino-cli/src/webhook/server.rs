@@ -47,21 +47,20 @@ const REFUSAL_DELAY: Duration = Duration::from_millis(250);
 
 struct Shared {
     config: Arc<Config>,
-    gate: Mutex<Gate>,
+    gate: Arc<Mutex<Gate>>,
     jobs: mpsc::Sender<Job>,
 }
 
 /// Answers deliveries on `listener`, passing each review it admits to `jobs`.
+/// The `gate` is shared with the review worker, which forgets a job whose
+/// review fails so a redelivery is taken.
 pub async fn serve(
     listener: TcpListener,
     config: Arc<Config>,
+    gate: Arc<Mutex<Gate>>,
     jobs: mpsc::Sender<Job>,
 ) -> Infallible {
-    let shared = Arc::new(Shared {
-        gate: Mutex::new(Gate::new(config.per_hour)),
-        config,
-        jobs,
-    });
+    let shared = Arc::new(Shared { config, gate, jobs });
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
@@ -161,7 +160,7 @@ async fn route(
             say(StatusCode::ACCEPTED, "queued")
         }
         Admit::Duplicate => say(StatusCode::OK, "ignored: delivered before"),
-        Admit::AlreadyReviewed => say(StatusCode::OK, "ignored: this head was reviewed"),
+        Admit::AlreadyReviewed => say(StatusCode::OK, "ignored: this head is already in hand"),
         Admit::Limited => say(
             StatusCode::TOO_MANY_REQUESTS,
             "over the hourly review limit; redeliver it later",
@@ -213,7 +212,8 @@ mod tests {
         )
         .unwrap();
         let (sender, jobs) = mpsc::channel(queue);
-        let task = tokio::spawn(serve(listener, Arc::new(config), sender));
+        let gate = Arc::new(Mutex::new(Gate::new(per_hour)));
+        let task = tokio::spawn(serve(listener, Arc::new(config), gate, sender));
         Running {
             address,
             jobs,
@@ -294,7 +294,7 @@ mod tests {
         let again = signed_delivery(&server, "pull_request", "d1", &body).await;
         assert_eq!(again, (200, "ignored: delivered before".to_owned()));
         let other = signed_delivery(&server, "pull_request", "d2", &body).await;
-        assert_eq!(other.1, "ignored: this head was reviewed");
+        assert_eq!(other.1, "ignored: this head is already in hand");
         assert!(server.jobs.try_recv().is_err());
     }
 
