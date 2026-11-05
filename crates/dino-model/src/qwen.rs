@@ -613,8 +613,9 @@ struct ChatMessage {
     // Every optional field is skipped when empty on the way out and defaulted on
     // the way back in. Without the defaults a message that legitimately has no
     // tool calls serialises fine and then fails to read, which is what the
-    // round-trip test caught.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // round-trip test caught. Content is the exception: it goes out as null,
+    // since Open WebUI's proxy rejects an assistant tool call without the field.
+    #[serde(default)]
     content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
@@ -1527,6 +1528,32 @@ mod tests {
         let assistant = &body["messages"][0];
         assert_eq!(assistant["role"], "assistant");
         assert!(assistant.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn a_tool_call_without_text_sends_content_as_null() {
+        let profile = crate::builtin_profile("qwen3.6-35b-a3b-abliterated").unwrap();
+        let session =
+            QwenSession::new(QwenConfig::new("http://127.0.0.1:11434/v1", profile)).unwrap();
+        session.history.lock().unwrap().push(ChatMessage {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![ChatToolCall {
+                id: "c1".into(),
+                r#type: CallKind::Function,
+                function: ChatFunction {
+                    name: "read".into(),
+                    arguments: r#"{"path":"a.rs"}"#.into(),
+                },
+            }],
+            tool_call_id: None,
+            images: Vec::new(),
+        });
+        let body = session.request_body(&[]).unwrap();
+
+        let assistant = body["messages"][0].as_object().unwrap();
+        assert_eq!(assistant.get("content"), Some(&Value::Null));
     }
 
     #[test]
