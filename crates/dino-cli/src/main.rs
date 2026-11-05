@@ -198,6 +198,10 @@ struct PromptArgs {
     /// Containment to describe, so a printed prompt matches a real run.
     #[arg(long, value_enum, default_value_t = SandboxMode::Workspace)]
     sandbox: SandboxMode,
+    /// The tools offered, as a run's: standard, minimal or review. Defaults to
+    /// the user file, else standard.
+    #[arg(long, value_enum)]
+    preset: Option<preset::Preset>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -326,31 +330,58 @@ fn list_models(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&builtin_profiles())?);
         return Ok(());
     }
-    for profile in builtin_profiles() {
+    print!("{}", models_table(&builtin_profiles()));
+    Ok(())
+}
+
+/// The model table, its key and provider columns sized to the widest row so
+/// every line stays in step, however long a model key runs.
+fn models_table(profiles: &[dino_protocol::ModelProfile]) -> String {
+    use std::fmt::Write as _;
+    let key_width = profiles.iter().map(|p| p.key.len()).max().unwrap_or(0);
+    let provider_width = profiles
+        .iter()
+        .map(|p| format!("{:?}", p.provider).len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for profile in profiles {
         let note = match profile.status {
             ProfileStatus::Supported => "",
             ProfileStatus::Development => "  (development)",
         };
-        println!(
-            "{:<24} {:<12} {}{note}",
+        let _ = writeln!(
+            out,
+            "{:<key_width$} {:<provider_width$} {}{note}",
             profile.key,
             format!("{:?}", profile.provider).to_lowercase(),
-            profile.provider_model
+            profile.provider_model,
         );
     }
-    Ok(())
+    out
 }
 
 fn print_prompt(args: &PromptArgs) -> Result<()> {
-    let profile = config::resolve_profile(args.model.as_deref())?;
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
+    // Resolve the model and preset the layered way a session does, so the
+    // printed prompt is the one a run would send, not a default.
+    let common = CommonArgs {
+        model: args.model.clone(),
+        workspace: args.workspace.clone(),
+        preset: args.preset,
+        ..CommonArgs::default()
+    };
+    let resolved = resolve(&common, &workspace)?;
+    let profile = config::resolve_profile(resolved.model.0.as_deref())?;
+    let preset = resolved.preset.0;
     let sandbox = config::build_sandbox(args.sandbox, &workspace, &[])?;
     let tools = tool_set(
         &workspace,
         sandbox,
         &interactive_options(&workspace, Vec::new(), None, Vec::new(), None),
         Vec::new(),
-    )?;
+    )?
+    .keeping(|name| preset.offers(name));
     let context = prompt_context(
         &workspace,
         ApprovalMode::Interactive,
@@ -360,8 +391,9 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     );
     let prompt = system_prompt(&context);
     eprintln!(
-        "model {} · {} bytes of system prompt",
+        "model {} · preset {} · {} bytes of system prompt",
         profile.key,
+        preset.name(),
         prompt.len()
     );
     println!("{prompt}");
@@ -2169,6 +2201,51 @@ mod tests {
             Some(preset::Preset::Minimal)
         );
         assert!(parsed(&["--preset", "huge"]).is_err());
+    }
+
+    #[test]
+    fn prompt_resolves_the_user_file_model_and_preset() {
+        // `dino prompt` with no flags resolves model and preset the layered way
+        // a run does, so the user file's choices reach the printed prompt. The
+        // model layer sits below `DINO_MODEL`, which the test environment leaves
+        // unset; the preset layer has no environment override.
+        let layers = Layers {
+            user: crate::settings::FileConfig {
+                model: Some("claude-haiku-5.5".to_owned()),
+                preset: Some(preset::Preset::Minimal),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = resolve_layers(&CommonArgs::default(), layers).unwrap();
+        assert_eq!(resolved.preset.0, preset::Preset::Minimal);
+        assert_eq!(resolved.preset.1, Source::UserFile);
+        if std::env::var_os("DINO_MODEL").is_none() {
+            assert_eq!(resolved.model.0.as_deref(), Some("claude-haiku-5.5"));
+            assert_eq!(resolved.model.1, Source::UserFile);
+        }
+    }
+
+    #[test]
+    fn the_models_table_aligns_every_row_to_the_longest_key() {
+        let profiles = builtin_profiles();
+        assert!(
+            profiles.iter().any(|p| p.key == "qwen3.6-35b-a3b-abliterated"),
+            "the longest-keyed model is still in the table"
+        );
+        let longest = profiles.iter().map(|p| p.key.len()).max().unwrap();
+        let provider_column = |line: &str| {
+            let gap = line.find(' ').expect("a key and a provider");
+            gap + line[gap..].chars().take_while(|c| *c == ' ').count()
+        };
+        let table = models_table(&profiles);
+        let starts: Vec<usize> = table.lines().map(provider_column).collect();
+        let first = starts[0];
+        assert!(
+            starts.iter().all(|&start| start == first),
+            "every provider column starts at the same offset"
+        );
+        assert!(first > longest, "the key column clears the longest key");
     }
 
     #[test]
