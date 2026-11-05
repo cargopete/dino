@@ -523,3 +523,27 @@ async fn an_unconfined_run_leaves_the_sandbox() {
     assert!(outside.exists());
     let _ = fs::remove_file(&outside);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_child_has_a_session_of_its_own_and_no_terminal() {
+    let fixture = Fixture::new();
+    let (mut command, _) = dino_exec::process::prepare(
+        "sh",
+        &[
+            "-c".into(),
+            "exec 3</dev/tty 2>/dev/null || { sleep 0.2; exit 7; }".into(),
+        ],
+        &fixture.path,
+        &Unconfined,
+        &[],
+    )
+    .unwrap();
+    let mut child = command.spawn().unwrap();
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap());
+    let session = nix::unistd::getsid(Some(pid));
+
+    let status = child.wait().await.unwrap();
+    assert_eq!(session, Ok(pid));
+    assert_eq!(status.code(), Some(7), "the child could open a terminal");
+}

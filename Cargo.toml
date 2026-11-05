@@ -47,7 +47,7 @@ jiff = { version = "0.2.38", features = ["serde"] }
 regex = "1.13.1"
 terminal_size = "0.4.4"
 crossterm = { version = "0.29.0", default-features = false, features = ["events"] }
-nix = { version = "0.30.1", default-features = false, features = ["signal"] }
+nix = { version = "0.30.1", default-features = false, features = ["process", "signal"] }
 landlock = "0.4.4"
 pretty_assertions = "1.4.1"
 semver = "1.0.28"
@@ -63,7 +63,7 @@ tokio-util = { version = "0.7.17", default-features = false }
 tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
