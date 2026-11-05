@@ -822,8 +822,6 @@ where
         // Snapshot first. `discover_limits` overwrites the profile with what the
         // server serves, and the warning has to be able to say which number it used.
         let documented = self.session.profile().context_window_tokens;
-        self.session.discover_limits().await?;
-        let budget = budget_window(documented, self.session.profile().context_window_tokens);
         let mut warned = false;
         self.begin_run();
 
@@ -832,6 +830,9 @@ where
                 return Ok(cancelled(events, text, model_turn.saturating_sub(1)));
             }
             self.turns_started = model_turn;
+            // Asked every turn: Ollama can only say once the first turn has loaded the model.
+            self.session.discover_limits().await?;
+            let budget = budget_window(documented, self.session.profile().context_window_tokens);
 
             let (calls, stop_reason) = match self
                 .stream_turn(

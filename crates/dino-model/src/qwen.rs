@@ -225,6 +225,37 @@ impl QwenSession {
         self.config.explicit_cache && self.config.profile.chat_server == ChatServer::DashScope
     }
 
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Option<T> {
+        let mut request = self.client.get(url).timeout(Duration::from_secs(10));
+        if let Some(api_key) = &self.config.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        request.send().await.ok()?.json().await.ok()
+    }
+
+    async fn served_max_model_len(&self) -> Option<u32> {
+        let base = self.config.api_base.trim_end_matches('/');
+        let models: ModelList = self.get_json(format!("{base}/models")).await?;
+        models
+            .data
+            .into_iter()
+            .find(|model| model.id == self.config.profile.provider_model)
+            .and_then(|model| model.max_model_len)
+    }
+
+    /// The window Ollama loaded the model with. Its Chat Completions surface
+    /// never says, and past it Ollama drops the oldest prompt tokens in silence.
+    async fn ollama_loaded_window(&self) -> Option<u32> {
+        let base = self.config.api_base.trim_end_matches('/');
+        let root = base.strip_suffix("/v1").unwrap_or(base);
+        let loaded: OllamaLoaded = self.get_json(format!("{root}/api/ps")).await?;
+        loaded
+            .models
+            .into_iter()
+            .find(|model| model.name == self.config.profile.provider_model)
+            .and_then(|model| model.context_length)
+    }
+
     fn request_body(
         &self,
         pending: &[ChatMessage],
@@ -456,27 +487,19 @@ impl ModelSession for QwenSession {
 
     fn discover_limits(&mut self) -> ModelFuture<'_, ()> {
         Box::pin(async move {
-            if std::mem::replace(&mut self.limits_discovered, true) {
+            if self.limits_discovered {
                 return Ok(());
             }
             // The profile records the model's native window, but a server is
             // often started with less, and only the server knows how much.
-            let url = format!("{}/models", self.config.api_base.trim_end_matches('/'));
-            let mut request = self.client.get(url).timeout(Duration::from_secs(10));
-            if let Some(api_key) = &self.config.api_key {
-                request = request.bearer_auth(api_key);
-            }
-            let Ok(response) = request.send().await else {
-                return Ok(());
+            let ollama = self.config.profile.chat_server == ChatServer::Ollama;
+            let served = if ollama {
+                self.ollama_loaded_window().await
+            } else {
+                self.served_max_model_len().await
             };
-            let Ok(models) = response.json::<ModelList>().await else {
-                return Ok(());
-            };
-            let served = models
-                .data
-                .into_iter()
-                .find(|model| model.id == self.config.profile.provider_model)
-                .and_then(|model| model.max_model_len);
+            // Ollama lists a model only once it is loaded, so ask again next turn.
+            self.limits_discovered = !ollama || served.is_some();
             if let Some(served) = served {
                 let window = &mut self.config.profile.context_window_tokens;
                 *window = Some(window.map_or(served, |native| native.min(served)));
@@ -913,6 +936,17 @@ struct ModelList {
 struct ServedModel {
     id: String,
     max_model_len: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaLoaded {
+    models: Vec<LoadedModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoadedModel {
+    name: String,
+    context_length: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2091,6 +2125,39 @@ mod tests {
                 .unwrap()
                 .starts_with("GET /v1/models HTTP/1.1\r\n")
         );
+    }
+
+    #[tokio::test]
+    async fn ollama_narrows_the_window_to_the_one_it_loaded() {
+        let (base, server) = serve_json_once(
+            r#"{"models":[{"name":"other","context_length":4096},{"name":"huihui_ai/qwen3.6-abliterated:35b","context_length":32768}]}"#,
+        )
+        .await;
+        let profile = crate::builtin_profile("qwen3.6-35b-a3b-abliterated").unwrap();
+        let mut session = QwenSession::new(QwenConfig::new(base, profile)).unwrap();
+
+        session.discover_limits().await.unwrap();
+
+        assert_eq!(session.profile().context_window_tokens, Some(32_768));
+        assert!(session.limits_discovered);
+        assert!(
+            server
+                .await
+                .unwrap()
+                .starts_with("GET /api/ps HTTP/1.1\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn ollama_is_asked_again_until_the_model_is_loaded() {
+        let (base, _server) = serve_json_once(r#"{"models":[]}"#).await;
+        let profile = crate::builtin_profile("qwen3.6-35b-a3b-abliterated").unwrap();
+        let mut session = QwenSession::new(QwenConfig::new(base, profile)).unwrap();
+
+        session.discover_limits().await.unwrap();
+
+        assert_eq!(session.profile().context_window_tokens, Some(262_144));
+        assert!(!session.limits_discovered);
     }
 
     #[tokio::test]

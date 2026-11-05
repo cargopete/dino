@@ -47,7 +47,8 @@ pub trait ModelSession: Send {
 
     /// Replaces what the profile can only assume with what the server reports,
     /// such as the context length a self-hosted model was started with. Best
-    /// effort: a server that says nothing leaves the profile as it was.
+    /// effort: a server that says nothing leaves the profile as it was. Called
+    /// before every model turn, so an adapter that already knows returns at once.
     ///
     /// # Errors
     ///
@@ -752,15 +753,14 @@ fn qwen_3_6_35b_a3b() -> ModelProfile {
 /// The same weights with their refusals ablated, under Ollama's tag. **Measured
 /// 2026-11-04** on Ollama 0.32.15: tool calls arrive structured, reasoning in
 /// `reasoning`, 30 tok/s decode on an RTX 2000 Ada with most of the model in
-/// RAM. The window is whatever `OLLAMA_CONTEXT_LENGTH` says, and Ollama
-/// truncates past it in silence, so none is claimed here.
+/// RAM. The window listed is the native one; the session narrows it to the
+/// `OLLAMA_CONTEXT_LENGTH` the model was loaded with, read from `/api/ps`.
 fn qwen_3_6_35b_a3b_abliterated() -> ModelProfile {
     let mut profile = qwen_3_6(
         "qwen3.6-35b-a3b-abliterated",
         "huihui_ai/qwen3.6-abliterated:35b",
         "Qwen3.6 35B-A3B abliterated (Ollama)",
     );
-    profile.context_window_tokens = None;
     profile.tool_call_parser = None;
     profile.reasoning_parser = None;
     profile.chat_server = ChatServer::Ollama;
