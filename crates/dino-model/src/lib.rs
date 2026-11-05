@@ -278,6 +278,11 @@ pub enum ModelError {
     /// authorised. Retrying will not help; another provider might.
     #[error("the provider refused the account: {0}")]
     Account(String),
+    /// Nothing accepted the connection at a local endpoint: the server is not
+    /// running, and no amount of waiting starts it. Fails at once rather than
+    /// as a network outage.
+    #[error("{0}")]
+    Offline(String),
 }
 
 impl ModelError {
@@ -293,7 +298,9 @@ impl ModelError {
                 matches!(status, 408 | 429 | 500..=599)
                     || (*status == 404 && body.trim().is_empty())
             }
-            Self::Protocol(_) | Self::Configuration(_) | Self::Account(_) => false,
+            Self::Protocol(_) | Self::Configuration(_) | Self::Account(_) | Self::Offline(_) => {
+                false
+            }
         }
     }
 
@@ -349,8 +356,29 @@ pub(crate) async fn http_error(provider: &'static str, response: reqwest::Respon
 pub(crate) fn send_error(error: &reqwest::Error) -> ModelError {
     if error.is_builder() {
         ModelError::Configuration(format!("request could not be built: {error}"))
+    } else if error.is_connect() && error.url().is_some_and(is_loopback) {
+        // A refused connection to loopback is not a network outage: the server
+        // is not running. Waiting will not start it, so fail fast.
+        ModelError::Offline(format!(
+            "nothing is listening at {}: the local model server is not running",
+            error.url().map_or("the endpoint", reqwest::Url::as_str),
+        ))
     } else {
         ModelError::Transport(error.to_string())
+    }
+}
+
+/// Whether a URL points at this machine's loopback interface.
+fn is_loopback(url: &reqwest::Url) -> bool {
+    match url.host_str() {
+        Some(host) => {
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+        None => false,
     }
 }
 
@@ -1091,6 +1119,9 @@ mod tests {
         let account = ModelError::Account("Qwen endpoint returned 401 Unauthorized: x".into());
         assert!(!account.is_transient());
         assert!(!account.rejects_request());
+        let offline = ModelError::Offline("nothing is listening".into());
+        assert!(!offline.is_transient());
+        assert!(!offline.rejects_request());
         assert_eq!(
             http(400, "tool_use ids must be unique").to_string(),
             "Anthropic returned 400 Bad Request: tool_use ids must be unique"

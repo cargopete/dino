@@ -206,16 +206,21 @@ impl JsonlSessionLog {
                 ))
             })?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| {
-                SinkError::new(format!(
-                    "cannot open session log {}: {error}",
-                    path.display()
-                ))
-            })?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        // The log holds the same tool results as the state: file contents,
+        // search hits, compiler output. Owner-readable only, as the README says.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).map_err(|error| {
+            SinkError::new(format!(
+                "cannot open session log {}: {error}",
+                path.display()
+            ))
+        })?;
         Self::begin(Box::new(BufWriter::new(file)), path, session)
     }
 
@@ -305,4 +310,34 @@ fn unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    fn meta() -> SessionMeta {
+        SessionMeta {
+            session_id: SessionId::generate(),
+            dino_version: "0".into(),
+            model_key: "test".into(),
+            provider: ProviderKind::Anthropic,
+            workspace_root: "/".into(),
+            approval_mode: "ask".into(),
+            sandbox: "none".into(),
+            max_model_turns: 1,
+        }
+    }
+
+    #[test]
+    fn a_fresh_log_is_owner_readable_only() {
+        let path = std::env::temp_dir().join(format!("dino-log-perm-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _log = JsonlSessionLog::create(&path, meta()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{:o}", mode & 0o777);
+        let _ = std::fs::remove_file(&path);
+    }
 }
