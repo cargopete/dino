@@ -218,6 +218,24 @@ CI and evals.
   the session to another workspace, but only one listed under `workspaces` in
   the user file or recently used. RFC-0020; the page has not been run in a
   browser.
+- **A session in a worktree of its own.** `dino --worktree [name]`, or `dino
+  run --worktree`, makes `.dino/worktrees/<name>` in the main checkout on a new
+  branch `dino/<name>` (`branch_prefix` in the user file changes the prefix)
+  from the commit the session started at, and runs there, in the same
+  subdirectory if it started in one; without a name it gets a generated one.
+  The banner says which worktree. `/worktree [name]` makes one and moves the
+  session into it, as a page's workspace move does: a new conversation there,
+  with the old one resumable where it was. When Dino exits, a worktree with no
+  change and no commit is removed with its branch, and its `.dino` with it, the
+  session log included; one with either is kept and its branch printed. A
+  worktree left by a killed process stays until `git worktree remove`. Cargo
+  builds in the main checkout's `target`, or in `CARGO_TARGET_DIR` if Dino's
+  own environment sets one, so a new worktree does not rebuild everything; two
+  sessions building at once wait on Cargo's lock. Approval rules and memory are
+  the main checkout's, for any linked worktree, since both are one repository.
+  `dino serve` and `dino review` refuse the flag. The worktree bookkeeping is
+  tested against real repositories; an interactive session in one, and
+  `/worktree`, have not been driven against a model.
 - **Reviews from GitHub.** `dino webhook` takes signed `pull_request`
   deliveries and reviews a pull request when it is marked ready, or opened
   ready, in a checkout of its head beside a clone you name, read-only, with the
@@ -472,6 +490,16 @@ it restored. That undoes a write rather than preventing it: until the process
 exits, what it wrote is there. `dino` says which kind of protection is in force
 when a session starts.
 
+A linked worktree's `.git` is a file naming a directory in the main checkout's
+`.git`, where its index, objects and refs live. In one, processes may also write
+that directory and the repository's `objects`, `refs` and `logs`, which is what
+`git add` and `git commit` need, but not its `config` or `hooks`. Seatbelt also
+refuses the worktree's `config.worktree`; Landlock cannot carve it out, so on
+Linux a process may write it, and git reads it only where the repository has
+`extensions.worktreeConfig` set. The Linux side of this has not been run. A
+`.git` file is believed only when the directory it names names the checkout
+back, so a checkout cannot grant itself somewhere else.
+
 Some paths are protected from processes whatever the configuration says:
 `.git/hooks`, `.git/config`, `.cargo/config.toml`, `rust-toolchain.toml`,
 `.envrc` and `.vscode`. Other programs run those later, outside the sandbox, on
@@ -689,7 +717,7 @@ Inside a session: `/help`, `/status`, `/log`, `/exit` (or a bare `exit` or
 new conversation, since history does not move between models; add `--default`
 to start later sessions on it too), `/resume [id]` to list or continue a
 saved one, `/diff` for the working tree, `/schedules` for the workspace's
-schedules and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
+schedules, `/worktree [name]` to carry on in a git worktree of its own and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost
 when it ends, along with today's total in UTC, which every session appends to
 `$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).
@@ -774,8 +802,8 @@ interactive session in colour opens with a small dinosaur; `greeting = false`
 in a config file turns it off, and `dino palette` shows both in your terminal.
 
 **What lands on disk.** `.dino/` in the workspace holds the session log, the
-resumable state, the input history, and any schedules with their delivery
-records. The log records what you typed; the state
+resumable state, the input history, any schedules with their delivery
+records, and the worktrees `--worktree` made. The log records what you typed; the state
 holds the conversation, and the conversation holds your source, because tool
 results are file contents. It is git-ignored and mode 0600, and it is worth
 knowing it is there.

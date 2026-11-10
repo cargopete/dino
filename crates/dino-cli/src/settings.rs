@@ -94,6 +94,9 @@ pub struct FileConfig {
     /// The plugin index `dino plugin search` and `install <name>` read: a path
     /// or an http(s) URL. User file only.
     pub plugin_index: Option<String>,
+    /// What `--worktree` puts before a worktree's name to name its branch.
+    /// `dino/` unless set. Read from the user file.
+    pub branch_prefix: Option<String>,
     /// A command whose first line of output replaces the status row, given the
     /// session as JSON. User file only: it runs outside the sandbox.
     pub status_line: Option<Vec<String>>,

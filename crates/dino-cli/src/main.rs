@@ -27,6 +27,7 @@ mod summary;
 mod task;
 mod trace;
 mod webhook;
+mod worktree;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -183,6 +184,10 @@ struct CommonArgs {
     /// in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
+    /// Start in a new git worktree under .dino/worktrees, on a branch of its
+    /// own, removed at the end if nothing changed. Named, or a generated name.
+    #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "resume")]
+    worktree: Option<String>,
     /// The tools offered and the limits started under: standard, minimal or
     /// review. Default standard.
     #[arg(long, value_enum)]
@@ -621,7 +626,10 @@ fn skills(workspace: &Path) -> Vec<dino_core::skills::Skill> {
 /// The user's memory file and this workspace's, beside the user config.
 fn memory_files(workspace: &Path) -> Option<dino_core::memory::MemoryFiles> {
     let dir = settings::user_dir()?.join("memory");
-    let name = workspace.display().to_string().replace('/', "%");
+    let name = worktree::home(workspace)
+        .display()
+        .to_string()
+        .replace('/', "%");
     Some(dino_core::memory::MemoryFiles {
         user: dir.join("user.md"),
         workspace: dir.join(format!("{name}.md")),
@@ -902,9 +910,88 @@ fn prepare(
     })
 }
 
-async fn session(common: CommonArgs) -> Result<ExitCode> {
-    drive(common, None).await?;
-    Ok(ExitCode::SUCCESS)
+async fn session(mut common: CommonArgs) -> Result<ExitCode> {
+    // Each is tidied as Dino exits, so a session can still go back to the last.
+    let mut made: Vec<worktree::Worktree> = enter_worktree(&mut common)?.into_iter().collect();
+    // Where to go back to when a session will not start in a new worktree.
+    let mut previous: Option<CommonArgs> = None;
+    let ended = loop {
+        match drive(common.clone(), None).await {
+            Ok(Next::Worktree(next)) => {
+                announce_worktree(&next);
+                let mut moved = common.clone();
+                moved.workspace = Some(next.workspace.clone());
+                moved.resume = None;
+                moved.log = None;
+                made.push(next);
+                previous = Some(std::mem::replace(&mut common, moved));
+            }
+            Ok(_) => break Ok(ExitCode::SUCCESS),
+            Err(error) => match previous.take() {
+                Some(back) => {
+                    eprintln!("dino: {error:#}");
+                    common = back;
+                }
+                None => break Err(error),
+            },
+        }
+    };
+    made.iter().for_each(leave);
+    ended
+}
+
+/// Makes the worktree `--worktree` asks for and points the session at it.
+fn enter_worktree(common: &mut CommonArgs) -> Result<Option<worktree::Worktree>> {
+    let Some(name) = common.worktree.take() else {
+        return Ok(None);
+    };
+    let workspace = config::resolve_workspace(common.workspace.as_deref())?;
+    let made = worktree::Worktree::create(&workspace, &name)?;
+    announce_worktree(&made);
+    common.workspace = Some(made.workspace.clone());
+    Ok(Some(made))
+}
+
+fn announce_worktree(worktree: &worktree::Worktree) {
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            &format!(
+                "worktree {} on branch {}",
+                render::short_path(&worktree.root, Path::new("")),
+                worktree.branch
+            )
+        )
+    );
+}
+
+/// Removes a worktree nothing changed in, and says where one that did is kept.
+fn leave(worktree: &worktree::Worktree) {
+    let path = render::short_path(&worktree.root, Path::new(""));
+    match worktree.finish() {
+        Ok(worktree::Ended::Removed) => eprintln!(
+            "{}",
+            style::paint(
+                style::FAINT,
+                &format!("  removed worktree {path}: nothing changed")
+            )
+        ),
+        Ok(worktree::Ended::Kept) => eprintln!(
+            "{}",
+            style::paint(
+                style::PURPLE,
+                &format!("  kept worktree {path} on branch {}", worktree.branch)
+            )
+        ),
+        Err(error) => eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                &format!("  could not tidy worktree {path}: {error:#}")
+            )
+        ),
+    }
 }
 
 /// What `dino serve` adds to a session: the hub the pages talk to, and what
@@ -917,6 +1004,9 @@ struct Remote {
 /// Listens for pages, then runs a session for them until the person at the
 /// terminal interrupts it.
 async fn serve(args: ServeArgs) -> Result<ExitCode> {
+    if args.common.worktree.is_some() {
+        bail!("--worktree is for `dino` and `dino run`, not `dino serve`");
+    }
     let address = remote::bind_address(args.bind, args.port)?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -954,7 +1044,7 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
     let mut previous: Option<CommonArgs> = None;
     let ended = loop {
         match drive(common.clone(), Some(&mut remote)).await {
-            Ok(Some(workspace)) => {
+            Ok(Next::Workspace(workspace)) => {
                 hub.notice(&format!("moving to {}", workspace.display()));
                 let mut next = common.clone();
                 next.workspace = Some(workspace);
@@ -962,7 +1052,7 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
                 next.log = None;
                 previous = Some(std::mem::replace(&mut common, next));
             }
-            Ok(None) => break Ok(ExitCode::SUCCESS),
+            Ok(_) => break Ok(ExitCode::SUCCESS),
             Err(error) => match previous.take() {
                 Some(back) => {
                     eprintln!("dino: {error:#}");
@@ -1084,12 +1174,41 @@ fn schedules(common: &CommonArgs) -> Result<(session::Due, Box<dyn ToolRuntime>)
     Ok((due, Box::new(tools)))
 }
 
-/// Runs one session, and returns the workspace a page asked to move to, if one
-/// did. A move starts a new session there, with that workspace's schedules.
-async fn drive(
-    common: CommonArgs,
-    remote: Option<&mut Remote>,
-) -> Result<Option<std::path::PathBuf>> {
+/// Opens a fresh conversation on another model, for `/model` and `/clear`.
+fn model_factory(prepared: &Prepared) -> session::SessionFactory<Box<dyn ModelSession>> {
+    let base = prepared.settings.clone();
+    let context = prepared.context.clone();
+    let definitions = prepared.definitions.clone();
+    let spending = prepared.spending.clone();
+    Box::new(move |key| {
+        let mut settings = base.clone();
+        settings.profile = config::resolve_profile(Some(key))?;
+        // Switching to a model without the configured effort is not a refusal.
+        settings.reasoning_effort = settings
+            .reasoning_effort
+            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
+        let name = settings.profile.display_name.clone();
+        // The prompt names the model, so a new conversation gets its own.
+        let mut context = context.clone();
+        context.model = Some(key.to_owned());
+        let prompt = system_prompt(&context);
+        let model = metered(&settings, prompt, definitions.clone(), &spending)?;
+        Ok((model, name))
+    })
+}
+
+/// Where a session went when it ended.
+enum Next {
+    Leave,
+    /// A page picked another workspace.
+    Workspace(PathBuf),
+    /// `/worktree` made one.
+    Worktree(worktree::Worktree),
+}
+
+/// Runs one session, and returns where it is to move, if anywhere. A move
+/// starts a new session there, with that workspace's schedules.
+async fn drive(common: CommonArgs, remote: Option<&mut Remote>) -> Result<Next> {
     let hub = remote.as_ref().map(|remote| Arc::clone(&remote.hub));
     let (due, tools) = schedules(&common)?;
     let prepared = prepare(&common, false, vec![tools], hub.as_ref(), false)?;
@@ -1111,25 +1230,7 @@ async fn drive(
             )
         );
     }
-    let base = prepared.settings.clone();
-    let context = prepared.context.clone();
-    let definitions = prepared.definitions.clone();
-    let spending = prepared.spending.clone();
-    let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
-        let mut settings = base.clone();
-        settings.profile = config::resolve_profile(Some(key))?;
-        // Switching to a model without the configured effort is not a refusal.
-        settings.reasoning_effort = settings
-            .reasoning_effort
-            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
-        let name = settings.profile.display_name.clone();
-        // The prompt names the model, so a new conversation gets its own.
-        let mut context = context.clone();
-        context.model = Some(key.to_owned());
-        let prompt = system_prompt(&context);
-        let model = metered(&settings, prompt, definitions.clone(), &spending)?;
-        Ok((model, name))
-    });
+    let factory = model_factory(&prepared);
     let inbox = hub
         .as_ref()
         .map_or_else(dino_core::Inbox::default, |hub| hub.inbox());
@@ -1175,13 +1276,18 @@ async fn drive(
         ),
         remote: hub,
         schedules,
+        worktree: worktree::describe(&prepared.settings.workspace),
+        moving_to: None,
     };
     session.note_conversation();
     let moving = if let Some(remote) = remote {
-        session.serve(&mut remote.requests).await?
+        session
+            .serve(&mut remote.requests)
+            .await?
+            .map_or(Next::Leave, Next::Workspace)
     } else {
         session.run().await?;
-        None
+        session.moving_to.take().map_or(Next::Leave, Next::Worktree)
     };
     eprintln!(
         "{}",
@@ -1199,6 +1305,9 @@ const MAX_REVIEW_DIFF_BYTES: usize = 200 * 1_024;
 /// Runs a read-only review. The diff is taken here and handed over, so the
 /// model needs no process and the session can refuse every change.
 async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
+    if args.common.worktree.is_some() {
+        bail!("--worktree is for `dino` and `dino run`, not `dino review`");
+    }
     let workspace = config::resolve_workspace(args.common.workspace.as_deref())?;
     let git = |arguments: &[&str]| -> Result<String> {
         let output = std::process::Command::new("git")
@@ -1372,7 +1481,14 @@ async fn conclude_run(
     (result, stopped)
 }
 
-async fn run(args: RunArgs) -> Result<ExitCode> {
+async fn run(mut args: RunArgs) -> Result<ExitCode> {
+    let worktree = enter_worktree(&mut args.common)?;
+    let ran = run_in(args).await;
+    worktree.iter().for_each(leave);
+    ran
+}
+
+async fn run_in(args: RunArgs) -> Result<ExitCode> {
     let workspace = config::resolve_workspace(args.common.workspace.as_deref())?;
     let progress = args.handover.then(|| {
         dino_core::progress::Progress::new(
@@ -2038,6 +2154,13 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
         ("verify", verify_row(resolved.verify.as_ref())),
         ("plugins", plugins_row()),
         (
+            "branch prefix",
+            resolved.layers.user.branch_prefix.clone().map_or_else(
+                || "dino/  (default)".to_owned(),
+                |prefix| format!("{prefix}  (user file)"),
+            ),
+        ),
+        (
             "task budget",
             format!(
                 "{}  (when a message names none)",
@@ -2141,9 +2264,12 @@ fn interactive_policy<A: Approver + 'static>(
         interactive
     };
     match settings::user_dir() {
-        Some(dir) => {
-            Box::new(interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)))
-        }
+        Some(dir) => Box::new(
+            interactive.with_store(approve::FileRuleStore::for_workspace(
+                &dir,
+                &worktree::home(workspace),
+            )),
+        ),
         None => Box::new(interactive),
     }
 }
