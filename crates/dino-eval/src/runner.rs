@@ -97,6 +97,10 @@ pub struct Outcome {
     /// a run that never did is still told apart from one that was not watched.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub early_stop: bool,
+    /// Whether `code` was asked for. It is offered only where rust-analyzer
+    /// runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub code: bool,
 }
 
 /// Why a run was stopped before it finished.
@@ -135,6 +139,8 @@ pub struct Variant {
     pub review_model: Option<String>,
     /// Stop the run as soon as it changes a protected path. Issue #140.
     pub early_stop: bool,
+    /// Offer the `code` tool, where rust-analyzer can be run. Issue #297.
+    pub code: bool,
 }
 
 /// What shapes the tools a session gets.
@@ -153,6 +159,9 @@ pub struct ToolOptions {
     pub github: bool,
     /// Offer `web_fetch`. Off for evals, for the same reason.
     pub web: bool,
+    /// Offer `code` where rust-analyzer can be run. Off for evals unless a
+    /// variant asks, until the corpus has measured it.
+    pub code: bool,
     /// Skills offered through the `skill` tool. None in evals.
     pub skills: Vec<dino_core::skills::Skill>,
     /// Where `remember` writes. None in evals, which keep no memory.
@@ -518,6 +527,7 @@ pub(crate) async fn conclude(
         cost: None,
         review_model: variant.review_model.clone(),
         early_stop: variant.early_stop,
+        code: variant.code,
     })
 }
 
@@ -591,6 +601,7 @@ pub(crate) fn wall_outcome(
         cost: None,
         review_model: variant.review_model.clone(),
         early_stop: variant.early_stop,
+        code: variant.code,
     })
 }
 
@@ -672,6 +683,7 @@ fn eval_session(
                 max_diagnostics: variant.max_diagnostics,
                 github: false,
                 web: false,
+                code: variant.code,
                 hooks: Vec::new(),
                 memory: None,
                 skills: Vec::new(),
@@ -1144,6 +1156,16 @@ pub fn session_tools_with(
         runtimes.push(Box::new(
             GithubTool::new(workspace, GithubLimits::default()).map_err(setup)?,
         ));
+    }
+    if options.code
+        && let Some(code) = dino_exec::CodeTool::new(
+            workspace,
+            dino_exec::CodeLimits::default(),
+            Arc::clone(&sandbox),
+        )
+        .map_err(setup)?
+    {
+        runtimes.push(Box::new(code));
     }
     // Offered before a Cargo.toml exists too: a new project needs it to fetch.
     // The gate is deliberately absent. RFC-0011 section 13.

@@ -56,7 +56,7 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Fourteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Fifteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
@@ -84,7 +84,24 @@ CI and evals.
   and CI (`pr_checks`, `checks_wait` until no check is pending, `run_list`,
   `run_view` with `log_failed`) through a fixed set of read-only `gh` commands,
   run by `dino` rather than by a confined process, and is offered only where
-  `gh` is installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
+  `gh` is installed. `code` asks rust-analyzer for a definition, the
+  references, the hover text (type, signature and docs), the implementations,
+  or the workspace's items matching a name, given a path, a line and the
+  identifier on it. It answers as `search` does, `path:line:col` with the
+  line's text, at most 100 locations and the total, and unlike `search` it
+  follows re-exports and trait methods and tells two items of one name apart.
+  One rust-analyzer is started on the first call, inside the sandbox with
+  `checkOnSave` off, and killed when the session ends; a call waits up to 90
+  seconds for it to finish indexing and says so when it had not. Its own file
+  watcher reports an edit some time after it lands, so each call first sends it
+  every Rust file changed since the last. It is classed read-only, but loading
+  a workspace runs its build scripts and procedural macros, confined as
+  `cargo check` is. It is offered only where rust-analyzer runs: through rustup
+  under the channel a `rust-toolchain.toml` pins, or the first on PATH that
+  answers `--version`, since the rustup proxy is on PATH whether or not the
+  component is installed. It has run under Seatbelt, not yet under Landlock.
+  Evals leave it out unless asked for with `dino eval --code`, and whether it
+  saves reads on the hard corpus has not been measured. `web_fetch` reads one URL as text, HTML rendered, and asks per
   host, because a URL can carry workspace text out; a redirect to another host
   is refused rather than followed past that approval.
 - **Approval enforced below the model.** Every call is classified read-only,
@@ -113,7 +130,7 @@ CI and evals.
   what the agent did an hour ago and where selection and copying still work.
   Each call is one line, `✓ $ cargo test · 7 passed`: an icon for its kind, a
   mark for running, done, failed or refused (by you, or blocked by policy), and
-  a run of reads, lists and searches folded into one `explored` line. The line
+  a run of reads, lists, searches and `code` lookups folded into one `explored` line. The line
   is redrawn in place only while it is still the last one written. Beneath it,
   while a turn runs, one status row gives the model, the context used, the
   submission's tokens with the cached share, the session's cost at list price,
@@ -367,7 +384,9 @@ CI and evals.
   how the log's sufficiency gets tested. A case may carry hidden tests, laid
   over the workspace only after the run, and protected paths the model may not
   change. `--without <tool>` hides a tool as completely as if it had never been
-  built, which is how several of the findings below were obtained.
+  built, which is how several of the findings below were obtained. `--code`
+  adds the `code` tool, which evals otherwise leave out, and records that it
+  was asked for.
   `scripts/bench.sh` runs cases through `dino` on a self-hosted model and
   through Claude Code as a baseline, and `scripts/analyse-bench.py` mines the
   logs (see [evals/README.md](evals/README.md)).

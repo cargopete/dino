@@ -587,6 +587,7 @@ fn interactive_options(
         skills: skills(workspace),
         github: dino_exec::GithubTool::available(),
         web: true,
+        code: true,
         skip_edit_check: false,
         escalation: true,
         verify,
