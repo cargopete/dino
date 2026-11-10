@@ -1,7 +1,9 @@
-//! Commands from the user's config that run after a file tool edits a file.
+//! Commands from the user's config that run around edits, calls, submissions
+//! and the end of a task.
 //!
 //! They come from the user file only, never a project file, because a hook is
-//! code execution. Each runs in the session's sandbox, like `exec`.
+//! code execution. Each runs in the session's sandbox, like `exec`, except the
+//! pings, which have to reach the network.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,6 +17,9 @@ use std::time::Duration;
 use dino_core::ToolError;
 use dino_core::ToolFuture;
 use dino_core::ToolRuntime;
+use dino_core::approval::ApprovalPolicy;
+use dino_core::approval::DecisionFuture;
+use dino_protocol::ApprovalDecision;
 use dino_protocol::ToolAction;
 use dino_protocol::ToolCall;
 use dino_protocol::ToolDefinition;
@@ -39,6 +44,11 @@ pub struct Hook {
     pub command: Vec<String>,
     /// Run only for files with this extension, such as `rs`.
     pub extension: Option<String>,
+    /// For `before_call` and `after_call`: run only for calls of this tool.
+    pub tool: Option<String>,
+    /// For `before_call` and `after_call`: run only for an `exec` call of this
+    /// program, or a `shell` line whose first word it is.
+    pub program: Option<String>,
 }
 
 impl Hook {
@@ -49,6 +59,339 @@ impl Hook {
                 .is_some_and(|found| found == extension)
         })
     }
+
+    fn applies_to_call(&self, call: &ToolCall) -> bool {
+        self.tool.as_deref().is_none_or(|tool| tool == call.name)
+            && self
+                .program
+                .as_deref()
+                .is_none_or(|program| program_of(call).as_deref() == Some(program))
+    }
+
+    /// What a failure names: the program alone, as an argument may be a token.
+    fn program(&self) -> &str {
+        self.command.first().map_or("", String::as_str)
+    }
+
+    /// Runs this hook in `sandbox` with `input` on its standard input.
+    async fn feed(
+        &self,
+        root: &Path,
+        sandbox: &dyn Sandbox,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<process::Execution, ToolError> {
+        let Some((program, arguments)) = self.command.split_first() else {
+            return Err(ToolError::new("the hook has no command"));
+        };
+        process::run_fed(
+            program,
+            arguments,
+            root,
+            sandbox,
+            64 * 1_024,
+            timeout,
+            &[],
+            Some(input.to_string().as_bytes()),
+        )
+        .await
+    }
+}
+
+/// The program an `exec` call runs, or the first word of a `shell` line, by
+/// file name, so `/bin/rm` and `rm` are one.
+fn program_of(call: &ToolCall) -> Option<String> {
+    let word = match call.name.as_str() {
+        "exec" => call.arguments.get("program")?.as_str()?,
+        "shell" => call
+            .arguments
+            .get("command")?
+            .as_str()?
+            .split_whitespace()
+            .next()?,
+        _ => return None,
+    };
+    Path::new(word)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// How long a call or submission hook may take.
+const CALL_HOOK_SECONDS: u64 = 60;
+/// The exit code that refuses, as Claude Code's hooks have it.
+const REFUSE: i32 = 2;
+
+/// An approval policy with the `before_call` hooks in front of it.
+///
+/// A hook runs once the call is classified and before anyone is asked, and can
+/// only refuse: exit 0 passes the call on to the policy it wraps, exit 2 refuses
+/// it with the hook's output as the reason, and anything else refuses too,
+/// since a gate that failed has not said yes.
+pub struct BeforeCall<P> {
+    inner: P,
+    hooks: Vec<Hook>,
+    root: PathBuf,
+    sandbox: Arc<dyn Sandbox>,
+}
+
+impl<P> BeforeCall<P> {
+    #[must_use]
+    pub fn new(
+        inner: P,
+        hooks: Vec<Hook>,
+        root: impl Into<PathBuf>,
+        sandbox: Arc<dyn Sandbox>,
+    ) -> Self {
+        Self {
+            inner,
+            hooks,
+            root: root.into(),
+            sandbox,
+        }
+    }
+
+    async fn refusal(&self, call: &ToolCall, action: &ToolAction) -> Option<String> {
+        let input = json!({"call": call, "action": action});
+        for hook in self.hooks.iter().filter(|hook| hook.applies_to_call(call)) {
+            let program = hook.program();
+            let execution = match hook
+                .feed(
+                    &self.root,
+                    self.sandbox.as_ref(),
+                    &input,
+                    Duration::from_secs(CALL_HOOK_SECONDS),
+                )
+                .await
+            {
+                Ok(execution) => execution,
+                Err(error) => return Some(format!("the before_call hook `{program}`: {error}")),
+            };
+            match execution.exit_code {
+                Some(0) => {}
+                Some(REFUSE) => {
+                    let said = execution.stdout.trim();
+                    return Some(if said.is_empty() {
+                        format!("the before_call hook `{program}` refused this call")
+                    } else {
+                        capped(said, MAX_HOOK_OUTPUT_BYTES)
+                    });
+                }
+                _ if execution.timed_out => {
+                    return Some(format!("the before_call hook `{program}` timed out"));
+                }
+                code => {
+                    return Some(format!("the before_call hook `{program}` {}", exited(code)));
+                }
+            }
+        }
+        None
+    }
+}
+
+impl<P: ApprovalPolicy> ApprovalPolicy for BeforeCall<P> {
+    fn decide(&self, call: &ToolCall, action: &ToolAction) -> DecisionFuture<'_> {
+        let call = call.clone();
+        let action = action.clone();
+        Box::pin(async move {
+            if let Some(reason) = self.refusal(&call, &action).await {
+                return ApprovalDecision::denied(reason);
+            }
+            self.inner.decide(&call, &action).await
+        })
+    }
+
+    fn begin_turn(&self, calls: &[(ToolCall, ToolAction)]) {
+        self.inner.begin_turn(calls);
+    }
+}
+
+/// Wraps a tool runtime and runs the `after_call` hooks after each of its calls,
+/// with the call and its result on standard input. What a hook prints is added
+/// to the result under `after_call`, and a failing hook is named there.
+pub struct AfterCall {
+    inner: Box<dyn ToolRuntime>,
+    hooks: Vec<Hook>,
+    root: PathBuf,
+    sandbox: Arc<dyn Sandbox>,
+}
+
+impl AfterCall {
+    #[must_use]
+    pub fn new(
+        inner: Box<dyn ToolRuntime>,
+        hooks: Vec<Hook>,
+        root: impl Into<PathBuf>,
+        sandbox: Arc<dyn Sandbox>,
+    ) -> Self {
+        Self {
+            inner,
+            hooks,
+            root: root.into(),
+            sandbox,
+        }
+    }
+}
+
+impl ToolRuntime for AfterCall {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        self.inner.definitions()
+    }
+
+    fn classify(&self, call: &ToolCall) -> Result<ToolAction, ToolError> {
+        self.inner.classify(call)
+    }
+
+    fn execute(&self, call: &ToolCall) -> ToolFuture<'_> {
+        let call = call.clone();
+        Box::pin(async move {
+            let output = self
+                .inner
+                .execute(&call)
+                .await
+                .unwrap_or_else(|error| ToolOutput::error(error.to_string()));
+            let input = json!({
+                "call": call,
+                "result": {"content": output.content, "is_error": output.is_error},
+            });
+            let mut said = Vec::new();
+            for hook in self.hooks.iter().filter(|hook| hook.applies_to_call(&call)) {
+                let program = hook.program();
+                match hook
+                    .feed(
+                        &self.root,
+                        self.sandbox.as_ref(),
+                        &input,
+                        Duration::from_secs(CALL_HOOK_SECONDS),
+                    )
+                    .await
+                {
+                    Ok(execution) if execution.exit_code == Some(0) => {
+                        let text = execution.stdout.trim();
+                        if !text.is_empty() {
+                            said.push(json!({
+                                "program": program,
+                                "output": capped(text, MAX_HOOK_OUTPUT_BYTES),
+                            }));
+                        }
+                    }
+                    Ok(execution) => said.push(json!({
+                        "program": program,
+                        "exit_code": execution.exit_code,
+                        "timed_out": execution.timed_out,
+                    })),
+                    Err(error) => {
+                        said.push(json!({"program": program, "error": error.to_string()}));
+                    }
+                }
+            }
+            if said.is_empty() {
+                return Ok(output);
+            }
+            Ok(with_field(&output, "after_call", Value::Array(said)))
+        })
+    }
+
+    fn history_lost(&self) {
+        self.inner.history_lost();
+    }
+
+    fn begin_turn(&self, calls: &[ToolCall]) {
+        self.inner.begin_turn(calls);
+    }
+
+    fn rewritten(&self, path: &str) {
+        self.inner.rewritten(path);
+    }
+}
+
+/// The `prompt_submit` hooks, run on each message a person sends.
+#[derive(Clone)]
+pub struct PromptHooks {
+    hooks: Vec<Hook>,
+    root: PathBuf,
+    sandbox: Arc<dyn Sandbox>,
+}
+
+/// What the `prompt_submit` hooks made of one message.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Submitted {
+    /// What each hook that passed printed, under its command, for the model.
+    pub context: Vec<(String, String)>,
+    /// Set when a hook exited 2: what it printed, for the person.
+    pub refused: Option<String>,
+    /// Hooks that failed otherwise, by program. The message still goes.
+    pub problems: Vec<String>,
+}
+
+impl PromptHooks {
+    #[must_use]
+    pub fn new(hooks: Vec<Hook>, root: impl Into<PathBuf>, sandbox: Arc<dyn Sandbox>) -> Self {
+        Self {
+            hooks,
+            root: root.into(),
+            sandbox,
+        }
+    }
+
+    /// Runs each hook with `{"message": ...}` on standard input, stopping at
+    /// the first that refuses.
+    pub async fn submitted(&self, message: &str) -> Submitted {
+        let mut submitted = Submitted::default();
+        let input = json!({"message": message});
+        for hook in &self.hooks {
+            let program = hook.program();
+            match hook
+                .feed(
+                    &self.root,
+                    self.sandbox.as_ref(),
+                    &input,
+                    Duration::from_secs(CALL_HOOK_SECONDS),
+                )
+                .await
+            {
+                Ok(execution) if execution.exit_code == Some(0) => {
+                    let text = execution.stdout.trim();
+                    if !text.is_empty() {
+                        submitted
+                            .context
+                            .push((hook.command.join(" "), capped(text, 4 * 1_024)));
+                    }
+                }
+                Ok(execution) if execution.exit_code == Some(REFUSE) => {
+                    let said = execution.stdout.trim();
+                    submitted.refused = Some(if said.is_empty() {
+                        format!("the prompt_submit hook `{program}` refused the message")
+                    } else {
+                        capped(said, MAX_HOOK_OUTPUT_BYTES)
+                    });
+                    return submitted;
+                }
+                Ok(execution) if execution.timed_out => submitted
+                    .problems
+                    .push(format!("the prompt_submit hook `{program}` timed out")),
+                Ok(execution) => submitted.problems.push(format!(
+                    "the prompt_submit hook `{program}` {}",
+                    exited(execution.exit_code)
+                )),
+                Err(error) => submitted
+                    .problems
+                    .push(format!("the prompt_submit hook `{program}`: {error}")),
+            }
+        }
+        submitted
+    }
+}
+
+/// `message` with what the hooks added after it, each under its command.
+#[must_use]
+pub fn with_context(message: String, context: &[(String, String)]) -> String {
+    context.iter().fold(message, |message, (command, text)| {
+        format!("{message}\n\nprompt_submit: {command}\n{text}")
+    })
+}
+
+fn exited(code: Option<i32>) -> String {
+    code.map_or_else(|| "was killed".to_owned(), |code| format!("exited {code}"))
 }
 
 /// Wraps the file tools and runs `hooks` after each edit they make.
@@ -310,12 +653,16 @@ impl AfterEdit {
 }
 
 fn with_report(output: &ToolOutput, report: Value) -> ToolOutput {
+    with_field(output, "hooks", report)
+}
+
+fn with_field(output: &ToolOutput, key: &str, report: Value) -> ToolOutput {
     let content = match serde_json::from_str::<Value>(&output.content) {
         Ok(Value::Object(mut fields)) => {
-            fields.insert("hooks".into(), report);
+            fields.insert(key.into(), report);
             Value::Object(fields).to_string()
         }
-        _ => format!("{}\n\nhooks: {report}", output.content),
+        _ => format!("{}\n\n{key}: {report}", output.content),
     };
     ToolOutput {
         content,
@@ -398,14 +745,59 @@ pub async fn run_task_end_hooks(
     root: &std::path::Path,
     ended: &TaskEnd,
 ) -> Vec<String> {
+    ping(
+        "task_end",
+        hooks,
+        root,
+        &[("status", &ended.status), ("message", &ended.message)],
+    )
+    .await
+}
+
+/// Runs each awaiting-approval hook once, with the tool asked about in `{tool}`
+/// and a sentence in `{message}`, and in `DINO_TOOL` and `DINO_MESSAGE`.
+/// Outside the sandbox, and reported, as a task-end hook is.
+pub async fn run_awaiting_hooks(
+    hooks: &[Hook],
+    root: &std::path::Path,
+    tool: &str,
+    message: &str,
+) -> Vec<String> {
+    ping(
+        "awaiting_approval",
+        hooks,
+        root,
+        &[("tool", tool), ("message", message)],
+    )
+    .await
+}
+
+/// Runs each hook unconfined, with `{name}` in its arguments and `DINO_NAME`
+/// in its environment for each of `values`, and says which failed.
+async fn ping(
+    event: &str,
+    hooks: &[Hook],
+    root: &std::path::Path,
+    values: &[(&str, &str)],
+) -> Vec<String> {
+    let names: Vec<String> = values
+        .iter()
+        .map(|(name, _)| format!("DINO_{}", name.to_uppercase()))
+        .collect();
+    let environment: Vec<(&str, &str)> = names
+        .iter()
+        .zip(values)
+        .map(|(name, (_, value))| (name.as_str(), *value))
+        .collect();
     let mut problems = Vec::new();
     for hook in hooks {
         let argv: Vec<String> = hook
             .command
             .iter()
             .map(|part| {
-                part.replace("{status}", &ended.status)
-                    .replace("{message}", &ended.message)
+                values.iter().fold(part.clone(), |part, (name, value)| {
+                    part.replace(&format!("{{{name}}}"), value)
+                })
             })
             .collect();
         let Some((program, arguments)) = argv.split_first() else {
@@ -418,26 +810,21 @@ pub async fn run_task_end_hooks(
             &dino_sandbox::Unconfined,
             4 * 1_024,
             Duration::from_secs(30),
-            &[
-                ("DINO_STATUS", ended.status.as_str()),
-                ("DINO_MESSAGE", ended.message.as_str()),
-            ],
+            &environment,
         )
         .await;
         match outcome {
             Ok(execution) if execution.exit_code == Some(0) => {}
             Ok(execution) if execution.timed_out => {
-                problems.push(format!("the task_end hook `{program}` timed out"));
+                problems.push(format!("the {event} hook `{program}` timed out"));
             }
             Ok(execution) => problems.push(format!(
-                "the task_end hook `{program}` {}",
-                execution
-                    .exit_code
-                    .map_or_else(|| "was killed".to_owned(), |code| format!("exited {code}"))
+                "the {event} hook `{program}` {}",
+                exited(execution.exit_code)
             )),
-            Err(error) => problems.push(format!(
-                "the task_end hook `{program}` did not run: {error}"
-            )),
+            Err(error) => {
+                problems.push(format!("the {event} hook `{program}` did not run: {error}"));
+            }
         }
     }
     problems

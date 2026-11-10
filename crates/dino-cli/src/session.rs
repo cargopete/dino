@@ -456,6 +456,7 @@ pub struct Session<S> {
     pub log_path: String,
     /// Pinged when a task ends, if it ran long enough.
     pub end_hooks: Vec<crate::task::EndHook>,
+    pub prompt_hooks: dino_exec::PromptHooks,
     pub history_path: std::path::PathBuf,
     /// Where this conversation is persisted after each submission.
     pub state_path: std::path::PathBuf,
@@ -519,6 +520,7 @@ where
                 println!("{prompt}{queued}");
                 queued
             } else {
+                crate::statusline::at_prompt(&self.status).await;
                 // Blocking on purpose. Nothing else is running while a person is
                 // typing, and moving the editor across a spawn_blocking boundary
                 // every keystroke would buy nothing.
@@ -947,6 +949,17 @@ where
 
     /// Runs one submission, cancellable on its own for its own lifetime.
     async fn submit(&mut self, text: String) {
+        let added = match crate::hooks::submitted(&self.prompt_hooks, &text).await {
+            Ok(added) => added,
+            Err(reason) => {
+                let reason = format!("not sent: {reason}");
+                println!("{}", style::paint(style::WARN, &format!("  {reason}")));
+                if let Some(hub) = &self.remote {
+                    hub.notice(&reason);
+                }
+                return;
+            }
+        };
         // Before attachments, which are file contents and name no limits.
         let (limits, named) = self.meter.begin_task(&text);
         if named {
@@ -965,7 +978,7 @@ where
         } else {
             text
         };
-        let text = self.with_attachments(text).await;
+        let text = dino_exec::with_context(self.with_attachments(text).await, &added);
         // The person's words first, so the transcript shows what they typed.
         let text = match self.carried.take() {
             Some(summary) => format!("{text}{}{summary}", crate::recall::SUMMARY_DIVIDER),

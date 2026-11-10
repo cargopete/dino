@@ -168,6 +168,8 @@ pub struct ToolOptions {
     pub memory: Option<dino_core::memory::MemoryFiles>,
     /// After-edit hooks around the file tools. None in evals.
     pub hooks: Vec<dino_exec::Hook>,
+    /// After-call hooks around every tool. None in evals.
+    pub after_call: Vec<dino_exec::Hook>,
     /// Leave out the `cargo check` that follows a turn's Rust edits.
     pub skip_edit_check: bool,
     /// Let `exec` and `shell` ask to run one command outside the sandbox, for
@@ -685,6 +687,7 @@ fn eval_session(
                 web: false,
                 code: variant.code,
                 hooks: Vec::new(),
+                after_call: Vec::new(),
                 memory: None,
                 skills: Vec::new(),
                 skip_edit_check: false,
@@ -1175,6 +1178,7 @@ pub fn session_tools_with(
             .unwrap_or(CargoLimits::default().max_diagnostics),
         ..CargoLimits::default()
     };
+    let wrapping = Arc::clone(&sandbox);
     runtimes.push(Box::new(
         CargoTool::new(workspace, limits, sandbox).map_err(setup)?,
     ));
@@ -1182,7 +1186,30 @@ pub fn session_tools_with(
         runtimes.push(Box::new(dino_core::todo::TodoTool));
     }
     runtimes.extend(extra);
-    ToolSet::new(runtimes).map_err(setup)
+    ToolSet::new(after_calls(runtimes, options, workspace, &wrapping)).map_err(setup)
+}
+
+/// Each runtime, wrapped in the user's after-call hooks when there are any.
+fn after_calls(
+    runtimes: Vec<Box<dyn ToolRuntime>>,
+    options: &ToolOptions,
+    workspace: &Path,
+    sandbox: &Arc<dyn Sandbox>,
+) -> Vec<Box<dyn ToolRuntime>> {
+    if options.after_call.is_empty() {
+        return runtimes;
+    }
+    runtimes
+        .into_iter()
+        .map(|runtime| -> Box<dyn ToolRuntime> {
+            Box::new(dino_exec::AfterCall::new(
+                runtime,
+                options.after_call.clone(),
+                workspace,
+                Arc::clone(sandbox),
+            ))
+        })
+        .collect()
 }
 
 /// The file tools, wrapped in the user's after-edit hooks when there are any.
