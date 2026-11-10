@@ -177,6 +177,27 @@ CI and evals.
   harness builds: the task, the record, why the last session ended, `git status`
   and the current `cargo check`. RFC-0018; not yet measured against the plain
   loop.
+- **Subagents.** `agent` hands a bounded job to a fresh session in the same
+  process and returns only its final message, with a line giving its turns,
+  tokens, cost at list price, model and session, so a sweep of forty files
+  costs the conversation one result rather than forty reads. The child gets the
+  system prompt and instructions, none of the conversation, and no `agent` tool
+  of its own. Its `preset` is `review` unless the call says otherwise: reading
+  only, and read-only whatever the session allows. A `minimal` or `standard`
+  child is asked about first, as an edit is, and runs under the session's
+  approval mode and plan mode with none of its session grants, so it asks again
+  for what it needs, one child at a time. `explore_model` in the user file puts
+  a `review` child on a cheaper model, since #200 found reading held up on one;
+  a call may name another model only from those configured (`model`,
+  `explore_model`, `review_model`, `fallback`). Turns default to the preset's
+  and never pass the session's. Consecutive `agent` calls in one response run
+  at once, and the status row gives each child's turn. A child starts no MCP
+  server, has no schedules or finish checks, and is priced into the session's
+  meter and budget. Its log is `.dino/sessions/<parent>/<parent>.<n>.jsonl`,
+  named in the result; `dino trace` shows `↳ dino trace <id>` under the call,
+  and that id traces the child. Only `standard` offers the tool, and evals never
+  do. Tested against scripted models only: not yet driven against a live one,
+  and not measured on the corpus.
 - **Driving a session from another device.** `dino serve` runs a session with
   no terminal and serves a small page: watch the stream, send a prompt, stop the
   run and answer approvals from a phone. It listens only on loopback or a

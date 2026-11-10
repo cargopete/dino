@@ -21,6 +21,7 @@ mod settings;
 mod spend;
 mod spinner;
 mod style;
+mod subagent;
 mod summary;
 mod task;
 mod trace;
@@ -500,6 +501,23 @@ fn session_tool_set(
     .map(|tools| tools.keeping(|name| preset.offers(name)))
 }
 
+/// A subagent's tools: the built-in ones under its settings, no MCP server
+/// and nothing a mode of the parent's added.
+fn child_tools(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Result<ToolSet> {
+    tool_set(
+        &settings.workspace,
+        Arc::clone(sandbox),
+        &interactive_options(
+            &settings.workspace,
+            settings.protected.clone(),
+            settings.max_diagnostics,
+            settings.hooks.clone(),
+            settings.verify.clone(),
+        ),
+        Vec::new(),
+    )
+}
+
 /// Starts each configured MCP server and lists its tools. A server that fails
 /// is named and left out; the session goes on without it.
 fn connect_mcp(
@@ -773,7 +791,7 @@ fn shown(
 fn prepare(
     common: &CommonArgs,
     unattended: bool,
-    extra: Vec<Box<dyn ToolRuntime>>,
+    mut extra: Vec<Box<dyn ToolRuntime>>,
     remote: Option<&Arc<remote::Hub>>,
     json: bool,
 ) -> Result<Prepared> {
@@ -787,6 +805,8 @@ fn prepare(
         config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
     let sandbox_label = sandbox.label();
     warn_unprotected(&settings, sandbox.as_ref());
+    let (delegate, kit) = subagent::Delegate::new();
+    extra.push(Box::new(delegate));
     let tools = session_tool_set(&settings, &sandbox, extra)?;
     let definitions = tools.definitions();
     let mut context = prompt_context(
@@ -847,6 +867,7 @@ fn prepare(
         status.answering(&settings.profile);
         status.meter = Some(Arc::clone(&spending.meter));
     }
+    let hold = renderer.hold_handle();
     let shown = shown(json, renderer, meta)?;
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
@@ -864,7 +885,7 @@ fn prepare(
     .with_sink(((shown, log), remote::Tap(remote.map(Arc::clone))));
     let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
 
-    Ok(Prepared {
+    let prepared = Prepared {
         agent,
         state_path,
         usage,
@@ -880,7 +901,37 @@ fn prepare(
         status,
         sandbox,
         spending,
-    })
+    };
+    let _ = kit.set(subagent_kit(&prepared, remote, hold));
+    Ok(prepared)
+}
+
+/// What the session's `agent` tool builds children from.
+fn subagent_kit(
+    prepared: &Prepared,
+    remote: Option<&Arc<remote::Hub>>,
+    hold: spinner::Hold,
+) -> subagent::Kit {
+    let spending = prepared.spending.clone();
+    let sandbox = Arc::clone(&prepared.sandbox);
+    subagent::Kit {
+        settings: prepared.settings.clone(),
+        session_id: prepared.session_id.clone(),
+        sandbox: Arc::clone(&prepared.sandbox),
+        context: prepared.context.clone(),
+        status: Arc::clone(&prepared.status),
+        open: Box::new(move |settings, prompt, definitions| {
+            metered(settings, prompt, definitions, &spending)
+        }),
+        tools: Box::new(move |settings| child_tools(settings, &sandbox)),
+        policy: child_policy(
+            &prepared.sandbox_label,
+            &prepared.settings.workspace,
+            remote,
+            hold,
+            Arc::clone(&prepared.planning),
+        ),
+    }
 }
 
 async fn session(common: CommonArgs) -> Result<ExitCode> {
@@ -1506,6 +1557,7 @@ struct Resolved {
     keep_going: (bool, Source),
     fallback: Vec<String>,
     review_model: Option<String>,
+    explore_model: Option<String>,
     budget: Option<spend::Budget>,
     hooks: (Vec<dino_exec::Hook>, Source),
     end_turn_hooks: Vec<dino_exec::Hook>,
@@ -1687,6 +1739,7 @@ fn resolve_layers(args: &CommonArgs, layers: Layers) -> Result<Resolved> {
         review_model: layers
             .pick_user_only(|file| file.review_model.clone())
             .map(|(key, _)| key),
+        explore_model: layers.user.explore_model.clone(),
         budget: layers.budget()?,
         thinking_budget: layers
             .pick(|file| file.thinking_budget.map(Some))
@@ -1988,6 +2041,13 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
                 .clone()
                 .map_or_else(|| "off".to_owned(), |key| format!("{key}  (user file)")),
         ),
+        (
+            "explore model",
+            resolved.explore_model.clone().map_or_else(
+                || "the session's".to_owned(),
+                |key| format!("{key}  (user file)"),
+            ),
+        ),
         ("budget", budget_row(resolved.budget)),
         ("verify", verify_row(resolved.verify.as_ref())),
         ("plugins", plugins_row()),
@@ -2032,6 +2092,11 @@ fn run_settings(
         .as_deref()
         .map(|key| config::resolve_profile(Some(key)))
         .transpose()?;
+    let explore = resolved
+        .explore_model
+        .as_deref()
+        .map(|key| config::resolve_profile(Some(key)))
+        .transpose()?;
     let mode = resolved.approvals.0;
     let log_path = match &args.log {
         Some(path) => path.clone(),
@@ -2066,6 +2131,7 @@ fn run_settings(
         fallback,
         budget: resolved.budget,
         review,
+        explore,
         preset: resolved.preset.0,
     })
 }
@@ -2122,6 +2188,49 @@ fn policy(
         ApprovalMode::ReadOnly => Box::new(ReadOnly),
         ApprovalMode::AllowAll => Box::new(AllowAll),
     }
+}
+
+/// A subagent's approvals: the parent's mode and plan gate, none of the
+/// parent's session grants, and a person asked about one child at a time.
+fn child_policy(
+    sandbox: &str,
+    workspace: &Path,
+    remote: Option<&Arc<remote::Hub>>,
+    hold: spinner::Hold,
+    planning: Arc<std::sync::atomic::AtomicBool>,
+) -> subagent::OpenPolicy {
+    let (sandbox, workspace) = (sandbox.to_owned(), workspace.to_path_buf());
+    let remote = remote.map(Arc::clone);
+    let turn = Arc::new(tokio::sync::Mutex::new(()));
+    Box::new(move |mode| {
+        let (hold, turn) = (hold.clone(), Arc::clone(&turn));
+        let accept_edits = mode == ApprovalMode::AcceptEdits;
+        let inner = match (mode, &remote) {
+            (ApprovalMode::Interactive | ApprovalMode::AcceptEdits, Some(hub)) => {
+                interactive_policy(
+                    subagent::Asking::new(remote::RemoteApprover::new(Arc::clone(hub)), hold, turn),
+                    &workspace,
+                    accept_edits,
+                )
+            }
+            (ApprovalMode::Interactive | ApprovalMode::AcceptEdits, None) => interactive_policy(
+                subagent::Asking::new(
+                    TerminalApprover::new(sandbox.as_str(), workspace.as_path()),
+                    hold,
+                    turn,
+                ),
+                &workspace,
+                accept_edits,
+            ),
+            (ApprovalMode::ReadOnly | ApprovalMode::AllowAll, _) => {
+                policy(mode, &sandbox, &workspace, None)
+            }
+        };
+        Box::new(dino_core::approval::PlanGate::new(
+            inner,
+            Arc::clone(&planning),
+        ))
+    })
 }
 
 fn request_text(argument: Option<String>) -> Result<String> {

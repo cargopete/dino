@@ -89,7 +89,13 @@ pub(crate) fn locate(requested: Option<&str>, workspace: &Path) -> Result<(Strin
                 .unwrap_or(id);
             return Ok((stem.to_owned(), given.to_path_buf()));
         }
-        let path = directory.join(format!("{id}.jsonl"));
+        let mut path = directory.join(format!("{id}.jsonl"));
+        // A subagent's log sits in a directory named after its parent.
+        if !path.is_file()
+            && let Some((parent, _)) = id.rsplit_once('.')
+        {
+            path = directory.join(parent).join(format!("{id}.jsonl"));
+        }
         if !path.is_file() {
             bail!("no session {id:?} in {}", workspace.display());
         }
@@ -203,6 +209,22 @@ mod tests {
             model_turn: 1,
             event: ModelEvent::TextDelta { text: text.into() },
         }
+    }
+
+    #[test]
+    fn a_subagent_is_found_beside_its_parent() {
+        let workspace =
+            std::env::temp_dir().join(format!("dino-locate-child-{}", std::process::id()));
+        let parent = workspace.join(".dino/sessions/p1");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::write(parent.join("p1.2.jsonl"), "").unwrap();
+
+        let (id, path) = locate(Some("p1.2"), &workspace).unwrap();
+
+        assert_eq!(id, "p1.2");
+        assert_eq!(path, parent.join("p1.2.jsonl"));
+        assert!(locate(Some("p1.3"), &workspace).is_err());
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
