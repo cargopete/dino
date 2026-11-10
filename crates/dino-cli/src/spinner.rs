@@ -47,6 +47,8 @@ pub struct Status {
     pub queued: usize,
     /// Each subagent running, by session id, at its current turn.
     pub agents: std::collections::BTreeMap<String, u32>,
+    /// The person's own command, whose line stands in for the row.
+    pub line: Option<Arc<crate::statusline::StatusLine>>,
 }
 
 impl Status {
@@ -187,21 +189,32 @@ fn tick(state: &Mutex<Option<Ticking>>, status: &Mutex<Status>) {
         let Some(ticking) = guard.as_mut() else {
             continue;
         };
-        let elapsed = ticking.since.elapsed();
-        if elapsed < QUIET {
-            continue;
-        }
         let figures = status
             .lock()
             .map(|status| status.clone())
             .unwrap_or_default();
+        let elapsed = ticking.since.elapsed();
+        if let Some(line) = &figures.line {
+            line.refresh(&figures, ticking.label, elapsed);
+        }
+        if elapsed < QUIET {
+            continue;
+        }
         let frames = usize::try_from(elapsed.as_millis() / FRAME.as_millis()).unwrap_or(0);
         let frame = FRAMES[frames % FRAMES.len()];
         let room = crate::markdown::terminal_width().saturating_sub(5);
+        let text = figures
+            .line
+            .as_ref()
+            .and_then(|line| line.latest())
+            .map_or_else(
+                || row(ticking.label, elapsed, &figures, room),
+                |text| crate::calls::cut(&text, room),
+            );
         let line = format!(
             "  {} {}",
             style::paint(PURPLE, frame),
-            style::paint(FAINT, &row(ticking.label, elapsed, &figures, room))
+            style::paint(FAINT, &text)
         );
         let mut out = std::io::stdout().lock();
         let _ = write!(out, "{CLEAR_LINE}{line}");

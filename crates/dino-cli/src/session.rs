@@ -200,6 +200,7 @@ enum Input {
     Init,
     Log,
     Schedules,
+    Worktree(Option<String>),
     Exit,
     Unknown(String),
     Blank,
@@ -258,6 +259,7 @@ fn parse(line: &str) -> Input {
         "plan" => Input::Plan(remainder()),
         "log" => Input::Log,
         "schedules" => Input::Schedules,
+        "worktree" => Input::Worktree(remainder()),
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
         other if rest.trim() == other => Input::Unknown(other.to_owned()),
@@ -456,6 +458,7 @@ pub struct Session<S> {
     pub log_path: String,
     /// Pinged when a task ends, if it ran long enough.
     pub end_hooks: Vec<crate::task::EndHook>,
+    pub prompt_hooks: dino_exec::PromptHooks,
     pub history_path: std::path::PathBuf,
     /// Where this conversation is persisted after each submission.
     pub state_path: std::path::PathBuf,
@@ -467,6 +470,10 @@ pub struct Session<S> {
     pub remote: Option<Arc<crate::remote::Hub>>,
     /// Set when the session offers the schedule tools.
     pub schedules: Option<Due>,
+    /// Which linked worktree this is, for the banner.
+    pub worktree: Option<String>,
+    /// Made by `/worktree`, for the next session to start in.
+    pub moving_to: Option<crate::worktree::Worktree>,
 }
 
 impl<S> Session<S>
@@ -519,6 +526,7 @@ where
                 println!("{prompt}{queued}");
                 queued
             } else {
+                crate::statusline::at_prompt(&self.status).await;
                 // Blocking on purpose. Nothing else is running while a person is
                 // typing, and moving the editor across a spawn_blocking boundary
                 // every keystroke would buy nothing.
@@ -830,6 +838,20 @@ where
             }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Schedules => print!("{}", self.schedules()),
+            Input::Worktree(name) => {
+                match crate::worktree::Worktree::create(
+                    &self.workspace_root,
+                    name.as_deref().unwrap_or_default(),
+                ) {
+                    Ok(worktree) => {
+                        self.moving_to = Some(worktree);
+                        return Ok(true);
+                    }
+                    Err(error) => {
+                        println!("{}", style::paint(style::WARN, &format!("  {error:#}")));
+                    }
+                }
+            }
             Input::Unknown(name) => println!(
                 "{}",
                 style::paint(FAINT, &format!("no such command: /{name}. Try /help."))
@@ -947,6 +969,17 @@ where
 
     /// Runs one submission, cancellable on its own for its own lifetime.
     async fn submit(&mut self, text: String) {
+        let added = match crate::hooks::submitted(&self.prompt_hooks, &text).await {
+            Ok(added) => added,
+            Err(reason) => {
+                let reason = format!("not sent: {reason}");
+                println!("{}", style::paint(style::WARN, &format!("  {reason}")));
+                if let Some(hub) = &self.remote {
+                    hub.notice(&reason);
+                }
+                return;
+            }
+        };
         // Before attachments, which are file contents and name no limits.
         let (limits, named) = self.meter.begin_task(&text);
         if named {
@@ -965,7 +998,7 @@ where
         } else {
             text
         };
-        let text = self.with_attachments(text).await;
+        let text = dino_exec::with_context(self.with_attachments(text).await, &added);
         // The person's words first, so the transcript shows what they typed.
         let text = match self.carried.take() {
             Some(summary) => format!("{text}{}{summary}", crate::recall::SUMMARY_DIVIDER),
@@ -1518,8 +1551,11 @@ where
         } else {
             String::new()
         };
+        let worktree = self.worktree.as_ref().map_or_else(String::new, |worktree| {
+            format!("  {}\n", style::paint(crate::style::MUTED, worktree))
+        });
         format!(
-            "{hello}  {}\n  {}\n{keep_going}",
+            "{hello}{worktree}  {}\n  {}\n{keep_going}",
             style::paint(
                 crate::style::MUTED,
                 &format!(
@@ -1547,6 +1583,10 @@ where
         status_block(&[
             ("model", self.model.clone()),
             ("workspace", self.workspace.clone()),
+            (
+                "worktree",
+                self.worktree.clone().unwrap_or_else(|| "none".to_owned()),
+            ),
             ("approvals", self.approvals.clone()),
             ("sandbox", self.sandbox.clone()),
             ("log", self.log_path.clone()),
@@ -1640,6 +1680,10 @@ fn help() -> String {
         (
             "/schedules",
             "reminders and recurring messages in this workspace",
+        ),
+        (
+            "/worktree",
+            "/worktree [name]: a new session in a git worktree of its own",
         ),
         ("/exit", "leave; Ctrl-D does the same"),
     ];
@@ -1783,6 +1827,11 @@ mod tests {
             Input::Rename(Some("rfc wave".into()))
         );
         assert_eq!(parse("/rename"), Input::Rename(None));
+        assert_eq!(parse("/worktree"), Input::Worktree(None));
+        assert_eq!(
+            parse("/worktree fix-parser"),
+            Input::Worktree(Some("fix-parser".into()))
+        );
     }
 
     #[test]

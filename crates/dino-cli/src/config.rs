@@ -105,6 +105,17 @@ impl Compaction {
     }
 }
 
+/// The hooks around a call, a submission and an unanswered question.
+#[derive(Debug, Clone, Default)]
+pub struct CallHooks {
+    pub before_call: Vec<dino_exec::Hook>,
+    pub after_call: Vec<dino_exec::Hook>,
+    pub prompt_submit: Vec<dino_exec::Hook>,
+    pub awaiting_approval: Vec<dino_exec::Hook>,
+    /// How long an approval waits before the awaiting-approval hooks fire.
+    pub ping_after: std::time::Duration,
+}
+
 // Each switch is a separate setting a person can name in a config file.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
@@ -126,6 +137,9 @@ pub struct RunSettings {
     pub start_hooks: Vec<dino_exec::Hook>,
     /// Run when a task ends, for tasks that ran long enough.
     pub task_end_hooks: Vec<crate::task::EndHook>,
+    pub call_hooks: CallHooks,
+    /// A command of the person's own for the status row.
+    pub status_line: Option<Vec<String>>,
     /// The workspace's verify command, when it may run.
     pub verify: Option<Vec<String>>,
     /// What a task may spend when its message names no limit.
@@ -431,15 +445,21 @@ pub fn build_sandbox(
     workspace: &Path,
     protected: &[PathBuf],
 ) -> Result<Arc<dyn Sandbox>> {
+    let target = crate::worktree::shared_target(workspace);
     match mode {
-        SandboxMode::None => Ok(Arc::new(Unconfined)),
-        SandboxMode::Workspace => match dino_sandbox::detect_protecting(workspace, protected) {
-            Ok(sandbox) => Ok(Arc::from(sandbox)),
-            Err(error) => bail!(
-                "{error}. Pass --sandbox none to run without containment, \
+        SandboxMode::None => Ok(match target {
+            Some(target) => Arc::new(dino_sandbox::UnconfinedBuildingIn(target)),
+            None => Arc::new(Unconfined),
+        }),
+        SandboxMode::Workspace => {
+            match dino_sandbox::detect_building_in(workspace, protected, target.as_deref()) {
+                Ok(sandbox) => Ok(Arc::from(sandbox)),
+                Err(error) => bail!(
+                    "{error}. Pass --sandbox none to run without containment, \
                  which is recorded in the session log."
-            ),
-        },
+                ),
+            }
+        }
     }
 }
 
@@ -479,6 +499,8 @@ mod tests {
             end_turn_hooks: Vec::new(),
             start_hooks: Vec::new(),
             task_end_hooks: Vec::new(),
+            call_hooks: CallHooks::default(),
+            status_line: None,
             verify: None,
             task_limits: crate::task::Limits::default(),
             mcp: Vec::new(),

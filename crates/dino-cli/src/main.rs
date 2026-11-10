@@ -7,6 +7,7 @@ mod diff;
 mod evals;
 mod greeting;
 mod handover;
+mod hooks;
 mod listen;
 mod markdown;
 mod plugin;
@@ -20,12 +21,14 @@ mod session;
 mod settings;
 mod spend;
 mod spinner;
+mod statusline;
 mod style;
 mod subagent;
 mod summary;
 mod task;
 mod trace;
 mod webhook;
+mod worktree;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -182,6 +185,10 @@ struct CommonArgs {
     /// in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
+    /// Start in a new git worktree under .dino/worktrees, on a branch of its
+    /// own, removed at the end if nothing changed. Named, or a generated name.
+    #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "resume")]
+    worktree: Option<String>,
     /// The tools offered and the limits started under: standard, minimal or
     /// review. Default standard.
     #[arg(long, value_enum)]
@@ -489,13 +496,16 @@ fn session_tool_set(
     tool_set(
         &settings.workspace,
         Arc::clone(sandbox),
-        &interactive_options(
-            &settings.workspace,
-            settings.protected.clone(),
-            settings.max_diagnostics,
-            settings.hooks.clone(),
-            settings.verify.clone(),
-        ),
+        &dino_eval::ToolOptions {
+            after_call: settings.call_hooks.after_call.clone(),
+            ..interactive_options(
+                &settings.workspace,
+                settings.protected.clone(),
+                settings.max_diagnostics,
+                settings.hooks.clone(),
+                settings.verify.clone(),
+            )
+        },
         mcp,
     )
     .map(|tools| tools.keeping(|name| preset.offers(name)))
@@ -601,10 +611,12 @@ fn interactive_options(
         protected,
         max_diagnostics,
         hooks,
+        after_call: Vec::new(),
         memory: memory_files(workspace),
         skills: skills(workspace),
         github: dino_exec::GithubTool::available(),
         web: true,
+        code: true,
         skip_edit_check: false,
         escalation: true,
         verify,
@@ -632,7 +644,10 @@ fn skills(workspace: &Path) -> Vec<dino_core::skills::Skill> {
 /// The user's memory file and this workspace's, beside the user config.
 fn memory_files(workspace: &Path) -> Option<dino_core::memory::MemoryFiles> {
     let dir = settings::user_dir()?.join("memory");
-    let name = workspace.display().to_string().replace('/', "%");
+    let name = worktree::home(workspace)
+        .display()
+        .to_string()
+        .replace('/', "%");
     Some(dino_core::memory::MemoryFiles {
         user: dir.join("user.md"),
         workspace: dir.join(format!("{name}.md")),
@@ -685,6 +700,14 @@ pub(crate) struct Prepared {
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
     spending: spend::Spending,
+}
+
+fn prompt_hooks(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> dino_exec::PromptHooks {
+    dino_exec::PromptHooks::new(
+        settings.call_hooks.prompt_submit.clone(),
+        &settings.workspace,
+        Arc::clone(sandbox),
+    )
 }
 
 impl Prepared {
@@ -866,6 +889,7 @@ fn prepare(
     if let Ok(mut status) = status.lock() {
         status.answering(&settings.profile);
         status.meter = Some(Arc::clone(&spending.meter));
+        status.line = statusline::StatusLine::configured(&settings);
     }
     let hold = renderer.hold_handle();
     let shown = shown(json, renderer, meta)?;
@@ -878,9 +902,12 @@ fn prepare(
             ..AgentConfig::default()
         },
     )
-    .with_policy(dino_core::approval::PlanGate::new(
-        policy(settings.mode, &sandbox_label, &settings.workspace, remote),
-        Arc::clone(&planning),
+    .with_policy(gated_policy(
+        &settings,
+        &sandbox_label,
+        &sandbox,
+        remote,
+        &planning,
     ))
     .with_sink(((shown, log), remote::Tap(remote.map(Arc::clone))));
     let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
@@ -934,9 +961,88 @@ fn subagent_kit(
     }
 }
 
-async fn session(common: CommonArgs) -> Result<ExitCode> {
-    drive(common, None).await?;
-    Ok(ExitCode::SUCCESS)
+async fn session(mut common: CommonArgs) -> Result<ExitCode> {
+    // Each is tidied as Dino exits, so a session can still go back to the last.
+    let mut made: Vec<worktree::Worktree> = enter_worktree(&mut common)?.into_iter().collect();
+    // Where to go back to when a session will not start in a new worktree.
+    let mut previous: Option<CommonArgs> = None;
+    let ended = loop {
+        match drive(common.clone(), None).await {
+            Ok(Next::Worktree(next)) => {
+                announce_worktree(&next);
+                let mut moved = common.clone();
+                moved.workspace = Some(next.workspace.clone());
+                moved.resume = None;
+                moved.log = None;
+                made.push(next);
+                previous = Some(std::mem::replace(&mut common, moved));
+            }
+            Ok(_) => break Ok(ExitCode::SUCCESS),
+            Err(error) => match previous.take() {
+                Some(back) => {
+                    eprintln!("dino: {error:#}");
+                    common = back;
+                }
+                None => break Err(error),
+            },
+        }
+    };
+    made.iter().for_each(leave);
+    ended
+}
+
+/// Makes the worktree `--worktree` asks for and points the session at it.
+fn enter_worktree(common: &mut CommonArgs) -> Result<Option<worktree::Worktree>> {
+    let Some(name) = common.worktree.take() else {
+        return Ok(None);
+    };
+    let workspace = config::resolve_workspace(common.workspace.as_deref())?;
+    let made = worktree::Worktree::create(&workspace, &name)?;
+    announce_worktree(&made);
+    common.workspace = Some(made.workspace.clone());
+    Ok(Some(made))
+}
+
+fn announce_worktree(worktree: &worktree::Worktree) {
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            &format!(
+                "worktree {} on branch {}",
+                render::short_path(&worktree.root, Path::new("")),
+                worktree.branch
+            )
+        )
+    );
+}
+
+/// Removes a worktree nothing changed in, and says where one that did is kept.
+fn leave(worktree: &worktree::Worktree) {
+    let path = render::short_path(&worktree.root, Path::new(""));
+    match worktree.finish() {
+        Ok(worktree::Ended::Removed) => eprintln!(
+            "{}",
+            style::paint(
+                style::FAINT,
+                &format!("  removed worktree {path}: nothing changed")
+            )
+        ),
+        Ok(worktree::Ended::Kept) => eprintln!(
+            "{}",
+            style::paint(
+                style::PURPLE,
+                &format!("  kept worktree {path} on branch {}", worktree.branch)
+            )
+        ),
+        Err(error) => eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                &format!("  could not tidy worktree {path}: {error:#}")
+            )
+        ),
+    }
 }
 
 /// What `dino serve` adds to a session: the hub the pages talk to, and what
@@ -949,6 +1055,9 @@ struct Remote {
 /// Listens for pages, then runs a session for them until the person at the
 /// terminal interrupts it.
 async fn serve(args: ServeArgs) -> Result<ExitCode> {
+    if args.common.worktree.is_some() {
+        bail!("--worktree is for `dino` and `dino run`, not `dino serve`");
+    }
     let address = remote::bind_address(args.bind, args.port)?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -986,7 +1095,7 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
     let mut previous: Option<CommonArgs> = None;
     let ended = loop {
         match drive(common.clone(), Some(&mut remote)).await {
-            Ok(Some(workspace)) => {
+            Ok(Next::Workspace(workspace)) => {
                 hub.notice(&format!("moving to {}", workspace.display()));
                 let mut next = common.clone();
                 next.workspace = Some(workspace);
@@ -994,7 +1103,7 @@ async fn serve(args: ServeArgs) -> Result<ExitCode> {
                 next.log = None;
                 previous = Some(std::mem::replace(&mut common, next));
             }
-            Ok(None) => break Ok(ExitCode::SUCCESS),
+            Ok(_) => break Ok(ExitCode::SUCCESS),
             Err(error) => match previous.take() {
                 Some(back) => {
                     eprintln!("dino: {error:#}");
@@ -1116,12 +1225,41 @@ fn schedules(common: &CommonArgs) -> Result<(session::Due, Box<dyn ToolRuntime>)
     Ok((due, Box::new(tools)))
 }
 
-/// Runs one session, and returns the workspace a page asked to move to, if one
-/// did. A move starts a new session there, with that workspace's schedules.
-async fn drive(
-    common: CommonArgs,
-    remote: Option<&mut Remote>,
-) -> Result<Option<std::path::PathBuf>> {
+/// Opens a fresh conversation on another model, for `/model` and `/clear`.
+fn model_factory(prepared: &Prepared) -> session::SessionFactory<Box<dyn ModelSession>> {
+    let base = prepared.settings.clone();
+    let context = prepared.context.clone();
+    let definitions = prepared.definitions.clone();
+    let spending = prepared.spending.clone();
+    Box::new(move |key| {
+        let mut settings = base.clone();
+        settings.profile = config::resolve_profile(Some(key))?;
+        // Switching to a model without the configured effort is not a refusal.
+        settings.reasoning_effort = settings
+            .reasoning_effort
+            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
+        let name = settings.profile.display_name.clone();
+        // The prompt names the model, so a new conversation gets its own.
+        let mut context = context.clone();
+        context.model = Some(key.to_owned());
+        let prompt = system_prompt(&context);
+        let model = metered(&settings, prompt, definitions.clone(), &spending)?;
+        Ok((model, name))
+    })
+}
+
+/// Where a session went when it ended.
+enum Next {
+    Leave,
+    /// A page picked another workspace.
+    Workspace(PathBuf),
+    /// `/worktree` made one.
+    Worktree(worktree::Worktree),
+}
+
+/// Runs one session, and returns where it is to move, if anywhere. A move
+/// starts a new session there, with that workspace's schedules.
+async fn drive(common: CommonArgs, remote: Option<&mut Remote>) -> Result<Next> {
     let hub = remote.as_ref().map(|remote| Arc::clone(&remote.hub));
     let (due, tools) = schedules(&common)?;
     let prepared = prepare(&common, false, vec![tools], hub.as_ref(), false)?;
@@ -1143,25 +1281,7 @@ async fn drive(
             )
         );
     }
-    let base = prepared.settings.clone();
-    let context = prepared.context.clone();
-    let definitions = prepared.definitions.clone();
-    let spending = prepared.spending.clone();
-    let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
-        let mut settings = base.clone();
-        settings.profile = config::resolve_profile(Some(key))?;
-        // Switching to a model without the configured effort is not a refusal.
-        settings.reasoning_effort = settings
-            .reasoning_effort
-            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
-        let name = settings.profile.display_name.clone();
-        // The prompt names the model, so a new conversation gets its own.
-        let mut context = context.clone();
-        context.model = Some(key.to_owned());
-        let prompt = system_prompt(&context);
-        let model = metered(&settings, prompt, definitions.clone(), &spending)?;
-        Ok((model, name))
-    });
+    let factory = model_factory(&prepared);
     let inbox = hub
         .as_ref()
         .map_or_else(dino_core::Inbox::default, |hub| hub.inbox());
@@ -1194,6 +1314,7 @@ async fn drive(
         approvals: prepared.settings.mode.label().to_owned(),
         log_path: prepared.settings.log_path.display().to_string(),
         end_hooks: prepared.settings.task_end_hooks.clone(),
+        prompt_hooks: prompt_hooks(&prepared.settings, &prepared.sandbox),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
         name: resume::label(&prepared.state_path)
             .ok()
@@ -1206,13 +1327,18 @@ async fn drive(
         ),
         remote: hub,
         schedules,
+        worktree: worktree::describe(&prepared.settings.workspace),
+        moving_to: None,
     };
     session.note_conversation();
     let moving = if let Some(remote) = remote {
-        session.serve(&mut remote.requests).await?
+        session
+            .serve(&mut remote.requests)
+            .await?
+            .map_or(Next::Leave, Next::Workspace)
     } else {
         session.run().await?;
-        None
+        session.moving_to.take().map_or(Next::Leave, Next::Worktree)
     };
     eprintln!(
         "{}",
@@ -1230,6 +1356,9 @@ const MAX_REVIEW_DIFF_BYTES: usize = 200 * 1_024;
 /// Runs a read-only review. The diff is taken here and handed over, so the
 /// model needs no process and the session can refuse every change.
 async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
+    if args.common.worktree.is_some() {
+        bail!("--worktree is for `dino` and `dino run`, not `dino review`");
+    }
     let workspace = config::resolve_workspace(args.common.workspace.as_deref())?;
     let git = |arguments: &[&str]| -> Result<String> {
         let output = std::process::Command::new("git")
@@ -1291,8 +1420,15 @@ async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
 }
 
 /// Starts the clock on a one-shot run's task, and says when the message set its
-/// limits. Returns the request, with a note added when the branch is behind.
-async fn begin_task(prepared: &mut Prepared, request: String) -> String {
+/// limits. Returns the request, with a note added when the branch is behind
+/// and what the `prompt_submit` hooks added, or an error when one refused it.
+async fn begin_task(prepared: &mut Prepared, request: String) -> Result<String> {
+    let added = hooks::submitted(
+        &prompt_hooks(&prepared.settings, &prepared.sandbox),
+        &request,
+    )
+    .await
+    .map_err(|reason| anyhow::anyhow!("not sent: {reason}"))?;
     let (limits, named) = prepared.spending.meter.begin_task(&request);
     if named {
         eprintln!(
@@ -1307,11 +1443,12 @@ async fn begin_task(prepared: &mut Prepared, request: String) -> String {
     let finishing = (prepared.settings.keep_going || task::wants_to_finish(&request))
         && !matches!(prepared.settings.mode, ApprovalMode::ReadOnly);
     prepared.agent.set_keep_going(finishing);
-    if finishing {
+    let request = if finishing {
         task::note_if_behind(&prepared.settings.workspace, request).await
     } else {
         request
-    }
+    };
+    Ok(dino_exec::with_context(request, &added))
 }
 
 /// Ends the task a handover chain ran and pings for it.
@@ -1395,7 +1532,14 @@ async fn conclude_run(
     (result, stopped)
 }
 
-async fn run(args: RunArgs) -> Result<ExitCode> {
+async fn run(mut args: RunArgs) -> Result<ExitCode> {
+    let worktree = enter_worktree(&mut args.common)?;
+    let ran = run_in(args).await;
+    worktree.iter().for_each(leave);
+    ran
+}
+
+async fn run_in(args: RunArgs) -> Result<ExitCode> {
     let workspace = config::resolve_workspace(args.common.workspace.as_deref())?;
     let progress = args.handover.then(|| {
         dino_core::progress::Progress::new(
@@ -1433,7 +1577,7 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         }
     });
 
-    let request = begin_task(&mut prepared, request).await;
+    let request = begin_task(&mut prepared, request).await?;
     if let Some(progress) = &progress {
         let ended = handover::run(
             &mut prepared,
@@ -1621,6 +1765,8 @@ fn hooks_for(layers: &Layers, event: settings::HookEvent) -> Vec<dino_exec::Hook
                 .map(|hook| dino_exec::Hook {
                     command: hook.command,
                     extension: hook.extension,
+                    tool: hook.tool,
+                    program: hook.program,
                 })
                 .collect()
         })
@@ -1633,14 +1779,30 @@ fn hooks_for(layers: &Layers, event: settings::HookEvent) -> Vec<dino_exec::Hook
     hooks
 }
 
-/// The user file's hooks for the end of a task, each with how long a task must
-/// have run before it fires.
-fn end_hooks(layers: &Layers) -> Vec<task::EndHook> {
-    let after = std::time::Duration::from_secs(
+/// How long a task must run, or an approval wait, before a ping fires.
+fn ping_after(layers: &Layers) -> std::time::Duration {
+    std::time::Duration::from_secs(
         layers
             .pick_user_only(|file| file.ping_after_seconds)
             .map_or(300, |(seconds, _)| seconds),
-    );
+    )
+}
+
+/// The hooks around calls, submissions and unanswered questions.
+fn call_hooks(layers: &Layers) -> config::CallHooks {
+    config::CallHooks {
+        before_call: hooks_for(layers, settings::HookEvent::BeforeCall),
+        after_call: hooks_for(layers, settings::HookEvent::AfterCall),
+        prompt_submit: hooks_for(layers, settings::HookEvent::PromptSubmit),
+        awaiting_approval: hooks_for(layers, settings::HookEvent::AwaitingApproval),
+        ping_after: ping_after(layers),
+    }
+}
+
+/// The user file's hooks for the end of a task, each with how long a task must
+/// have run before it fires.
+fn end_hooks(layers: &Layers) -> Vec<task::EndHook> {
+    let after = ping_after(layers);
     hooks_for(layers, settings::HookEvent::TaskEnd)
         .into_iter()
         .map(|hook| task::EndHook { hook, after })
@@ -2052,6 +2214,13 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
         ("verify", verify_row(resolved.verify.as_ref())),
         ("plugins", plugins_row()),
         (
+            "branch prefix",
+            resolved.layers.user.branch_prefix.clone().map_or_else(
+                || "dino/  (default)".to_owned(),
+                |prefix| format!("{prefix}  (user file)"),
+            ),
+        ),
+        (
             "task budget",
             format!(
                 "{}  (when a message names none)",
@@ -2115,6 +2284,12 @@ fn run_settings(
         end_turn_hooks: resolved.end_turn_hooks,
         start_hooks: resolved.start_hooks,
         task_end_hooks: resolved.task_end_hooks,
+        call_hooks: call_hooks(&resolved.layers),
+        status_line: resolved
+            .layers
+            .pick_user_only(|file| file.status_line.clone())
+            .map(|(command, _)| command)
+            .filter(|command| !command.is_empty()),
         verify,
         task_limits: resolved.task_limits,
         mcp: resolved.mcp,
@@ -2155,11 +2330,40 @@ fn interactive_policy<A: Approver + 'static>(
         interactive
     };
     match settings::user_dir() {
-        Some(dir) => {
-            Box::new(interactive.with_store(approve::FileRuleStore::for_workspace(&dir, workspace)))
-        }
+        Some(dir) => Box::new(
+            interactive.with_store(approve::FileRuleStore::for_workspace(
+                &dir,
+                &worktree::home(workspace),
+            )),
+        ),
         None => Box::new(interactive),
     }
+}
+
+/// The session's policy behind its plan gate, with the `before_call` hooks in
+/// front of both.
+fn gated_policy(
+    settings: &RunSettings,
+    sandbox_label: &str,
+    sandbox: &Arc<dyn Sandbox>,
+    remote: Option<&Arc<remote::Hub>>,
+    planning: &Arc<std::sync::atomic::AtomicBool>,
+) -> impl ApprovalPolicy + 'static {
+    dino_exec::BeforeCall::new(
+        dino_core::approval::PlanGate::new(
+            policy(
+                settings.mode,
+                sandbox_label,
+                &settings.workspace,
+                remote,
+                &settings.call_hooks,
+            ),
+            Arc::clone(planning),
+        ),
+        settings.call_hooks.before_call.clone(),
+        &settings.workspace,
+        Arc::clone(sandbox),
+    )
 }
 
 /// With `remote`, approvals are asked on the pages and not at the terminal.
@@ -2168,18 +2372,29 @@ fn policy(
     sandbox: &str,
     workspace: &Path,
     remote: Option<&Arc<remote::Hub>>,
+    waiting: &config::CallHooks,
 ) -> Box<dyn ApprovalPolicy> {
     match mode {
         ApprovalMode::Interactive | ApprovalMode::AcceptEdits => {
             let accept_edits = mode == ApprovalMode::AcceptEdits;
             match remote {
                 Some(hub) => interactive_policy(
-                    remote::RemoteApprover::new(Arc::clone(hub)),
+                    hooks::Pinging::new(
+                        remote::RemoteApprover::new(Arc::clone(hub)),
+                        waiting.awaiting_approval.clone(),
+                        workspace.to_path_buf(),
+                        waiting.ping_after,
+                    ),
                     workspace,
                     accept_edits,
                 ),
                 None => interactive_policy(
-                    TerminalApprover::new(sandbox, workspace),
+                    hooks::Pinging::new(
+                        TerminalApprover::new(sandbox, workspace),
+                        waiting.awaiting_approval.clone(),
+                        workspace.to_path_buf(),
+                        waiting.ping_after,
+                    ),
                     workspace,
                     accept_edits,
                 ),

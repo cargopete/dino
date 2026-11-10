@@ -29,6 +29,7 @@ const RESTRICTED: [(&str, &str); 12] = [
     ("webhook", "holds a secret and starts sessions"),
     ("workspaces", "lets a remote page reach another directory"),
     ("plugin_index", "chooses where plugins are installed from"),
+    ("status_line", "runs a command outside the sandbox"),
 ];
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
@@ -97,6 +98,12 @@ pub struct FileConfig {
     /// The plugin index `dino plugin search` and `install <name>` read: a path
     /// or an http(s) URL. User file only.
     pub plugin_index: Option<String>,
+    /// What `--worktree` puts before a worktree's name to name its branch.
+    /// `dino/` unless set. Read from the user file.
+    pub branch_prefix: Option<String>,
+    /// A command whose first line of output replaces the status row, given the
+    /// session as JSON. User file only: it runs outside the sandbox.
+    pub status_line: Option<Vec<String>>,
 }
 
 /// The `[webhook]` table.
@@ -244,6 +251,22 @@ pub struct HookConfig {
     pub command: Vec<String>,
     /// Only for files with this extension, such as `rs`.
     pub extension: Option<String>,
+    /// For `before_call` and `after_call`, only calls of this tool.
+    pub tool: Option<String>,
+    /// For `before_call` and `after_call`, only `exec` calls of this program
+    /// and `shell` lines that start with it.
+    pub program: Option<String>,
+}
+
+impl HookConfig {
+    /// Says what is wrong with a hook whose fields do not fit its event.
+    pub fn problem(&self) -> Option<String> {
+        let on_calls = matches!(self.event, HookEvent::BeforeCall | HookEvent::AfterCall);
+        (!on_calls && (self.tool.is_some() || self.program.is_some())).then(|| {
+            "`tool` and `program` choose calls, so only before_call and after_call take them"
+                .to_owned()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -257,6 +280,15 @@ pub enum HookEvent {
     /// Runs when a task ends, finished or not, with `{status}` and `{message}`
     /// in its arguments. Outside the sandbox, so it can reach a webhook.
     TaskEnd,
+    /// Runs before a call, once it is classified, and can only refuse it.
+    BeforeCall,
+    /// Runs after any call; what it prints is added to the result.
+    AfterCall,
+    /// Runs on each message sent; what it prints goes with it, and exit 2
+    /// refuses it.
+    PromptSubmit,
+    /// Runs outside the sandbox once an approval has waited `ping_after_seconds`.
+    AwaitingApproval,
 }
 
 /// Which file a value came from, so `dino config` can say.
@@ -555,7 +587,14 @@ fn read(path: &Path) -> Result<FileConfig> {
 }
 
 fn parse(path: &Path, text: &str) -> Result<FileConfig> {
-    toml::from_str(text).map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))
+    let config: FileConfig = toml::from_str(text)
+        .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
+    for (index, hook) in config.hooks.iter().flatten().enumerate() {
+        if let Some(problem) = hook.problem() {
+            bail!("{} hooks[{index}]: {problem}", path.display());
+        }
+    }
+    Ok(config)
 }
 
 /// Refuses a project file that names a setting only a user may set.
@@ -663,8 +702,28 @@ mod tests {
                 event: HookEvent::AfterEdit,
                 command: vec!["cargo".into(), "fmt".into(), "--".into(), "{path}".into()],
                 extension: None,
+                tool: None,
+                program: None,
             }]
         );
+    }
+
+    #[test]
+    fn only_call_hooks_choose_a_tool_or_a_program() {
+        let path = Path::new("/home/me/.config/dino/config.toml");
+        let parsed = parse(
+            path,
+            "[[hooks]]\nevent = \"before_call\"\nprogram = \"rm\"\ncommand = [\"false\"]\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.hooks.unwrap()[0].program.as_deref(), Some("rm"));
+
+        let error = parse(
+            path,
+            "[[hooks]]\nevent = \"task_end\"\ntool = \"exec\"\ncommand = [\"true\"]\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hooks[0]"), "{error}");
     }
 
     #[test]
@@ -684,6 +743,7 @@ mod tests {
             ("explore_model", "\"claude-haiku-5.5\""),
             ("workspaces", "[\"/\"]"),
             ("plugin_index", "\"https://elsewhere/index.json\""),
+            ("status_line", "[\"sh\", \"-c\", \"curl evil\"]"),
             (
                 "mcp",
                 "{ evil = { command = [\"sh\", \"-c\", \"curl evil\"] } }",

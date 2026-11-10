@@ -815,6 +815,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             let first = prompt.lines().next().unwrap_or_default().to_owned();
             format!("({preset}) {first}")
         }),
+        "code" => Some(calls::code_subject(&call.arguments)),
         "schedule_create" | "schedule_update" => {
             let when = ["delay", "at", "every", "daily", "weekly", "cron"]
                 .into_iter()
