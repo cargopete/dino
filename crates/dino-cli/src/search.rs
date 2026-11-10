@@ -62,6 +62,18 @@ impl WebSearch {
         }
     }
 
+    /// What a subagent may use: the provider's search once the parent's
+    /// session has allowed it, and nothing that would ask the person mid-run.
+    /// An engine's approval is a session rule the child does not inherit.
+    pub fn for_child(&self) -> Self {
+        match self {
+            Self::Native(gate) if gate.decided.get() == Some(&true) => {
+                Self::Native(Arc::clone(gate))
+            }
+            Self::Off | Self::Native(_) | Self::Backend(_) => Self::Off,
+        }
+    }
+
     /// The switch for a session on `provider`. Only the provider that was
     /// asked about gets one: a fallback or a `/model` change elsewhere would
     /// send queries somewhere the person never allowed.
@@ -257,6 +269,7 @@ mod tests {
         let native = resolve(&profile("claude-opus"), true, None, &none).unwrap();
         assert!(native.switch(ProviderKind::Anthropic).is_some());
         assert!(native.switch(ProviderKind::OpenAi).is_none());
+        assert!(matches!(native.for_child(), WebSearch::Off));
         let error = resolve(&profile("kimi-k3.1-pro"), true, Some(&brave), &none).unwrap_err();
         assert!(error.to_string().contains("BRAVE_KEY"), "{error}");
     }
@@ -292,6 +305,8 @@ mod tests {
             assert_eq!(gate.allowed().await, allow);
             assert_eq!(gate.switch.on(), allow);
             assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+            let child = WebSearch::Native(Arc::new(gate)).for_child();
+            assert_eq!(matches!(child, WebSearch::Native(_)), allow);
         }
     }
 }

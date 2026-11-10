@@ -8,6 +8,7 @@
 pub mod approval;
 pub mod ask;
 pub mod blocker;
+pub mod checkpoint;
 pub mod git;
 pub mod loops;
 pub mod memory;
@@ -19,6 +20,7 @@ pub mod review;
 pub mod schedule;
 pub mod session;
 pub mod skills;
+pub mod subagent;
 pub mod text;
 pub mod todo;
 pub mod verify;
@@ -531,6 +533,14 @@ impl Unsent {
     }
 }
 
+/// How far a call got before it would run.
+enum Admitted {
+    /// Refused or failed before running, with its result already recorded.
+    Settled(ToolResult),
+    /// Decided and started, for the caller to execute.
+    Run(ToolCall),
+}
+
 /// What a turn came to, once any broken streams have been sent again.
 enum Streamed {
     Finished {
@@ -953,7 +963,39 @@ where
             .collect();
         self.policy.begin_turn(&classified);
         self.tools.begin_turn(&calls);
-        for call in calls {
+        let mut calls = calls.into_iter().peekable();
+        while let Some(call) = calls.next() {
+            if call.name == subagent::AGENT
+                && calls
+                    .peek()
+                    .is_some_and(|next| next.name == subagent::AGENT)
+            {
+                let mut group = vec![call];
+                group.extend(std::iter::from_fn(|| {
+                    calls.next_if(|next| next.name == subagent::AGENT)
+                }));
+                let Some(settled) = self
+                    .settle_together(model_turn, group, events, cancel)
+                    .await?
+                else {
+                    return Ok(Settled::Cancelled);
+                };
+                for (noted, result) in settled {
+                    for note in noted {
+                        self.emit(
+                            AgentEvent::Noted {
+                                model_turn,
+                                call_id: result.call_id.clone(),
+                                note: note.clone(),
+                            },
+                            events,
+                        )?;
+                        notes.push(note);
+                    }
+                    results.push(result);
+                }
+                continue;
+            }
             let reported = (call.name == blocker::REPORT_BLOCKER)
                 .then(|| blocker::describe(&call).ok())
                 .flatten();
@@ -1524,6 +1566,88 @@ where
         events: &mut Vec<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<Option<ToolResult>, AgentError> {
+        let call = match self.admit(model_turn, call, events, cancel).await? {
+            None => return Ok(None),
+            Some(Admitted::Settled(result)) => return Ok(Some(result)),
+            Some(Admitted::Run(call)) => call,
+        };
+        // Dropping the execution future cancels the tool. A tool that spawns a
+        // child process is responsible for killing it on drop; the core cannot
+        // do that on its behalf.
+        let Some(output) = cancel.run_until_cancelled(self.tools.execute(&call)).await else {
+            return Ok(None);
+        };
+        let output = output.unwrap_or_else(|error| ToolOutput::error(error.to_string()));
+        self.finish_call(model_turn, call.id, output, events)
+            .map(Some)
+    }
+
+    /// Settles calls that may run at once: each is decided in turn, as a
+    /// person would be asked, and those allowed then run together. Returns
+    /// each result in call order with any note on it.
+    async fn settle_together(
+        &mut self,
+        model_turn: u32,
+        calls: Vec<ToolCall>,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Vec<(Vec<String>, ToolResult)>>, AgentError> {
+        let mut admitted = Vec::with_capacity(calls.len());
+        for call in calls {
+            if let Some(refusal) = self.loops.refuse(&call) {
+                let refused =
+                    self.finish_call(model_turn, call.id, ToolOutput::error(refusal), events)?;
+                admitted.push((Vec::new(), Admitted::Settled(refused)));
+                continue;
+            }
+            let notes = self.loops.record(&call).into_iter().collect();
+            match self.admit(model_turn, call, events, cancel).await? {
+                Some(admission) => admitted.push((notes, admission)),
+                None => return Ok(None),
+            }
+        }
+        let running = admitted
+            .iter()
+            .filter_map(|(_, admission)| match admission {
+                Admitted::Run(call) => Some(self.tools.execute(call)),
+                Admitted::Settled(_) => None,
+            });
+        let Some(outputs) = cancel
+            .run_until_cancelled(futures_util::future::join_all(running))
+            .await
+        else {
+            return Ok(None);
+        };
+        let mut outputs = outputs.into_iter();
+        let mut settled = Vec::with_capacity(admitted.len());
+        for (mut notes, admission) in admitted {
+            let result = match admission {
+                Admitted::Settled(result) => result,
+                Admitted::Run(call) => {
+                    let output = outputs
+                        .next()
+                        .expect("one output per call run")
+                        .unwrap_or_else(|error| ToolOutput::error(error.to_string()));
+                    let recorded = call.clone();
+                    let result = self.finish_call(model_turn, call.id, output, events)?;
+                    notes.extend(self.outcomes.record(&recorded, &result.output.content));
+                    result
+                }
+            };
+            settled.push((notes, result));
+        }
+        Ok(Some(settled))
+    }
+
+    /// Everything before a call runs: the checks, the classification and the
+    /// decision. A call that gets no further is settled here.
+    async fn admit(
+        &mut self,
+        model_turn: u32,
+        call: ToolCall,
+        events: &mut Vec<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Admitted>, AgentError> {
         if cancel.is_cancelled() {
             return Ok(None);
         }
@@ -1535,7 +1659,7 @@ where
             );
             return self
                 .finish_call(model_turn, call.id, refusal, events)
-                .map(Some);
+                .map(|result| Some(Admitted::Settled(result)));
         }
 
         let action = match self.tools.classify(&call) {
@@ -1550,7 +1674,7 @@ where
                         ToolOutput::error(error.to_string()),
                         events,
                     )
-                    .map(Some);
+                    .map(|result| Some(Admitted::Settled(result)));
             }
         };
 
@@ -1579,7 +1703,7 @@ where
                     ToolOutput::error(format!("refused by approval policy: {reason}")),
                     events,
                 )
-                .map(Some);
+                .map(|result| Some(Admitted::Settled(result)));
         }
 
         self.emit(
@@ -1589,15 +1713,7 @@ where
             },
             events,
         )?;
-        // Dropping the execution future cancels the tool. A tool that spawns a
-        // child process is responsible for killing it on drop; the core cannot
-        // do that on its behalf.
-        let Some(output) = cancel.run_until_cancelled(self.tools.execute(&call)).await else {
-            return Ok(None);
-        };
-        let output = output.unwrap_or_else(|error| ToolOutput::error(error.to_string()));
-        self.finish_call(model_turn, call.id, output, events)
-            .map(Some)
+        Ok(Some(Admitted::Run(call)))
     }
 
     fn finish_call(

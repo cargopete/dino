@@ -128,6 +128,9 @@ pub struct Call {
     /// than the JSON that carries them.
     pub output: Option<String>,
     pub is_error: bool,
+    /// The session an `agent` call ran, which has a trace of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child: Option<String>,
     #[serde(skip)]
     started_at: Option<u64>,
     #[serde(skip)]
@@ -397,6 +400,10 @@ impl Builder {
                     let readable = readable(&result.output.content);
                     call.output = Some(dino_core::text::capped_output(&readable, cap));
                     call.is_error = result.output.is_error;
+                    if call.tool == dino_core::subagent::AGENT {
+                        call.child = crate::subagent::child_session(&result.output.content)
+                            .map(str::to_owned);
+                    }
                 }
             }
             other => {
@@ -773,6 +780,13 @@ fn render_call(out: &mut String, call: &Call, full: bool, width: usize) {
             style::paint(WARN, &calls::cut(reason, width - 6))
         );
     }
+    if let Some(child) = &call.child {
+        let _ = writeln!(
+            out,
+            "      {}",
+            style::paint(MUTED, &format!("↳ dino trace {child}"))
+        );
+    }
     if full {
         write_block(out, &call.arguments, usize::MAX, width, FAINT, full);
     }
@@ -946,6 +960,37 @@ mod tests {
         assert_eq!(totals.model_ms, 3_000);
         assert_eq!(totals.tools_ms, 3_500);
         assert_eq!(totals.approvals_ms, 7_000);
+    }
+
+    #[test]
+    fn an_agent_call_names_the_session_to_trace_next() {
+        let agent = json!({ "id": "c1", "name": "agent", "arguments": { "prompt": "find it" } });
+        let mut lines = session();
+        lines[4] = model(
+            2_000,
+            1,
+            &json!({ "type": "tool_call_completed", "call": agent }),
+        );
+        lines[8] = record(
+            9_000,
+            &json!({ "type": "tool_started", "model_turn": 1, "call": agent }),
+        );
+        lines[9] = record(
+            12_500,
+            &json!({ "type": "tool_finished", "model_turn": 1,
+                "result": { "call_id": "c1", "output": { "is_error": false, "content":
+                    "In a.rs.\n\n[agent: 2 turn(s) · 1.0k in · 50 out · m · session p.1]" } } }),
+        );
+        let trajectory = built(&lines);
+        let call = &trajectory.submissions[0].turns[0].calls[0];
+        assert_eq!(call.child.as_deref(), Some("p.1"));
+        assert_eq!(
+            call.gist.as_deref(),
+            Some("2 turn(s) · 1.0k in · 50 out · m")
+        );
+
+        let shown = visible(&render("p", &trajectory, 0, false, 100));
+        assert!(shown.contains("↳ dino trace p.1"), "{shown}");
     }
 
     #[test]

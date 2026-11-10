@@ -272,6 +272,12 @@ impl Renderer {
         Arc::clone(&self.status)
     }
 
+    /// A handle for holding the status row off a prompt drawn mid-call.
+    #[must_use]
+    pub fn hold_handle(&self) -> crate::spinner::Hold {
+        self.spinner.hold()
+    }
+
     /// Draws whatever is held back: a partial line of text, an open call.
     ///
     /// # Errors
@@ -833,6 +839,13 @@ pub fn describe_call(call: &ToolCall) -> String {
             .and_then(|first| first.get("question"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        dino_core::subagent::AGENT => argument_string(&call.arguments, "prompt").map(|prompt| {
+            let preset = argument_string(&call.arguments, "preset")
+                .unwrap_or_else(|| crate::preset::Preset::Review.name().to_owned());
+            let first = prompt.lines().next().unwrap_or_default().to_owned();
+            format!("({preset}) {first}")
+        }),
+        "code" => Some(calls::code_subject(&call.arguments)),
         "schedule_create" | "schedule_update" => {
             let when = ["delay", "at", "every", "daily", "weekly", "cron"]
                 .into_iter()

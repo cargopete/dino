@@ -14,7 +14,7 @@ use serde_json::Value;
 pub fn icon(tool: &str) -> char {
     match tool {
         "read" | "list" => '→',
-        "search" | "web_search" => '✱',
+        "search" | "web_search" | "code" => '✱',
         "ask" => '?',
         "apply_patch" | "write_file" => '←',
         "exec" | "shell" | "gate" | "cargo" | "background" | "packages" | "github" => '$',
@@ -47,7 +47,24 @@ impl Mark {
 /// Whether a call only looks, so that a run of them can share a line.
 #[must_use]
 pub fn explores(tool: &str) -> bool {
-    matches!(tool, "read" | "list" | "search")
+    matches!(tool, "read" | "list" | "search" | "code")
+}
+
+/// What a `code` call asks about: `references parse at src/lib.rs:12`, or
+/// `symbols "Parser"`.
+#[must_use]
+pub fn code_subject(arguments: &Value) -> String {
+    let argument = |key: &str| arguments.get(key).and_then(Value::as_str);
+    let operation = argument("operation").unwrap_or("?");
+    if let Some(query) = argument("query") {
+        return format!("{operation} {query:?}");
+    }
+    let line = arguments.get("line").and_then(Value::as_u64).unwrap_or(0);
+    let path = argument("path").unwrap_or("?");
+    match argument("name") {
+        Some(name) => format!("{operation} {name} at {path}:{line}"),
+        None => format!("{operation} {path}:{line}"),
+    }
 }
 
 /// One look in a folded run: what it did, at what, and whether it failed.
@@ -65,6 +82,7 @@ impl Look {
         let (verb, target) = match call.name.as_str() {
             "search" => ("search", format!("{:?}", argument("query").unwrap_or(""))),
             "list" => ("list", argument("path").unwrap_or(".").to_owned()),
+            "code" => ("code", code_subject(&call.arguments)),
             _ => ("read", argument("path").unwrap_or("?").to_owned()),
         };
         Self {
@@ -197,10 +215,22 @@ mod tests {
             Look::of(&call("search", json!({"query": "fn main"})), false),
             Look::of(&call("list", json!({})), false),
             Look::of(&call("read", json!({"path": "c.rs"})), true),
+            Look::of(
+                &call(
+                    "code",
+                    json!({"operation": "references", "path": "c.rs", "line": 4, "name": "f"}),
+                ),
+                false,
+            ),
+            Look::of(
+                &call("code", json!({"operation": "symbols", "query": "Parser"})),
+                false,
+            ),
         ];
         assert_eq!(
             explored(&looks, 200),
-            "explored · read a.rs, b.rs · search \"fn main\" · list . · read c.rs ×"
+            "explored · read a.rs, b.rs · search \"fn main\" · list . · read c.rs × \
+             · code references f at c.rs:4, symbols \"Parser\""
         );
     }
 

@@ -25,6 +25,7 @@ pub struct Seatbelt {
     protected: usize,
     credentials_denied: bool,
     fetching: bool,
+    target_dir: Option<PathBuf>,
 }
 
 impl Seatbelt {
@@ -46,8 +47,29 @@ impl Seatbelt {
     ///
     /// As [`Seatbelt::new`].
     pub fn protecting(workspace: &Path, protected: &[PathBuf]) -> Result<Self, SandboxError> {
+        Self::building_in(workspace, protected, None)
+    }
+
+    /// As [`Seatbelt::protecting`], with Cargo building in `target_dir`, an
+    /// existing canonical directory that processes may then write.
+    ///
+    /// # Errors
+    ///
+    /// As [`Seatbelt::new`].
+    pub fn building_in(
+        workspace: &Path,
+        protected: &[PathBuf],
+        target_dir: Option<PathBuf>,
+    ) -> Result<Self, SandboxError> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        Self::confining(workspace, protected, home.as_deref())
+        let mut sandbox = Self::confining(workspace, protected, home.as_deref())?;
+        if let Some(target_dir) = target_dir {
+            sandbox
+                .profile
+                .push_str(&outside_rules(std::slice::from_ref(&target_dir), &[])?);
+            sandbox.target_dir = Some(target_dir);
+        }
+        Ok(sandbox)
     }
 
     /// As [`Seatbelt::protecting`], denying credential reads beneath `home`.
@@ -77,16 +99,21 @@ impl Seatbelt {
         // Canonical, because Seatbelt matches the resolved path and /var and
         // /tmp are symlinks on macOS.
         let home = home.and_then(|home| std::fs::canonicalize(home).ok());
+        let mut profile = profile_for(
+            &root,
+            &crate::with_executable_config(protected),
+            home.as_deref(),
+        )?;
+        if let Some(linked) = crate::LinkedWorktree::find(&root) {
+            profile.push_str(&outside_rules(&linked.writable(), &[linked.config()])?);
+        }
         Ok(Self {
-            profile: profile_for(
-                &root,
-                &crate::with_executable_config(protected),
-                home.as_deref(),
-            )?,
+            profile,
             temp_dir,
             protected: protected.len(),
             credentials_denied: home.is_some(),
             fetching: false,
+            target_dir: None,
         })
     }
 
@@ -134,6 +161,10 @@ impl Sandbox for Seatbelt {
 
     fn temp_dir(&self) -> Option<&Path> {
         Some(&self.temp_dir)
+    }
+
+    fn target_dir(&self) -> Option<&Path> {
+        self.target_dir.as_deref()
     }
 
     fn for_fetching(&self, writable: &[PathBuf]) -> Option<Box<dyn Sandbox>> {
@@ -219,6 +250,26 @@ fn profile_for(
         .expect("writing to a String cannot fail");
     }
     Ok(profile)
+}
+
+/// Writes beneath each of `writable`, canonical paths outside the workspace,
+/// except beneath each of `denied`.
+fn outside_rules(writable: &[PathBuf], denied: &[PathBuf]) -> Result<String, SandboxError> {
+    let mut rules = String::new();
+    for (verdict, paths) in [("allow", writable), ("deny", denied)] {
+        for path in paths {
+            let path = path
+                .to_str()
+                .ok_or_else(|| SandboxError::Profile("path is not valid UTF-8".into()))?;
+            writeln!(
+                rules,
+                "({verdict} file-write* (subpath \"{}\"))",
+                escape(path)?
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    Ok(rules)
 }
 
 /// Outbound HTTPS and DNS, and writes beneath each of `writable`.
