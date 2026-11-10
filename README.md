@@ -163,6 +163,29 @@ CI and evals.
   and rebuilding a provider's content ordering from those would reconstruct
   something plausible rather than something identical. A state from another
   provider, model or payload version is refused rather than half-loaded.
+  `--fork` with `--resume`, or `/fork [name]` in a session, carries on in a
+  copy with its checkpoints and leaves the original as it was; `/resume` lists
+  forks under their parent, and the parent and the number of submissions it
+  shares are kept in `.dino/sessions/<id>.fork.json`.
+- **Checkpoints and `/rewind`.** In a git work tree, an interactive session
+  records the workspace before and after each submission, other than a plan,
+  as commits on `refs/dino/checkpoints/<conversation>/`, built through a
+  temporary index so that `HEAD`, the index and the stash never move. Tracked
+  and untracked files are captured, edits made through `exec` included; ignored
+  ones, such as `target/`, are not, and `/rewind` says so. `/rewind` lists the
+  conversation's messages and `/rewind <n>` shows what going back to before one
+  would do, then takes conversation, files or both. Files go back only where
+  this conversation changed them and nobody has since; anything else changed is
+  named and left alone. The conversation goes back to a copy of the adapter's
+  state kept beside each checkpoint in `.dino/checkpoints/`, and later
+  checkpoints go with it. Each copy is the whole conversation so far, so a long
+  one costs disk roughly in the square of its length. A files
+  rewind is itself recorded as a checkpoint, so going back to that undoes it.
+  A conversation's checkpoints are pruned 14 days after its last. A submission
+  cut off before its second snapshot cannot tell its edits from anyone else's,
+  so they are left alone. `dino run` takes none, and submodules are not
+  restored. Tested against real repositories, and once end to end against a
+  scripted local endpoint; not yet in daily use.
 - **A context budget.** A session used to grow until the provider refused the
   request and then keep refusing, without saying why. It now watches reported
   input tokens against the model's window, or the smaller one a self-hosted
@@ -537,9 +560,9 @@ and is written into the session log. Windows is not a target.
 
 Context relief for OpenAI, whose server-side continuation
 keeps no local history to reduce, and which wants a live credential to verify
-rather than merely to write. Rollback: the diagnostic
-gate refused rather than reverting, because a shadow copy of the workspace is a
-worse version of git. Resuming *from* a log as opposed to replaying one, which
+rather than merely to write. Rollback outside a git work tree: checkpoints are
+git objects, and a shadow copy of the workspace would be a worse version of git.
+Resuming *from* a log as opposed to replaying one, which
 RFC-0014 section 2 argues cannot be done honestly. A conformance run against a live
 endpoint: the suite exists and has only ever seen recorded traffic. `dino probe`,
 which would let you run it against your own endpoint, is RFC-0017's next step.
@@ -737,7 +760,8 @@ Inside a session: `/help`, `/status`, `/log`, `/exit` (or a bare `exit` or
 `quit`); `/clear` for a new conversation, `/model <key>` to switch model (in a
 new conversation, since history does not move between models; add `--default`
 to start later sessions on it too), `/resume [id]` to list or continue a
-saved one, `/diff` for the working tree, `/schedules` for the workspace's
+saved one, `/fork [name]` to carry on in a copy, `/rewind [n]` to go back to
+before a message, `/diff` for the working tree, `/schedules` for the workspace's
 schedules, `/worktree [name]` to carry on in a git worktree of its own and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost
 when it ends, along with today's total in UTC, which every session appends to
