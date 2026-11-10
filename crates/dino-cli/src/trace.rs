@@ -483,6 +483,12 @@ fn source_name(source: DecisionSource) -> &'static str {
 fn describe_note(event: &AgentEvent) -> Option<String> {
     Some(match event {
         AgentEvent::Steered { text, .. } => format!("you, during the run: {text}"),
+        AgentEvent::PersonRan {
+            command, exit_code, ..
+        } => format!(
+            "you ran `{command}`, {}",
+            crate::shell::exit_label(*exit_code)
+        ),
         AgentEvent::Noted { note, .. } => format!("noted: {note}"),
         AgentEvent::SentBack { reason, .. } => format!("sent back: {reason}"),
         AgentEvent::Reviewed {

@@ -463,7 +463,8 @@ CI and evals.
   prompt's general guidance still names tools a preset may have removed.
 - **Plugins.** A plugin is a directory with a `dino-plugin.toml` naming it, a
   semver `version`, a `description` and an `engines` range of Dino versions,
-  and contributing any of skills (folders under `skills/`), `[[hooks]]` and
+  and contributing any of skills (folders under `skills/`), slash commands
+  (`commands/<name>.md`, as below), `[[hooks]]` and
   `[mcp.<name>]` tables shaped as in the user file, and an `instructions` file
   read into every session's prompt. `{plugin}` in a command is the installed
   bundle's directory. `dino plugin install` takes a directory, a git URL
@@ -778,7 +779,9 @@ dino --model claude-sonnet
 
 Or put the model in `~/.config/dino/config.toml` and run `dino`. `dino config`
 prints every setting and where its value came from. `dino prompt` prints the
-system prompt a run would send, so its cost can be read rather than guessed.
+system prompt a run would send, so its cost can be read rather than guessed;
+`dino prompt --tokens` estimates instead what each part of it and each tool's
+schema takes.
 
 Inside a session: `/help`, `/status`, `/log`, `/exit` (or a bare `exit` or
 `quit`); `/clear` for a new conversation, `/model <key>` to switch model (in a
@@ -786,7 +789,19 @@ new conversation, since history does not move between models; add `--default`
 to start later sessions on it too), `/resume [id]` to list or continue a
 saved one, `/fork [name]` to carry on in a copy, `/rewind [n]` to go back to
 before a message, `/diff` for the working tree, `/schedules` for the workspace's
-schedules, `/worktree [name]` to carry on in a git worktree of its own and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
+schedules, `/worktree [name]` to carry on in a git worktree of its own, `/cost` for requests, tokens and cost, `/context` for what fills
+the window and `/expand [n]` for a call's whole result. `/context` takes the
+total from what the provider counted for the last request and gives each part,
+the system prompt piece by piece (each instructions file, the outline, memory,
+the skill list), each tool's schema with MCP grouped by server, and the
+conversation as your messages, the model's replies and calls, and tool results
+with how many were elided, as an estimate at four bytes a token, labelled as
+one; then what is free and where Dino warns, elides and compacts. An OpenAI
+conversation is held by the provider and is not itemised. The serve page has
+the same under `context`, refreshed when a submission ends. `/expand` is the
+latest call, `/expand 2` the one before, read back from the session's log, so
+a result the transcript folded into an `explored` line or cut short is shown
+whole. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost
 when it ends, along with today's total in UTC, which every session appends to
 `$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).
@@ -830,7 +845,39 @@ listing. `@~/Desktop/shot.png` attaches an image, from anywhere since you named
 it, for profiles that take images; PNG, JPEG, GIF and WebP up to 5 MiB. History
 persists to `.dino/history` and the conversation to `.dino/sessions`, so
 `dino --resume` picks it up where you left it and `dino replay` shows what
-happened.
+happened. Ctrl-R searches that history backwards, Ctrl-G opens the prompt in
+`$VISUAL` or `$EDITOR` (`vi` without either) and puts what you save back at
+the prompt to send, and Ctrl-V with an image on the clipboard saves it under
+`~/.local/state/dino/pastes/` and types its `@path`, so a screenshot attaches
+without saving it first; with no image Ctrl-V does nothing, and Ctrl-Q is the
+quoted insert it used to be. On macOS the image comes through AppleScript (`the
+clipboard as «class PNGf»`), which converts a screenshot's TIFF; that has been
+tried with a PNG and a TIFF on the clipboard. On Linux it is `wl-paste` under
+Wayland and `xclip` otherwise, neither of which has been run. Pastes are not
+deleted.
+
+`!cargo test` at the prompt runs that line through `sh -c` in the workspace as
+you, outside the model, the approvals and the sandbox, since you typed it. Its
+output streams as it runs, Ctrl-C stops it, and the line, its exit code and its
+output are written to the session log; the output, 16 KiB at most, goes with
+your next message. A line from a page under `dino serve` is not run.
+
+Custom commands are Markdown files: `~/.config/dino/commands/<name>.md`, a
+plugin's `commands/`, and the workspace's `.dino/commands/<name>.md`, each
+shadowing the one before, and a workspace command that shadows one of yours is
+named when the session starts. `/<name> args` sends the body as your message,
+with `$ARGUMENTS` replaced by everything after the name and `$1`, `$2` by its
+words (quotes hold a word together); a body that uses neither gets the
+arguments appended. An `@path` in a body attaches as if typed. Front matter may
+give a `description` and an `argument-hint`, shown by `/help` and Tab, which
+completes command names after `/`; a `model`, which sends it in a new
+conversation on that model unless it is the one answering; and `preset:
+review`, which runs it read-only, enforced as `/plan` is. Other presets change
+nothing, since a session's tools are fixed when it starts. A repository ships
+its own commands, so no key may widen approvals, tools or the sandbox: any
+other key, Claude Code's `allowed-tools` included, is named at startup and
+ignored, and a built-in name cannot be taken. A `!` line in a body is sent as
+text and never run, where Claude Code would run it.
 
 Mutations and processes ask before they happen. `--accept-edits` lets workspace
 edits through and asks about the rest; `--read-only` refuses both

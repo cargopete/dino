@@ -258,6 +258,9 @@ pub struct Hub {
     inbox: Inbox,
     cancel: Notify,
     info: Mutex<Option<Info>>,
+    /// What fills the window, as `/context` reports it, kept current by the
+    /// session between submissions.
+    context: Mutex<Option<serde_json::Value>>,
     workspaces: OnceLock<Workspaces>,
 }
 
@@ -280,6 +283,7 @@ impl Hub {
             inbox: Inbox::default(),
             cancel: Notify::new(),
             info: Mutex::new(None),
+            context: Mutex::new(None),
             workspaces: OnceLock::new(),
         });
         (hub, prompts)
@@ -298,6 +302,22 @@ impl Hub {
             .info
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(info);
+    }
+
+    /// Replaces what the page is told fills the window.
+    pub fn set_context(&self, report: serde_json::Value) {
+        *self
+            .context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    }
+
+    #[must_use]
+    pub fn context(&self) -> Option<serde_json::Value> {
+        self.context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn info(&self) -> Option<Info> {

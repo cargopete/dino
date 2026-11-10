@@ -87,6 +87,17 @@ impl WebSearch {
     }
 }
 
+/// The search tool as a provider's request declares it, for `/context`.
+pub fn declared(provider: ProviderKind) -> String {
+    match provider {
+        ProviderKind::Anthropic => format!(
+            r#"{{"type":"web_search_20250305","name":"web_search","max_uses":{}}}"#,
+            dino_model::MAX_NATIVE_SEARCHES
+        ),
+        ProviderKind::OpenAi | ProviderKind::Qwen => r#"{"type":"web_search"}"#.to_owned(),
+    }
+}
+
 /// Where a provider's own search is asked about: its API host.
 fn native_host(provider: ProviderKind) -> Option<&'static str> {
     match provider {

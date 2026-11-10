@@ -598,6 +598,12 @@ impl EventSink for Renderer {
                 self.break_stream()?;
                 turn_retried(*attempt, error)
             }
+            AgentEvent::PersonRan {
+                command, exit_code, ..
+            } => self.aside(&format!(
+                "! {command} · {}; its output goes with your next message",
+                crate::shell::exit_label(*exit_code)
+            )),
             AgentEvent::WaitingForNetwork {
                 error,
                 waited_seconds,

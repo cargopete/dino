@@ -634,6 +634,14 @@ pub enum AgentEvent {
         output_tokens: u64,
         window_tokens: u32,
     },
+    /// A shell line the person ran at the prompt with `!`, as themselves and
+    /// outside the sandbox. Its output goes with their next message.
+    PersonRan {
+        command: String,
+        /// Absent when it was killed by a signal or never started.
+        exit_code: Option<i32>,
+        output: String,
+    },
 }
 
 #[cfg(test)]

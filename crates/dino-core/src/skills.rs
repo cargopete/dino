@@ -49,7 +49,9 @@ pub fn builtin(text: &'static str) -> Option<Skill> {
     })
 }
 
-fn front_field(front: &str, key: &str) -> Option<String> {
+/// The value of `key:` in front matter, unquoted.
+#[must_use]
+pub fn front_field(front: &str, key: &str) -> Option<String> {
     front.lines().find_map(|line| {
         line.strip_prefix(key)
             .and_then(|rest| rest.strip_prefix(':'))
@@ -96,7 +98,8 @@ pub fn discover(dirs: &[PathBuf]) -> Vec<Skill> {
 }
 
 /// The front matter between leading `---` lines, and the body after it.
-fn split_front_matter(text: &str) -> (&str, &str) {
+#[must_use]
+pub fn split_front_matter(text: &str) -> (&str, &str) {
     let Some(rest) = text.strip_prefix("---") else {
         return ("", text);
     };

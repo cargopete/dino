@@ -35,6 +35,8 @@ use crate::style::PURPLE;
 struct Continuation {
     /// For completing `@path` against the workspace.
     root: std::path::PathBuf,
+    /// Custom commands and what they do, for completing after a `/`.
+    commands: Vec<(String, String)>,
 }
 
 impl rustyline::validate::Validator for Continuation {
@@ -62,16 +64,56 @@ fn join_continuations(input: &str) -> String {
 }
 
 impl rustyline::completion::Completer for Continuation {
-    type Candidate = String;
+    type Candidate = rustyline::completion::Pair;
 
     fn complete(
         &self,
         line: &str,
         pos: usize,
         _context: &rustyline::Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<String>)> {
-        Ok(complete_at(line, pos, &self.root))
+    ) -> rustyline::Result<(usize, Vec<rustyline::completion::Pair>)> {
+        if let Some(candidates) = complete_command(line, pos, &self.commands) {
+            return Ok((0, candidates));
+        }
+        let (start, paths) = complete_at(line, pos, &self.root);
+        let pairs = paths
+            .into_iter()
+            .map(|path| rustyline::completion::Pair {
+                display: path.clone(),
+                replacement: path,
+            })
+            .collect();
+        Ok((start, pairs))
     }
+}
+
+/// Completes a command name typed after a `/` at the start of the line, with
+/// what each does beside it.
+fn complete_command(
+    line: &str,
+    pos: usize,
+    custom: &[(String, String)],
+) -> Option<Vec<rustyline::completion::Pair>> {
+    let typed = line[..pos.min(line.len())].strip_prefix('/')?;
+    if typed.contains(char::is_whitespace) || typed.contains('/') {
+        return None;
+    }
+    let builtin = COMMANDS
+        .iter()
+        .map(|(name, description)| ((*name).to_owned(), (*description).to_owned()));
+    let mut candidates: Vec<rustyline::completion::Pair> = builtin
+        .chain(custom.iter().cloned())
+        .filter(|(name, _)| name.starts_with(typed))
+        .map(|(name, description)| rustyline::completion::Pair {
+            display: format!(
+                "/{name:<12} {}",
+                dino_core::text::capped_head(&description, 60)
+            ),
+            replacement: format!("/{name} "),
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.replacement.cmp(&b.replacement));
+    Some(candidates)
 }
 
 /// Completes the `@path` word ending at `pos` against the workspace.
@@ -202,6 +244,13 @@ enum Input {
     Init,
     Log,
     Schedules,
+    Context,
+    /// The call this many back from the latest; `None` for an argument that
+    /// is not a number.
+    Expand(Option<usize>),
+    /// A shell line the person runs themselves, after a `!`.
+    Shell(String),
+    Custom(crate::commands::Invocation),
     Worktree(Option<String>),
     Exit,
     Unknown(String),
@@ -227,6 +276,14 @@ fn parse(line: &str) -> Input {
         return Input::Exit;
     }
     let submission = || Input::Submit(trimmed.to_owned());
+    if let Some(command) = trimmed.strip_prefix('!') {
+        let command = command.trim();
+        return if command.is_empty() {
+            submission()
+        } else {
+            Input::Shell(command.to_owned())
+        };
+    }
     let Some(rest) = trimmed.strip_prefix('/') else {
         return submission();
     };
@@ -263,6 +320,8 @@ fn parse(line: &str) -> Input {
         "plan" => Input::Plan(remainder()),
         "log" => Input::Log,
         "schedules" => Input::Schedules,
+        "context" => Input::Context,
+        "expand" => Input::Expand(remainder().map_or(Some(1), |n| n.parse().ok())),
         "worktree" => Input::Worktree(remainder()),
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
@@ -271,9 +330,14 @@ fn parse(line: &str) -> Input {
     }
 }
 
+/// Whether `/name` is a built-in command or one of its spellings.
+pub(crate) fn is_builtin(name: &str) -> bool {
+    !matches!(parse(&format!("/{name}")), Input::Unknown(_))
+}
+
 /// Whether a line is for the session rather than the model.
 pub(crate) fn is_command(line: &str) -> bool {
-    !matches!(parse(line), Input::Submit(_) | Input::Blank)
+    !matches!(parse(line), Input::Submit(_) | Input::Blank) || crate::commands::claims(line)
 }
 
 /// Lines entered during a run, as the inputs they become after it: a command
@@ -476,6 +540,14 @@ pub struct Session<S> {
     pub remote: Option<Arc<crate::remote::Hub>>,
     /// Set when the session offers the schedule tools.
     pub schedules: Option<Due>,
+    /// Commands from Markdown files, invoked by name.
+    pub commands: crate::commands::Commands,
+    /// What the system prompt was built from, for `/context`.
+    pub prompt: dino_core::prompt::PromptContext,
+    /// Shell lines the person ran since their last message, which it carries.
+    pub ran: Vec<crate::shell::Ran>,
+    /// How the session searches, so `/context` can count the provider's tool.
+    pub web_search: crate::search::WebSearch,
     /// Shared with `ask`: cleared while `/auto` sees every submission through.
     pub attended: Arc<std::sync::atomic::AtomicBool>,
     /// Which linked worktree this is, for the banner.
@@ -500,7 +572,26 @@ where
             rustyline::Editor::new().context("cannot start the line editor")?;
         editor.set_helper(Some(Continuation {
             root: self.workspace_root.clone(),
+            commands: self
+                .commands
+                .iter()
+                .map(|command| {
+                    let about = command.description.clone().unwrap_or_default();
+                    (command.name.clone(), about)
+                })
+                .collect(),
         }));
+        let to_editor = Arc::new(Mutex::new(None));
+        editor.bind_sequence(
+            rustyline::KeyEvent::ctrl('G'),
+            rustyline::EventHandler::Conditional(Box::new(crate::keys::ToEditor {
+                text: Arc::clone(&to_editor),
+            })),
+        );
+        editor.bind_sequence(
+            rustyline::KeyEvent::ctrl('V'),
+            rustyline::EventHandler::Conditional(Box::new(crate::keys::PasteImage)),
+        );
         // A new line without sending: alt-enter, which is also what shift-enter
         // sends once a terminal is set to send ESC CR for it. Not ctrl-j: Enter
         // typed before the editor takes the terminal arrives as the same byte.
@@ -549,12 +640,21 @@ where
                         line
                     }
                     // At an idle prompt Ctrl-C clears the line, as a shell does.
-                    Err(ReadlineError::Interrupted) => continue,
+                    Err(ReadlineError::Interrupted) => {
+                        if let Some(text) = to_editor.lock().ok().and_then(|mut text| text.take()) {
+                            self.typed_ahead = Self::edited(text);
+                        }
+                        continue;
+                    }
                     Err(ReadlineError::Eof) => break,
                     Err(error) => return Err(error).context("cannot read from the terminal"),
                 }
             };
-            let input = parse(&join_continuations(&line));
+            let line = join_continuations(&line);
+            let input = match self.commands.invoke(&line) {
+                Some(invocation) => Input::Custom(invocation),
+                None => parse(&line),
+            };
             let input = if let Some(number) = self.rewinding.take() {
                 self.decide_rewind(number, input)
             } else if self.awaiting_plan {
@@ -591,6 +691,7 @@ where
         self.describe_to(&hub);
         hub.set_busy(false);
         println!("{}", self.opening());
+        self.report_context(&hub);
         self.announce_waiting();
         loop {
             // Busy while a schedule runs, so a page's resume or move waits its turn.
@@ -621,9 +722,16 @@ where
                 }
                 crate::remote::Request::Workspace(path) => return Ok(Some(path)),
             }
+            self.report_context(&hub);
             hub.set_busy(false);
         }
         Ok(None)
+    }
+
+    fn report_context(&self, hub: &crate::remote::Hub) {
+        if let Ok(report) = serde_json::to_value(self.context()) {
+            hub.set_context(report);
+        }
     }
 
     fn describe_to(&self, hub: &crate::remote::Hub) {
@@ -794,6 +902,91 @@ where
         }
     }
 
+    /// The prompt after Ctrl-G, or as it was when the editor failed.
+    fn edited(text: String) -> String {
+        match crate::keys::edit(&text) {
+            Ok(edited) => edited,
+            Err(error) => {
+                println!("{}", style::paint(style::WARN, &format!("  {error:#}")));
+                text
+            }
+        }
+    }
+
+    /// Runs a line the person typed after `!`, as them, and keeps what it
+    /// printed for their next message.
+    async fn run_shell(&mut self, command: &str) {
+        let ran = crate::shell::run(command, &self.workspace_root).await;
+        let event = dino_protocol::AgentEvent::PersonRan {
+            command: ran.command.clone(),
+            exit_code: ran.exit_code,
+            output: ran.output.clone(),
+        };
+        if let Err(error) = self.agent.record(&event) {
+            println!("{}", style::paint(style::WARN, &format!("  {error}")));
+        }
+        self.ran.push(ran);
+    }
+
+    /// Sends a custom command, on the model it names and read-only when it
+    /// asks for the review preset. Nothing in it can loosen the session.
+    async fn invoke(&mut self, invocation: crate::commands::Invocation) {
+        for note in &invocation.notes {
+            println!("{}", style::paint(FAINT, &format!("  {note}")));
+        }
+        if let Some(key) = invocation.model.filter(|key| *key != self.model_key) {
+            self.start_conversation(&key);
+            if self.model_key != key {
+                return;
+            }
+        }
+        let was_planning = self.planning.load(std::sync::atomic::Ordering::Relaxed);
+        if invocation.read_only {
+            self.planning
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.submit(invocation.text).await;
+        self.planning
+            .store(was_planning, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What fills the window, from the provider's last figure and estimates.
+    pub fn context(&self) -> crate::context::Report {
+        let mut prompt = self.prompt.clone();
+        prompt.model = Some(self.model_key.clone());
+        let parts = dino_core::prompt::prompt_parts(&prompt);
+        let tools = dino_core::ToolRuntime::definitions(self.agent.tools());
+        let state = self.agent.session().export_state().ok();
+        let history = state
+            .as_ref()
+            .filter(|state| state.provider != dino_protocol::ProviderKind::OpenAi)
+            .map(|state| (state.provider, &state.payload));
+        let empty =
+            history.is_some_and(|(_, payload)| payload.as_array().is_some_and(Vec::is_empty));
+        let reported = self
+            .status
+            .lock()
+            .ok()
+            .map(|status| status.context)
+            .filter(|tokens| *tokens > 0 && !empty);
+        let profile = self.agent.session().profile();
+        let window = profile.context_window_tokens;
+        let native_search = self
+            .web_search
+            .switch(profile.provider)
+            .is_some_and(|search| search.on())
+            .then(|| crate::search::declared(profile.provider));
+        crate::context::Report::new(&crate::context::Contents {
+            prompt: &parts,
+            tools: &tools,
+            history,
+            window,
+            reported,
+            marks: crate::context::marks(window, self.compaction),
+            native_search: native_search.as_deref(),
+        })
+    }
+
     /// Says something to the pages, when there are any.
     fn tell(&self, text: &str) {
         if let Some(hub) = &self.remote {
@@ -806,7 +999,7 @@ where
         match input {
             Input::Blank => {}
             Input::Exit => return Ok(true),
-            Input::Help => print!("{}", help()),
+            Input::Help => print!("{}", help(&self.commands)),
             Input::Status => println!("{}", self.banner()),
             Input::Clear => {
                 let key = self.model_key.clone();
@@ -853,6 +1046,20 @@ where
             }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Schedules => print!("{}", self.schedules()),
+            Input::Context => print!("{}", self.context().render()),
+            Input::Expand(Some(back)) => print!(
+                "{}",
+                crate::expand::expand(std::path::Path::new(&self.log_path), back)
+            ),
+            Input::Expand(None) => println!(
+                "{}",
+                style::paint(
+                    FAINT,
+                    "  /expand shows the last call whole; /expand 2 the one before"
+                )
+            ),
+            Input::Shell(command) => self.run_shell(&command).await,
+            Input::Custom(invocation) => self.invoke(invocation).await,
             Input::Worktree(name) => {
                 match crate::worktree::Worktree::create(
                     &self.workspace_root,
@@ -1015,6 +1222,12 @@ where
             text
         };
         let text = dino_exec::with_context(self.with_attachments(text).await, &added);
+        let text = if self.ran.is_empty() {
+            text
+        } else {
+            let ran = std::mem::take(&mut self.ran);
+            format!("{text}{}", crate::shell::carried(&ran))
+        };
         // The person's words first, so the transcript shows what they typed.
         let text = match self.carried.take() {
             Some(summary) => format!("{text}{}{summary}", crate::recall::SUMMARY_DIVIDER),
@@ -1690,73 +1903,105 @@ fn diff(workspace: &std::path::Path) -> String {
     block
 }
 
-fn help() -> String {
-    let rows = [
-        ("/help", "these commands"),
-        ("/status", "model, workspace, containment, approvals, log"),
-        (
-            "/clear",
-            "start a new conversation; the old one stays resumable",
-        ),
-        (
-            "/model",
-            "list models; /model <key> switches, in a new conversation; \
-             --default keeps it for later sessions",
-        ),
-        (
-            "/resume",
-            "list saved conversations; /resume <id or name> continues one",
-        ),
-        (
-            "/rename",
-            "/rename <name> names this conversation; alone, clears it",
-        ),
-        (
-            "/rewind",
-            "list checkpoints; /rewind <n> goes back to before that message",
-        ),
-        (
-            "/fork",
-            "/fork [name] carries on in a copy; the original stays resumable",
-        ),
-        (
-            "/plan",
-            "/plan <task>: plan read-only, then accept, revise or drop it",
-        ),
-        ("/diff", "what has changed in the working tree"),
-        (
-            "/init",
-            "survey the repository and write or improve AGENTS.md",
-        ),
-        ("/cost", "requests, tokens and list price so far"),
-        (
-            "/compact",
-            "summarise, then carry on in a fresh conversation",
-        ),
-        ("/auto", "see every message through, or stop doing so"),
-        ("/log", "the path of this session's log"),
-        (
-            "/schedules",
-            "reminders and recurring messages in this workspace",
-        ),
-        (
-            "/worktree",
-            "/worktree [name]: a new session in a git worktree of its own",
-        ),
-        ("/exit", "leave; Ctrl-D does the same"),
-    ];
+/// The built-in commands and what each does, for `/help` and Tab.
+const COMMANDS: [(&str, &str); 21] = [
+    ("help", "these commands"),
+    ("status", "model, workspace, containment, approvals, log"),
+    (
+        "clear",
+        "start a new conversation; the old one stays resumable",
+    ),
+    (
+        "model",
+        "list models; /model <key> switches, in a new conversation; \
+         --default keeps it for later sessions",
+    ),
+    (
+        "resume",
+        "list saved conversations; /resume <id or name> continues one",
+    ),
+    (
+        "rename",
+        "/rename <name> names this conversation; alone, clears it",
+    ),
+    (
+        "rewind",
+        "list checkpoints; /rewind <n> goes back to before that message",
+    ),
+    (
+        "fork",
+        "/fork [name] carries on in a copy; the original stays resumable",
+    ),
+    (
+        "plan",
+        "/plan <task>: plan read-only, then accept, revise or drop it",
+    ),
+    ("diff", "what has changed in the working tree"),
+    (
+        "init",
+        "survey the repository and write or improve AGENTS.md",
+    ),
+    ("cost", "requests, tokens and list price so far"),
+    (
+        "context",
+        "what fills the window: prompt, tools, conversation",
+    ),
+    (
+        "expand",
+        "the last call's whole result; /expand 2 the one before",
+    ),
+    (
+        "compact",
+        "summarise, then carry on in a fresh conversation",
+    ),
+    ("auto", "see every message through, or stop doing so"),
+    ("log", "the path of this session's log"),
+    (
+        "schedules",
+        "reminders and recurring messages in this workspace",
+    ),
+    (
+        "worktree",
+        "/worktree [name]: a new session in a git worktree of its own",
+    ),
+    ("exit", "leave; Ctrl-D does the same"),
+    ("quit", "leave"),
+];
+
+fn help(custom: &crate::commands::Commands) -> String {
     let mut block = String::new();
-    for (command, description) in rows {
+    let row = |block: &mut String, command: &str, description: &str| {
         let _ = writeln!(
-            &mut block,
+            block,
             "  {}  {}",
             style::paint(PURPLE, &format!("{command:<10}")),
             style::paint(MUTED, description)
         );
+    };
+    for (name, description) in COMMANDS.iter().filter(|(name, _)| *name != "quit") {
+        row(&mut block, &format!("/{name}"), description);
+    }
+    row(
+        &mut block,
+        "!<line>",
+        "run a shell line yourself; its output goes with your next message",
+    );
+    for command in custom.iter() {
+        let name = match &command.argument_hint {
+            Some(hint) => format!("/{} {hint}", command.name),
+            None => format!("/{}", command.name),
+        };
+        let about = command.description.as_deref().unwrap_or("(no description)");
+        row(
+            &mut block,
+            &name,
+            &format!("{about} · {}", command.source.label()),
+        );
     }
     block.push_str(&style::paint(
         FAINT,
-        "  Ctrl-C during a turn cancels it and keeps the conversation.\n",
+        "  Ctrl-C during a turn cancels it and keeps the conversation. Ctrl-R searches \
+         history, Ctrl-G opens the prompt in $EDITOR, Ctrl-V pastes a clipboard image.\n",
     ));
     block
 }
@@ -1980,6 +2225,52 @@ mod tests {
         let (_, candidates) = complete_at("no at here", 10, &root);
         assert!(candidates.is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bang_runs_a_shell_line_and_a_bare_bang_is_prose() {
+        assert_eq!(
+            parse("  !git status --short "),
+            Input::Shell("git status --short".into())
+        );
+        assert_eq!(parse("!"), Input::Submit("!".into()));
+        assert!(is_command("!cargo test"), "held back during a run");
+    }
+
+    #[test]
+    fn expand_takes_a_count_back_from_the_latest_call() {
+        assert_eq!(parse("/expand"), Input::Expand(Some(1)));
+        assert_eq!(parse("/expand 3"), Input::Expand(Some(3)));
+        assert_eq!(parse("/expand last"), Input::Expand(None));
+        assert_eq!(parse("/context"), Input::Context);
+    }
+
+    #[test]
+    fn every_listed_command_is_built_in_and_completes_after_a_slash() {
+        for (name, _) in COMMANDS {
+            assert!(is_builtin(name), "{name}");
+        }
+        assert!(!is_builtin("review-pr"));
+        for taken in ["rewind", "fork", "worktree"] {
+            assert!(is_builtin(taken), "a custom /{taken} must lose");
+        }
+        let custom = [("review-pr".to_owned(), "Review a pull request".to_owned())];
+
+        let names = |line: &str| -> Vec<String> {
+            complete_command(line, line.len(), &custom)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|pair| pair.replacement)
+                .collect()
+        };
+
+        assert_eq!(
+            names("/re"),
+            ["/rename ", "/resume ", "/review-pr ", "/rewind "]
+        );
+        assert_eq!(names("/con"), ["/context "]);
+        assert!(complete_command("/model cl", 9, &custom).is_none());
+        assert!(complete_command("look at /re", 11, &custom).is_none());
     }
 
     #[test]
