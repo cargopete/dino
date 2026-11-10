@@ -428,15 +428,21 @@ pub fn build_sandbox(
     workspace: &Path,
     protected: &[PathBuf],
 ) -> Result<Arc<dyn Sandbox>> {
+    let target = crate::worktree::shared_target(workspace);
     match mode {
-        SandboxMode::None => Ok(Arc::new(Unconfined)),
-        SandboxMode::Workspace => match dino_sandbox::detect_protecting(workspace, protected) {
-            Ok(sandbox) => Ok(Arc::from(sandbox)),
-            Err(error) => bail!(
-                "{error}. Pass --sandbox none to run without containment, \
+        SandboxMode::None => Ok(match target {
+            Some(target) => Arc::new(dino_sandbox::UnconfinedBuildingIn(target)),
+            None => Arc::new(Unconfined),
+        }),
+        SandboxMode::Workspace => {
+            match dino_sandbox::detect_building_in(workspace, protected, target.as_deref()) {
+                Ok(sandbox) => Ok(Arc::from(sandbox)),
+                Err(error) => bail!(
+                    "{error}. Pass --sandbox none to run without containment, \
                  which is recorded in the session log."
-            ),
-        },
+                ),
+            }
+        }
     }
 }
 

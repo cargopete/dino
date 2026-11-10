@@ -47,6 +47,9 @@ fn child_environment(sandbox: &dyn Sandbox) -> BTreeMap<&'static str, String> {
         environment.insert("TMPDIR", temp_dir.display().to_string());
         environment.insert("GOTMPDIR", temp_dir.display().to_string());
     }
+    if let Some(target_dir) = sandbox.target_dir() {
+        environment.insert("CARGO_TARGET_DIR", target_dir.display().to_string());
+    }
     // Their defaults under the home directory are outside the writable set.
     if let Some(cache) = sandbox.cache_dir() {
         for (name, sub) in CACHES {
