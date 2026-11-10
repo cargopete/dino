@@ -742,6 +742,7 @@ fn case_log(
             approval_mode: "eval (unattended, everything allowed)".to_owned(),
             sandbox: sandbox.label(),
             max_model_turns: case.max_turns,
+            pid: None,
         },
     )
     .map_err(|error| EvalError::Setup(error.to_string()))

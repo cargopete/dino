@@ -789,7 +789,11 @@ new conversation, since history does not move between models; add `--default`
 to start later sessions on it too), `/resume [id]` to list or continue a
 saved one, `/fork [name]` to carry on in a copy, `/rewind [n]` to go back to
 before a message, `/diff` for the working tree, `/schedules` for the workspace's
-schedules, `/worktree [name]` to carry on in a git worktree of its own, `/cost` for requests, tokens and cost, `/context` for what fills
+schedules, `/worktree [name]` to carry on in a git worktree of its own,
+`/serve [port]` to drive the session from a page as well (as `dino serve` does,
+on the Tailscale or loopback address; `/serve stop` ends it; a turn a page
+starts asks its approvals there, one you start asks at the terminal), `/cost`
+for requests, tokens and cost, `/context` for what fills
 the window and `/expand [n]` for a call's whole result. `/context` takes the
 total from what the provider counted for the last request and gives each part,
 the system prompt piece by piece (each instructions file, the outline, memory,

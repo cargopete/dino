@@ -6,9 +6,13 @@
 //! prompt answered from the page, and the sink that feeds the hub. The network
 //! half, and every check on who may connect, is in [`server`]. RFC-0020.
 
+mod blurb;
+mod dash;
 mod places;
 mod server;
 
+pub use blurb::Blurb;
+pub use dash::serve as serve_dash;
 pub use places::Place;
 pub use places::SavedSession;
 pub use places::Workspaces;
@@ -274,13 +278,20 @@ impl Hub {
     /// A hub, and the receiving end of the prompts sent to it.
     #[must_use]
     pub fn new() -> (Arc<Self>, mpsc::Receiver<Request>) {
+        Self::with_inbox(Inbox::default())
+    }
+
+    /// As [`Hub::new`], delivering lines typed during a run to `inbox`: for a
+    /// session already under way, whose agent reads that one.
+    #[must_use]
+    pub fn with_inbox(inbox: Inbox) -> (Arc<Self>, mpsc::Receiver<Request>) {
         let (commands, prompts) = mpsc::channel(WAITING);
         let (live, _) = broadcast::channel(LIVE);
         let hub = Arc::new(Self {
             state: Mutex::new(State::default()),
             live,
             commands,
-            inbox: Inbox::default(),
+            inbox,
             cancel: Notify::new(),
             info: Mutex::new(None),
             context: Mutex::new(None),
@@ -776,31 +787,156 @@ fn cap_strings(value: &mut serde_json::Value) {
     }
 }
 
+/// A hub being served to pages for a session that was already running.
+pub struct Serving {
+    pub hub: Arc<Hub>,
+    pub requests: mpsc::Receiver<Request>,
+    /// Where the page is, token included.
+    pub url: String,
+    pub local_only: bool,
+    task: tokio::task::JoinHandle<std::convert::Infallible>,
+}
+
+impl Serving {
+    /// Stops accepting pages. One already connected keeps its stream, which goes
+    /// quiet because the session no longer feeds the hub.
+    pub fn stop(self) {
+        self.task.abort();
+    }
+}
+
+/// Starts serving `inbox`'s session to pages, on the address `dino serve` would
+/// choose for `bind` and `port`.
+///
+/// # Errors
+///
+/// Returns an error when the address is not one the page may be served on, it
+/// cannot be bound, or the token cannot be made.
+pub async fn start(
+    bind: Option<std::net::IpAddr>,
+    port: u16,
+    inbox: Inbox,
+    workspaces: Workspaces,
+) -> anyhow::Result<Serving> {
+    use anyhow::Context as _;
+    let address = bind_address(bind, port)?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("cannot listen on {address}"))?;
+    let address = listener.local_addr().context("cannot read the address")?;
+    let token = new_token()?;
+    let (hub, requests) = Hub::with_inbox(inbox);
+    hub.offer(workspaces);
+    // The token is in the fragment, which a browser keeps to itself.
+    let url = format!("http://{address}/#{token}");
+    let task = tokio::spawn(serve(listener, Arc::clone(&hub), token));
+    Ok(Serving {
+        hub,
+        requests,
+        url,
+        local_only: address.ip().is_loopback(),
+        task,
+    })
+}
+
+/// The hub of a session that `/serve` may start serving after it has begun, and
+/// whether the turn under way came from a page.
+#[derive(Clone, Default)]
+pub struct Late {
+    hub: Arc<Mutex<Option<Arc<Hub>>>>,
+    page_turn: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Late {
+    /// With a hub from the start, as `dino serve`, every turn is a page's.
+    #[must_use]
+    pub fn new(hub: Option<Arc<Hub>>) -> Self {
+        Self {
+            page_turn: Arc::new(std::sync::atomic::AtomicBool::new(hub.is_some())),
+            hub: Arc::new(Mutex::new(hub)),
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self) -> Option<Arc<Hub>> {
+        self.hub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set(&self, hub: Option<Arc<Hub>>) {
+        *self
+            .hub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hub;
+    }
+
+    /// Marks the turn about to run as one a page started, so its approvals are
+    /// asked there and not at a terminal nobody is watching.
+    pub fn page_turn(&self, page: bool) {
+        self.page_turn
+            .store(page, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn asking_page(&self) -> Option<Arc<Hub>> {
+        if self.page_turn.load(std::sync::atomic::Ordering::Relaxed) {
+            self.get()
+        } else {
+            None
+        }
+    }
+}
+
 /// Feeds the hub the events the terminal and the log get.
-pub struct Tap(pub Option<Arc<Hub>>);
+pub struct Tap(pub Late);
 
 impl EventSink for Tap {
     fn emit(&mut self, event: &AgentEvent) -> Result<(), SinkError> {
-        if let Some(hub) = &self.0 {
+        if let Some(hub) = self.0.get() {
             hub.event(event);
         }
         Ok(())
     }
 }
 
-/// Asks about a call on a page, and offers it less than the terminal would.
-///
-/// A page may give every answer the terminal can except a rule kept for later
-/// sessions: whoever holds the token holds a phone that can be lost, and that is
-/// the one answer that outlasts this session.
-pub struct RemoteApprover {
-    hub: Arc<Hub>,
+/// Asks `terminal`, except in a turn a page started, which asks on the page.
+pub struct Routed<T> {
+    terminal: T,
+    late: Late,
 }
 
-impl RemoteApprover {
+impl<T> Routed<T> {
     #[must_use]
-    pub fn new(hub: Arc<Hub>) -> Self {
-        Self { hub }
+    pub fn new(terminal: T, late: Late) -> Self {
+        Self { terminal, late }
+    }
+}
+
+impl<T: Approver> Approver for Routed<T> {
+    fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
+        self.ask_in(call, action, &AskContext::default())
+    }
+
+    fn ask_in(
+        &self,
+        call: &ToolCall,
+        action: &ToolAction,
+        context: &AskContext,
+    ) -> ReplyFuture<'_> {
+        match self.late.asking_page() {
+            Some(hub) => ask_page(hub, call, action, context),
+            None => self.terminal.ask_in(call, action, context),
+        }
+    }
+}
+
+impl<T: Asker> Asker for Routed<T> {
+    fn ask(&self, questions: Vec<Question>) -> AnswerFuture<'_> {
+        match self.late.asking_page() {
+            Some(hub) => Box::pin(async move { RemoteAsker::new(hub).ask(questions).await }),
+            None => self.terminal.ask(questions),
+        }
     }
 }
 
@@ -818,60 +954,58 @@ fn wire_key(reply: &ApprovalReply) -> Option<&'static str> {
     }
 }
 
-impl Approver for RemoteApprover {
-    fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
-        self.ask_in(call, action, &AskContext::default())
-    }
-
-    fn ask_in(
-        &self,
-        call: &ToolCall,
-        action: &ToolAction,
-        context: &AskContext,
-    ) -> ReplyFuture<'_> {
-        let summary = crate::render::describe_call(call);
-        let subject = action.subject.clone().unwrap_or_else(|| call.name.clone());
-        let asking = crate::approve::Asking {
-            summary: &summary,
-            tool: &call.name,
-            subject: &subject,
-            class: action.class,
-            context,
-            change: None,
-        };
-        let offered: Vec<(&'static str, ApprovalReply, String)> =
-            crate::approve::choices(&asking, crate::approve::always_label(action.class))
-                .into_iter()
-                .filter_map(|choice| {
-                    wire_key(&choice.reply).map(|key| (key, choice.reply, choice.label))
-                })
-                .collect();
-        let arguments = serde_json::to_string_pretty(&call.arguments).unwrap_or_default();
-        let approval = Approval {
-            id: 0,
-            call_id: call.id.clone(),
-            tool: call.name.clone(),
-            class: action.class,
-            subject,
-            summary,
-            arguments: dino_core::text::capped_head(&arguments, MAX_ARGUMENT_BYTES),
-            choices: offered
-                .iter()
-                .map(|(key, _, label)| WireChoice {
-                    key,
-                    label: label.clone(),
-                })
-                .collect(),
-            also_pending: context.also_pending.len(),
-            unconfined: context.unconfined.clone(),
-        };
-        let offered = offered
+/// Asks about a call on a page, and offers it less than the terminal would.
+///
+/// A page may give every answer the terminal can except a rule kept for later
+/// sessions: whoever holds the token holds a phone that can be lost, and that is
+/// the one answer that outlasts this session.
+fn ask_page(
+    hub: Arc<Hub>,
+    call: &ToolCall,
+    action: &ToolAction,
+    context: &AskContext,
+) -> ReplyFuture<'static> {
+    let summary = crate::render::describe_call(call);
+    let subject = action.subject.clone().unwrap_or_else(|| call.name.clone());
+    let asking = crate::approve::Asking {
+        summary: &summary,
+        tool: &call.name,
+        subject: &subject,
+        class: action.class,
+        context,
+        change: None,
+    };
+    let offered: Vec<(&'static str, ApprovalReply, String)> =
+        crate::approve::choices(&asking, crate::approve::always_label(action.class))
             .into_iter()
-            .map(|(key, reply, _)| (key, reply))
+            .filter_map(|choice| {
+                wire_key(&choice.reply).map(|key| (key, choice.reply, choice.label))
+            })
             .collect();
-        let hub = Arc::clone(&self.hub);
-        Box::pin(async move { hub.ask(approval, offered).await })
-    }
+    let arguments = serde_json::to_string_pretty(&call.arguments).unwrap_or_default();
+    let approval = Approval {
+        id: 0,
+        call_id: call.id.clone(),
+        tool: call.name.clone(),
+        class: action.class,
+        subject,
+        summary,
+        arguments: dino_core::text::capped_head(&arguments, MAX_ARGUMENT_BYTES),
+        choices: offered
+            .iter()
+            .map(|(key, _, label)| WireChoice {
+                key,
+                label: label.clone(),
+            })
+            .collect(),
+        also_pending: context.also_pending.len(),
+        unconfined: context.unconfined.clone(),
+    };
+    let offered = offered
+        .into_iter()
+        .map(|(key, reply, _)| (key, reply))
+        .collect();
+    Box::pin(async move { hub.ask(approval, offered).await })
 }
 
 #[cfg(test)]
@@ -891,6 +1025,118 @@ mod tests {
 
     fn parsed(frame: &Frame) -> Value {
         serde_json::from_str(&frame.json).expect("a frame is JSON")
+    }
+
+    /// Stands in for the terminal, rejecting every call, so a test sees which
+    /// side was asked.
+    pub(super) struct Terminal;
+
+    impl Approver for Terminal {
+        fn ask(&self, _call: &ToolCall, _action: &ToolAction) -> ReplyFuture<'_> {
+            Box::pin(async { ApprovalReply::Reject(Some("terminal".to_owned())) })
+        }
+    }
+
+    /// As [`Terminal`], for the model's questions.
+    struct TerminalQuestions;
+
+    impl Asker for TerminalQuestions {
+        fn ask(&self, _questions: Vec<Question>) -> AnswerFuture<'_> {
+            Box::pin(async {
+                Some(Answered {
+                    by: "terminal".to_owned(),
+                    answers: Vec::new(),
+                })
+            })
+        }
+    }
+
+    /// Asks on the page, as every turn of `dino serve` does.
+    pub(super) fn on_page(hub: &Arc<Hub>) -> Routed<Terminal> {
+        Routed::new(Terminal, Late::new(Some(Arc::clone(hub))))
+    }
+
+    /// Answers the next approval the hub publishes with `key`.
+    fn answering(hub: &Arc<Hub>, key: &'static str) -> tokio::task::JoinHandle<()> {
+        let mut live = hub.subscribe(0).live;
+        let hub = Arc::clone(hub);
+        tokio::spawn(async move {
+            let approval = next_approval(&mut live).await;
+            hub.answer(approval["id"].as_u64().unwrap(), key).unwrap();
+        })
+    }
+
+    #[tokio::test]
+    async fn a_hub_served_late_asks_a_page_turn_on_the_page_and_the_rest_at_the_terminal() {
+        let late = Late::default();
+        let approver = Routed::new(Terminal, late.clone());
+        let action = ToolAction::process("cargo test");
+        let asked = || approver.ask_in(&call("c1"), &action, &AskContext::default());
+        let terminal = ApprovalReply::Reject(Some("terminal".to_owned()));
+        // A page turn with nothing served yet has no page to ask.
+        late.page_turn(true);
+        assert_eq!(asked().await, terminal);
+
+        let (hub, _prompts) = Hub::new();
+        late.set(Some(Arc::clone(&hub)));
+        late.page_turn(false);
+        assert_eq!(asked().await, terminal);
+
+        late.page_turn(true);
+        let page = answering(&hub, "once");
+        assert_eq!(asked().await, ApprovalReply::Once);
+        page.await.unwrap();
+
+        late.set(None);
+        assert_eq!(asked().await, terminal);
+    }
+
+    #[tokio::test]
+    async fn a_page_turn_in_a_session_served_late_asks_the_models_questions_on_the_page() {
+        let late = Late::default();
+        let asker = Routed::new(TerminalQuestions, late.clone());
+        let (hub, _prompts) = Hub::new();
+        late.set(Some(Arc::clone(&hub)));
+        assert_eq!(asker.ask(questions()).await.unwrap().by, "terminal");
+
+        late.page_turn(true);
+        let mut live = hub.subscribe(0).live;
+        let answered = tokio::spawn(async move { asker.ask(questions()).await });
+        let id = loop {
+            let value = parsed(&live.recv().await.unwrap());
+            if value["kind"] == "question" {
+                break value["question"]["id"].as_u64().unwrap();
+            }
+        };
+        let pick = |index| PageAnswer {
+            chosen: vec![index],
+            other: None,
+        };
+        hub.reply(id, &[pick(0), pick(1)]).unwrap();
+        assert_eq!(answered.await.unwrap().unwrap().by, "page");
+    }
+
+    #[tokio::test]
+    async fn a_subagent_of_a_page_turn_asks_on_the_page() {
+        let late = Late::default();
+        let child = crate::subagent::Asking::new(
+            Routed::new(Terminal, late.clone()),
+            crate::spinner::Hold::default(),
+            Arc::default(),
+        );
+        let (hub, _prompts) = Hub::new();
+        late.set(Some(Arc::clone(&hub)));
+        late.page_turn(true);
+        let page = answering(&hub, "session");
+        let reply = child
+            .ask_in(
+                &call("c1"),
+                &ToolAction::process("cargo test"),
+                &AskContext::default(),
+            )
+            .await;
+        assert_eq!(reply, ApprovalReply::ForSession);
+        page.await.unwrap();
     }
 
     /// The approval frame the next `ask` publishes, read off the live channel.
@@ -973,7 +1219,7 @@ mod tests {
     async fn a_page_answers_an_approval_and_the_session_gets_the_reply() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask_in(
@@ -1006,7 +1252,7 @@ mod tests {
     async fn a_rule_for_later_sessions_is_never_offered_to_a_page() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let context = AskContext {
             also_pending: vec!["other".to_owned()],
             program: Some("cargo".to_owned()),
@@ -1032,7 +1278,7 @@ mod tests {
     async fn a_call_outside_the_sandbox_can_be_run_once_from_a_page() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let context = AskContext {
             unconfined: Some("needs the network".to_owned()),
             ..AskContext::default()
@@ -1064,7 +1310,7 @@ mod tests {
     async fn a_page_may_allow_every_command_but_never_remember_a_rule() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask(&call("c1"), &ToolAction::process("cargo test"))
@@ -1089,7 +1335,7 @@ mod tests {
     async fn a_cancelled_run_withdraws_its_question() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask(&call("c1"), &ToolAction::process("cargo test"))
@@ -1112,7 +1358,7 @@ mod tests {
     async fn a_page_that_connects_late_is_owed_the_approval_still_waiting() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask(&call("c1"), &ToolAction::process("cargo test"))

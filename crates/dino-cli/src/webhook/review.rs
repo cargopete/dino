@@ -210,6 +210,7 @@ async fn run_session(
             approval_mode: ApprovalMode::ReadOnly.label().to_owned(),
             sandbox: "none needed: no tool runs a process".to_owned(),
             max_model_turns: settings.max_turns.get(),
+            pid: Some(std::process::id()),
         },
     )?;
     let mut agent = Agent::new(

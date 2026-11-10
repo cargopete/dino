@@ -42,6 +42,13 @@ pub fn cooked<T>(read: impl FnOnce() -> T) -> T {
     read()
 }
 
+/// Blocks until a key is waiting to be read, without reading it, or until `stop`
+/// is set. Returns whether a key is waiting. Where the terminal cannot be
+/// watched this says yes at once, and the caller's blocking read does the waiting.
+pub fn wait_for_key(stop: &AtomicBool) -> bool {
+    imp::wait_for_key(stop)
+}
+
 /// A running listener. Dropping it without [`Listener::stop`] still restores
 /// the terminal.
 pub struct Listener {
@@ -263,6 +270,23 @@ mod imp {
         }
     }
 
+    /// In cbreak mode so the first key is there to poll for, not held back until
+    /// a line is entered. Nothing is read, so the line editor that follows gets it.
+    pub fn wait_for_key(stop: &std::sync::atomic::AtomicBool) -> bool {
+        use std::sync::atomic::Ordering;
+        let _cbreak = Cbreak::enter();
+        let input = std::io::stdin();
+        let millis = u16::try_from(POLL.as_millis()).unwrap_or(50);
+        while !stop.load(Ordering::Relaxed) {
+            let mut ready = [PollFd::new(input.as_fd(), PollFlags::POLLIN)];
+            match poll(&mut ready, millis) {
+                Ok(0) | Err(nix::errno::Errno::EINTR) => {}
+                Ok(_) | Err(_) => return true,
+            }
+        }
+        false
+    }
+
     /// Whatever arrived within one poll interval, or `None`. Read from the
     /// descriptor, so nothing is left in a buffer another reader cannot see.
     pub fn read_ready() -> Option<Vec<u8>> {
@@ -292,6 +316,10 @@ mod imp {
         pub fn enter() -> Option<Self> {
             None
         }
+    }
+
+    pub fn wait_for_key(_stop: &std::sync::atomic::AtomicBool) -> bool {
+        true
     }
 
     pub struct Cooked;

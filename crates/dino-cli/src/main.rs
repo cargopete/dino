@@ -127,6 +127,9 @@ enum Command {
     /// Run a session with no terminal, driven from a web page over Tailscale or
     /// an SSH tunnel. RFC-0020.
     Serve(ServeArgs),
+    /// A page of every session on this machine: what it is doing, and whether
+    /// it is stuck or gone.
+    Dash(DashArgs),
     /// Review pull requests as GitHub reports them ready, read-only, from a
     /// signed webhook. Configured under [webhook] in your own config file.
     Webhook(WebhookArgs),
@@ -266,6 +269,23 @@ struct ServeArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct DashArgs {
+    /// Address to listen on: a loopback or Tailscale address, and nothing else.
+    /// Defaults to localhost.
+    #[arg(long)]
+    bind: Option<std::net::IpAddr>,
+    /// Port to listen on.
+    #[arg(long, default_value_t = 7880)]
+    port: u16,
+    /// Put a short summary in Claude Haiku 5.5's dry British voice above the
+    /// cards. It is sent each session's state, counts and durations and nothing
+    /// else: never a prompt, reply, path, command or output. Needs
+    /// `ANTHROPIC_API_KEY`.
+    #[arg(long)]
+    blurb: bool,
+}
+
+#[derive(Debug, clap::Args)]
 struct WebhookArgs {
     /// Address to listen on: a loopback or Tailscale address, and nothing else.
     /// Default localhost, for `tailscale funnel` or another proxy that ends
@@ -332,6 +352,7 @@ fn dispatch() -> Result<ExitCode> {
         Some(Command::Replay(args)) => replay::run(&args),
         Some(Command::Trace(args)) => trace::run(&args),
         Some(Command::Serve(args)) => on_runtime(serve(args)),
+        Some(Command::Dash(args)) => on_runtime(dash(args)),
         Some(Command::Webhook(args)) => on_runtime(webhook(args)),
         Some(Command::Plugin(args)) => plugin::command::run(args),
         Some(Command::Palette) => {
@@ -768,6 +789,7 @@ pub(crate) struct Prepared {
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
     spending: spend::Spending,
+    late: remote::Late,
     /// Set while someone is there to answer the model's questions.
     attended: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -891,30 +913,27 @@ fn shown(
     })
 }
 
-/// The `ask` tool, asking on the pages when there are any, and the switch
-/// that says whether anyone is there.
+/// The `ask` tool, asking on the page in a turn a page started and at the
+/// terminal otherwise, and the switch that says whether anyone is there.
 fn ask_tool(
     attended: bool,
-    remote: Option<&Arc<remote::Hub>>,
+    late: &remote::Late,
 ) -> (Arc<std::sync::atomic::AtomicBool>, Box<dyn ToolRuntime>) {
     let attended = Arc::new(std::sync::atomic::AtomicBool::new(attended));
-    let asker: Arc<dyn dino_core::ask::Asker> = match remote {
-        Some(hub) => Arc::new(remote::RemoteAsker::new(Arc::clone(hub))),
-        None => Arc::new(ask::TerminalAsker),
-    };
+    let asker = Arc::new(remote::Routed::new(ask::TerminalAsker, late.clone()));
     let tool = dino_core::ask::AskTool::new(asker, Arc::clone(&attended));
     (attended, Box::new(tool))
 }
 
 /// Names how the session searches, and gives the provider's search the
 /// policy that decides whether it runs.
-fn open_search(settings: &RunSettings, sandbox: &str, remote: Option<&Arc<remote::Hub>>) {
+fn open_search(settings: &RunSettings, sandbox: &str, late: &remote::Late) {
     if let search::WebSearch::Native(gate) = &settings.web_search {
         gate.decide_with(policy(
             settings.mode,
             sandbox,
             &settings.workspace,
-            remote,
+            late,
             &settings.call_hooks,
         ));
     }
@@ -978,9 +997,10 @@ fn prepare(
         config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
     let sandbox_label = sandbox.label();
     warn_unprotected(&settings, sandbox.as_ref());
-    let (attended, ask) = ask_tool(!unattended && !settings.keep_going, remote);
+    let late = remote::Late::new(remote.map(Arc::clone));
+    let (attended, ask) = ask_tool(!unattended && !settings.keep_going, &late);
     extra.push(ask);
-    open_search(&settings, &sandbox_label, remote);
+    open_search(&settings, &sandbox_label, &late);
     let (delegate, kit) = subagent::Delegate::new();
     extra.push(Box::new(delegate));
     let tools = session_tool_set(&settings, &sandbox, extra)?;
@@ -1016,6 +1036,7 @@ fn prepare(
         approval_mode: settings.mode.label().to_owned(),
         sandbox: sandbox_label.clone(),
         max_model_turns: settings.max_turns.get(),
+        pid: Some(std::process::id()),
     };
     let log = JsonlSessionLog::create(&settings.log_path, meta.clone())?;
 
@@ -1046,10 +1067,10 @@ fn prepare(
         &settings,
         &sandbox_label,
         &sandbox,
-        remote,
+        &late,
         &planning,
     ))
-    .with_sink(((shown, log), remote::Tap(remote.map(Arc::clone))));
+    .with_sink(((shown, log), remote::Tap(late.clone())));
     let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
 
     let prepared = Prepared {
@@ -1068,18 +1089,15 @@ fn prepare(
         status,
         sandbox,
         spending,
+        late,
         attended,
     };
-    let _ = kit.set(subagent_kit(&prepared, remote, hold));
+    let _ = kit.set(subagent_kit(&prepared, hold));
     Ok(prepared)
 }
 
 /// What the session's `agent` tool builds children from.
-fn subagent_kit(
-    prepared: &Prepared,
-    remote: Option<&Arc<remote::Hub>>,
-    hold: spinner::Hold,
-) -> subagent::Kit {
+fn subagent_kit(prepared: &Prepared, hold: spinner::Hold) -> subagent::Kit {
     let spending = prepared.spending.clone();
     let sandbox = Arc::clone(&prepared.sandbox);
     subagent::Kit {
@@ -1096,7 +1114,7 @@ fn subagent_kit(
             &prepared.sandbox_label,
             &prepared.sandbox,
             &prepared.settings.workspace,
-            remote,
+            &prepared.late,
             hold,
             Arc::clone(&prepared.planning),
             prepared.settings.call_hooks.clone(),
@@ -1193,6 +1211,44 @@ fn leave(worktree: &worktree::Worktree) {
 struct Remote {
     hub: Arc<remote::Hub>,
     requests: tokio::sync::mpsc::Receiver<remote::Request>,
+}
+
+/// Serves the sessions page until interrupted.
+async fn dash(args: DashArgs) -> Result<ExitCode> {
+    let bind = args
+        .bind
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let address = remote::bind_address(Some(bind), args.port)?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("cannot listen on {address}"))?;
+    let address = listener.local_addr().context("cannot read the address")?;
+    let blurb = if args.blurb {
+        Some(remote::Blurb::from_env()?)
+    } else {
+        None
+    };
+    let token = remote::new_token()?;
+    let current = config::resolve_workspace(None)?;
+    let places = remote::Workspaces {
+        configured: settings::configured_workspaces()?,
+        recent: settings::recent_workspaces_path(),
+    };
+    eprintln!(
+        "{}",
+        style::paint(style::PURPLE, &format!("dash: http://{address}/#{token}"))
+    );
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            "the token is the only key: the page shows what your sessions are doing"
+        )
+    );
+    tokio::select! {
+        never = remote::serve_dash(listener, token, places, current, blurb) => match never {},
+        _ = tokio::signal::ctrl_c() => Ok(ExitCode::SUCCESS),
+    }
 }
 
 /// Listens for pages, then runs a session for them until the person at the
@@ -1368,6 +1424,18 @@ fn schedules(common: &CommonArgs) -> Result<(session::Due, Box<dyn ToolRuntime>)
     Ok((due, Box::new(tools)))
 }
 
+fn warn_open_approvals(mode: ApprovalMode) {
+    if matches!(mode, ApprovalMode::AllowAll) {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                "approvals are off, so a page may run anything the sandbox allows"
+            )
+        );
+    }
+}
+
 /// Opens a fresh conversation on another model, for `/model` and `/clear`.
 fn model_factory(prepared: &Prepared) -> session::SessionFactory<Box<dyn ModelSession>> {
     let base = prepared.settings.clone();
@@ -1415,14 +1483,8 @@ async fn drive(common: CommonArgs, remote: Option<&mut Remote>) -> Result<Next> 
     if let Some(file) = settings::recent_workspaces_path() {
         let _ = remote::note_workspace(&file, &prepared.settings.workspace);
     }
-    if hub.is_some() && matches!(prepared.settings.mode, ApprovalMode::AllowAll) {
-        eprintln!(
-            "{}",
-            style::paint(
-                style::WARN,
-                "approvals are off, so a page may run anything the sandbox allows"
-            )
-        );
+    if hub.is_some() {
+        warn_open_approvals(prepared.settings.mode);
     }
     let factory = model_factory(&prepared);
     let inbox = hub
@@ -1471,6 +1533,8 @@ async fn drive(common: CommonArgs, remote: Option<&mut Remote>) -> Result<Next> 
             stdin().is_terminal(),
         ),
         remote: hub,
+        late: prepared.late,
+        serving: None,
         schedules,
         commands,
         prompt: prepared.context,
@@ -2553,7 +2617,7 @@ fn gated_policy(
     settings: &RunSettings,
     sandbox_label: &str,
     sandbox: &Arc<dyn Sandbox>,
-    remote: Option<&Arc<remote::Hub>>,
+    late: &remote::Late,
     planning: &Arc<std::sync::atomic::AtomicBool>,
 ) -> impl ApprovalPolicy + 'static {
     dino_exec::BeforeCall::new(
@@ -2562,7 +2626,7 @@ fn gated_policy(
                 settings.mode,
                 sandbox_label,
                 &settings.workspace,
-                remote,
+                late,
                 &settings.call_hooks,
             ),
             Arc::clone(planning),
@@ -2573,40 +2637,26 @@ fn gated_policy(
     )
 }
 
-/// With `remote`, approvals are asked on the pages and not at the terminal.
+/// Approvals are asked on the page in a turn a page started, as every turn of
+/// `dino serve` is, and at the terminal otherwise.
 fn policy(
     mode: ApprovalMode,
     sandbox: &str,
     workspace: &Path,
-    remote: Option<&Arc<remote::Hub>>,
+    late: &remote::Late,
     waiting: &config::CallHooks,
 ) -> Box<dyn ApprovalPolicy> {
     match mode {
-        ApprovalMode::Interactive | ApprovalMode::AcceptEdits => {
-            let accept_edits = mode == ApprovalMode::AcceptEdits;
-            match remote {
-                Some(hub) => interactive_policy(
-                    hooks::Pinging::new(
-                        remote::RemoteApprover::new(Arc::clone(hub)),
-                        waiting.awaiting_approval.clone(),
-                        workspace.to_path_buf(),
-                        waiting.ping_after,
-                    ),
-                    workspace,
-                    accept_edits,
-                ),
-                None => interactive_policy(
-                    hooks::Pinging::new(
-                        TerminalApprover::new(sandbox, workspace),
-                        waiting.awaiting_approval.clone(),
-                        workspace.to_path_buf(),
-                        waiting.ping_after,
-                    ),
-                    workspace,
-                    accept_edits,
-                ),
-            }
-        }
+        ApprovalMode::Interactive | ApprovalMode::AcceptEdits => interactive_policy(
+            hooks::Pinging::new(
+                remote::Routed::new(TerminalApprover::new(sandbox, workspace), late.clone()),
+                waiting.awaiting_approval.clone(),
+                workspace.to_path_buf(),
+                waiting.ping_after,
+            ),
+            workspace,
+            mode == ApprovalMode::AcceptEdits,
+        ),
         ApprovalMode::ReadOnly => Box::new(ReadOnly),
         ApprovalMode::AllowAll => Box::new(AllowAll),
     }
@@ -2619,51 +2669,36 @@ fn child_policy(
     sandbox: &str,
     confined: &Arc<dyn Sandbox>,
     workspace: &Path,
-    remote: Option<&Arc<remote::Hub>>,
+    late: &remote::Late,
     hold: spinner::Hold,
     planning: Arc<std::sync::atomic::AtomicBool>,
     calls: config::CallHooks,
 ) -> subagent::OpenPolicy {
     let (sandbox, workspace) = (sandbox.to_owned(), workspace.to_path_buf());
     let confined = Arc::clone(confined);
-    let remote = remote.map(Arc::clone);
+    let late = late.clone();
     let turn = Arc::new(tokio::sync::Mutex::new(()));
     Box::new(move |mode| {
-        let (hold, turn) = (hold.clone(), Arc::clone(&turn));
-        let accept_edits = mode == ApprovalMode::AcceptEdits;
-        let inner = match (mode, &remote) {
-            (ApprovalMode::Interactive | ApprovalMode::AcceptEdits, Some(hub)) => {
-                interactive_policy(
-                    hooks::Pinging::new(
-                        subagent::Asking::new(
-                            remote::RemoteApprover::new(Arc::clone(hub)),
-                            hold,
-                            turn,
-                        ),
-                        calls.awaiting_approval.clone(),
-                        workspace.clone(),
-                        calls.ping_after,
-                    ),
-                    &workspace,
-                    accept_edits,
-                )
-            }
-            (ApprovalMode::Interactive | ApprovalMode::AcceptEdits, None) => interactive_policy(
+        let inner = match mode {
+            ApprovalMode::Interactive | ApprovalMode::AcceptEdits => interactive_policy(
                 hooks::Pinging::new(
                     subagent::Asking::new(
-                        TerminalApprover::new(sandbox.as_str(), workspace.as_path()),
-                        hold,
-                        turn,
+                        remote::Routed::new(
+                            TerminalApprover::new(sandbox.as_str(), workspace.as_path()),
+                            late.clone(),
+                        ),
+                        hold.clone(),
+                        Arc::clone(&turn),
                     ),
                     calls.awaiting_approval.clone(),
                     workspace.clone(),
                     calls.ping_after,
                 ),
                 &workspace,
-                accept_edits,
+                mode == ApprovalMode::AcceptEdits,
             ),
-            (ApprovalMode::ReadOnly | ApprovalMode::AllowAll, _) => {
-                policy(mode, &sandbox, &workspace, None, &calls)
+            ApprovalMode::ReadOnly | ApprovalMode::AllowAll => {
+                policy(mode, &sandbox, &workspace, &late, &calls)
             }
         };
         Box::new(dino_exec::BeforeCall::new(

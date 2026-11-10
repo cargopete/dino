@@ -361,6 +361,7 @@ async fn start(
         approval_mode: mode.label().to_owned(),
         sandbox: kit.sandbox.label(),
         max_model_turns: job.turns.get(),
+        pid: Some(std::process::id()),
     };
     let log = JsonlSessionLog::create(&settings.log_path, meta)
         .map_err(|error| Failed::Start(error.into()))?;
