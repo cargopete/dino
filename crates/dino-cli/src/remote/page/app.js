@@ -12,6 +12,7 @@ const form = document.getElementById('form');
 const text = document.getElementById('text');
 const cancel = document.getElementById('cancel');
 const sessionsPanel = document.getElementById('sessions');
+const contextPanel = document.getElementById('context');
 const workspacesPanel = document.getElementById('workspaces');
 const tracePanel = document.getElementById('trace');
 const viewButtons = document.querySelectorAll('#views button');
@@ -84,6 +85,10 @@ function onEvent(event) {
       } else if (inner.type === 'tool_call_completed') {
         answer = null;
         show('tool', '→ ' + summarise(inner.call));
+      } else if (inner.type === 'searched') {
+        answer = null;
+        const how = inner.error ? 'failed: ' + inner.error : inner.results.length + ' results';
+        show('tool', '✱ web search "' + inner.query + '" · ' + how + ' (at the provider)');
       } else if (inner.type === 'finished') {
         answer = null;
       }
@@ -99,6 +104,10 @@ function onEvent(event) {
     }
     case 'steered':
       show('you', event.text);
+      break;
+    case 'person_ran':
+      show('note', 'ran at the terminal: ' + event.command + (event.exit_code == null ? ' (stopped)' : ' (exit ' + event.exit_code + ')'));
+      show('out', event.output);
       break;
     case 'noted':
     case 'sent_back':
@@ -152,6 +161,70 @@ function onApproval(approval) {
   cards.set(approval.id, card);
 }
 
+// The model's questions: a button per option, or boxes to tick where several
+// may apply, and words of the person's own. The first option is recommended.
+function onQuestion(card) {
+  if (cards.has(card.id)) return;
+  const box = document.createElement('div');
+  box.className = 'approval';
+  const picks = card.questions.map(() => new Set());
+  const others = [];
+  const send = document.createElement('button');
+  send.textContent = 'send';
+  send.className = 'primary';
+  card.questions.forEach((question, q) => {
+    const title = document.createElement('div');
+    title.className = 'question';
+    title.textContent = question.question + (question.multi_select ? '  (any that apply)' : '');
+    box.append(title);
+    const choices = document.createElement('div');
+    choices.className = 'choices';
+    question.options.forEach((option, index) => {
+      const button = document.createElement('button');
+      button.textContent = option.label + (index === 0 ? ' (recommended)' : '');
+      if (option.description) button.title = option.description;
+      button.addEventListener('click', () => {
+        if (!question.multi_select) {
+          picks[q].clear();
+          for (const other of choices.children) other.classList.remove('on');
+        }
+        if (picks[q].has(index)) {
+          picks[q].delete(index);
+          button.classList.remove('on');
+        } else {
+          picks[q].add(index);
+          button.classList.add('on');
+        }
+      });
+      choices.append(button);
+    });
+    box.append(choices);
+    const other = document.createElement('input');
+    other.placeholder = 'or say something else';
+    others.push(other);
+    box.append(other);
+  });
+  send.addEventListener('click', async () => {
+    send.disabled = true;
+    const answers = card.questions.map((_, q) => ({
+      chosen: [...picks[q]].sort((a, b) => a - b),
+      other: others[q].value.trim() || null,
+    }));
+    try {
+      await api('/api/answer', { id: card.id, answers });
+    } catch (error) {
+      show('err', 'could not answer: ' + error.message);
+      send.disabled = false;
+    }
+  });
+  const row = document.createElement('div');
+  row.className = 'choices';
+  row.append(send);
+  box.append(row);
+  approvals.append(box);
+  cards.set(card.id, box);
+}
+
 function onFrame(frame) {
   last = Math.max(last, frame.seq);
   switch (frame.kind) {
@@ -160,6 +233,9 @@ function onFrame(frame) {
       break;
     case 'approval':
       onApproval(frame.approval);
+      break;
+    case 'question':
+      onQuestion(frame.question);
       break;
     case 'resolved': {
       const card = cards.get(frame.id);
@@ -294,6 +370,7 @@ function showView(name) {
   log.hidden = name !== 'chat';
   form.hidden = name !== 'chat';
   sessionsPanel.hidden = name !== 'sessions';
+  contextPanel.hidden = name !== 'context';
   workspacesPanel.hidden = name !== 'workspaces';
   tracePanel.hidden = name !== 'trace';
   refreshView();
@@ -301,6 +378,7 @@ function showView(name) {
 
 function refreshView() {
   if (view === 'sessions') loadSessions();
+  if (view === 'context') loadContext();
   if (view === 'workspaces') loadWorkspaces();
 }
 
@@ -344,6 +422,40 @@ async function loadSessions() {
   }
   if (!listed.length) rows.push(el('div', 'hint', 'no sessions saved in this workspace'));
   sessionsPanel.replaceChildren(...rows);
+}
+
+function tokens(n) {
+  if (n < 1000) return String(n);
+  if (n < 1000000) return (n / 1000).toFixed(1) + 'k';
+  return (n / 1000000).toFixed(1) + 'M';
+}
+
+async function loadContext() {
+  let report;
+  try {
+    report = await get('/api/context');
+  } catch (error) {
+    contextPanel.replaceChildren(el('div', 'err', 'could not read the context: ' + error.message));
+    return;
+  }
+  const estimated = report.groups.flatMap((group) => group.rows).reduce((sum, row) => sum + row.tokens, 0);
+  const used = report.reported == null ? estimated : report.reported;
+  let headline = report.reported == null ? 'about ' + tokens(estimated) + ' tokens, estimated' : tokens(report.reported) + ' tokens, as the provider counted the last request';
+  if (report.window) headline += ' · window ' + tokens(report.window) + ' · free ' + tokens(Math.max(0, report.window - used));
+  const rows = [el('div', 'hint', headline)];
+  for (const group of report.groups) {
+    rows.push(el('div', 'sub', group.name));
+    for (const row of group.rows) {
+      const item = el('div', 'row-item');
+      item.append(el('span', 'what', row.label));
+      const figure = row.tokens || row.note ? tokens(row.tokens) : '';
+      item.append(el('span', 'meta', [figure, row.note].filter(Boolean).join(' · ')));
+      rows.push(item);
+    }
+  }
+  if (report.marks.length) rows.push(el('div', 'hint', report.marks.join(' · ')));
+  rows.push(el('div', 'hint', 'Each part is estimated at 4 bytes a token. Updated when a submission ends.'));
+  contextPanel.replaceChildren(...rows);
 }
 
 async function loadWorkspaces() {

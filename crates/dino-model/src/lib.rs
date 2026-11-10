@@ -383,6 +383,37 @@ fn is_loopback(url: &reqwest::Url) -> bool {
     }
 }
 
+/// Whether a session's requests carry the provider's own web search tool.
+///
+/// Shared, so a person's answer reaches every session built after it, a
+/// fallback's and a new conversation's included. Off until switched on.
+#[derive(Debug, Clone, Default)]
+pub struct NativeSearch(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl NativeSearch {
+    pub fn set(&self, on: bool) {
+        self.0.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn on(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Searches a session may run at the provider in one request.
+pub const MAX_NATIVE_SEARCHES: u32 = 5;
+
+/// List price of one search run by the provider, where it runs any: $10 per
+/// thousand at both Anthropic and `OpenAI`, besides the tokens the results add.
+#[must_use]
+pub const fn native_search_usd(provider: ProviderKind) -> Option<f64> {
+    match provider {
+        ProviderKind::Anthropic | ProviderKind::OpenAi => Some(0.01),
+        ProviderKind::Qwen => None,
+    }
+}
+
 /// How often a request that never reached the model is tried again.
 ///
 /// Only before anything has streamed: a request that failed there produced

@@ -47,6 +47,8 @@ use super::AnswerError;
 use super::Frame;
 use super::Hub;
 use super::MoveError;
+use super::PageAnswer;
+use super::ReplyError;
 use super::SubmitError;
 use super::Submitted;
 use super::Subscription;
@@ -280,7 +282,12 @@ async fn route(request: Request<Incoming>, shared: &Shared, peer: SocketAddr) ->
             &serde_json::json!({ "cancelled": hub.cancel() }),
         ),
         (Method::POST, "/api/approve") => approve(request, hub).await,
+        (Method::POST, "/api/answer") => answer(request, hub).await,
         (Method::GET, "/api/sessions") => sessions(hub),
+        (Method::GET, "/api/context") => match hub.context() {
+            Some(report) => json(StatusCode::OK, &report),
+            None => status(StatusCode::NOT_FOUND),
+        },
         (Method::GET, "/api/workspaces") => json(
             StatusCode::OK,
             &serde_json::json!({ "workspaces": hub.workspaces() }),
@@ -290,8 +297,9 @@ async fn route(request: Request<Incoming>, shared: &Shared, peer: SocketAddr) ->
         (Method::POST, "/api/workspace") => workspace(request, hub).await,
         (
             _,
-            "/api/events" | "/api/prompt" | "/api/cancel" | "/api/approve" | "/api/sessions"
-            | "/api/workspaces" | "/api/trace" | "/api/resume" | "/api/workspace",
+            "/api/events" | "/api/prompt" | "/api/cancel" | "/api/approve" | "/api/answer"
+            | "/api/sessions" | "/api/context" | "/api/workspaces" | "/api/trace" | "/api/resume"
+            | "/api/workspace",
         ) => status(StatusCode::METHOD_NOT_ALLOWED),
         _ => status(StatusCode::NOT_FOUND),
     }
@@ -393,6 +401,25 @@ async fn approve(request: Request<Incoming>, hub: &Hub) -> Response<Body> {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerBody {
+    id: u64,
+    answers: Vec<PageAnswer>,
+}
+
+async fn answer(request: Request<Incoming>, hub: &Hub) -> Response<Body> {
+    let body: AnswerBody = match read_json(request).await {
+        Ok(body) => body,
+        Err(code) => return status(code),
+    };
+    match hub.reply(body.id, &body.answers) {
+        Ok(()) => json(StatusCode::OK, &serde_json::json!({ "ok": true })),
+        Err(ReplyError::NoSuchQuestion) => status(StatusCode::NOT_FOUND),
+        Err(ReplyError::Malformed) => status(StatusCode::BAD_REQUEST),
+    }
+}
+
 fn sessions(hub: &Hub) -> Response<Body> {
     json(
         StatusCode::OK,
@@ -467,7 +494,7 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio::sync::mpsc;
 
-    use super::super::RemoteApprover;
+    use super::super::tests::on_page;
     use super::*;
 
     struct Running {
@@ -643,6 +670,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_context_is_served_once_the_session_has_reported_it() {
+        let server = running().await;
+        let token = Some(server.token.as_str());
+        assert_eq!(call(&server, "GET", "/api/context", token, "").await.0, 404);
+
+        server
+            .hub
+            .set_context(serde_json::json!({ "window": 200_000, "groups": [] }));
+        let (code, _, body) = call(&server, "GET", "/api/context", token, "").await;
+
+        assert_eq!(code, 200);
+        assert!(body.contains(r#""window":200000"#), "{body}");
+        assert_eq!(call(&server, "GET", "/api/context", None, "").await.0, 401);
+    }
+
+    #[tokio::test]
     async fn a_page_gets_the_backlog_then_what_follows_and_can_resume() {
         let server = running().await;
         server.hub.notice("first");
@@ -673,7 +716,7 @@ mod tests {
     #[tokio::test]
     async fn an_approval_is_asked_on_the_page_and_answered_over_http() {
         let server = running().await;
-        let approver = RemoteApprover::new(Arc::clone(&server.hub));
+        let approver = on_page(&server.hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask_in(

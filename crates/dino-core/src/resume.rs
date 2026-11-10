@@ -144,6 +144,89 @@ pub fn find(workspace: &Path, wanted: &str) -> Result<Option<(String, PathBuf)>,
     }))
 }
 
+/// Where a fork came from: its parent, and how many submissions of the
+/// parent's it carries, when the workspace had checkpoints to count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fork {
+    pub parent: String,
+    pub at: Option<u32>,
+}
+
+/// A fork's record, beside its state, so the state file stays the adapter's.
+#[must_use]
+pub fn fork_path(workspace: &Path, session_id: &str) -> PathBuf {
+    workspace
+        .join(".dino")
+        .join("sessions")
+        .join(format!("{session_id}.fork.json"))
+}
+
+/// Where `session_id` was forked from, if it was.
+#[must_use]
+pub fn forked_from(workspace: &Path, session_id: &str) -> Option<Fork> {
+    let text = std::fs::read_to_string(fork_path(workspace, session_id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Copies conversation `parent` to `child`, with its checkpoints, and records
+/// where it came from. The parent is not touched.
+///
+/// # Errors
+///
+/// Returns [`SinkError`] when the state or the record cannot be written.
+pub fn fork(
+    workspace: &Path,
+    parent: &str,
+    child: &str,
+    state: &SessionState,
+    name: Option<&str>,
+) -> Result<Fork, SinkError> {
+    save(&state_path(workspace, child), state, name)?;
+    let fork = Fork {
+        parent: parent.to_owned(),
+        at: crate::checkpoint::copy(workspace, parent, child).ok(),
+    };
+    let encoded = serde_json::to_vec(&fork)
+        .map_err(|error| SinkError::new(format!("cannot encode the fork: {error}")))?;
+    let path = fork_path(workspace, child);
+    std::fs::write(&path, encoded)
+        .map_err(|error| SinkError::new(format!("cannot write {}: {error}", path.display())))?;
+    Ok(fork)
+}
+
+/// Saved conversations with each fork moved under its parent, as pairs of
+/// index into `saved` and depth. A fork whose parent is not in `saved` stands
+/// on its own.
+#[must_use]
+pub fn family(workspace: &Path, saved: &[Saved]) -> Vec<(usize, usize)> {
+    let parents: Vec<Option<usize>> = saved
+        .iter()
+        .map(|item| {
+            let parent = forked_from(workspace, &item.id)?.parent;
+            saved.iter().position(|other| other.id == parent)
+        })
+        .collect();
+    let mut order: Vec<(usize, usize)> = Vec::with_capacity(saved.len());
+    let mut stack: Vec<(usize, usize)> = (0..saved.len())
+        .rev()
+        .filter(|index| parents[*index].is_none())
+        .map(|index| (index, 0))
+        .collect();
+    while let Some((index, depth)) = stack.pop() {
+        if order.iter().any(|(seen, _)| *seen == index) {
+            continue;
+        }
+        order.push((index, depth));
+        stack.extend(
+            (0..saved.len())
+                .rev()
+                .filter(|child| parents[*child] == Some(index))
+                .map(|child| (child, depth + 1)),
+        );
+    }
+    order
+}
+
 /// A conversation whose last run ended in an error, such as the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interrupted {
@@ -331,6 +414,44 @@ mod tests {
         std::fs::remove_file(state_path(&root, "wave")).unwrap();
         assert_eq!(id("wave").as_deref(), Some("new"));
         assert_eq!(id("nothing"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fork_is_a_copy_that_names_its_parent_and_is_listed_under_it() {
+        let root = workspace("fork");
+        saved_at(&root, "parent", Some("wave"), 300);
+        saved_at(&root, "other", None, 200);
+        let made = fork(&root, "parent", "child", &state(), None).unwrap();
+        assert_eq!(made.parent, "parent");
+        assert_eq!(load(&state_path(&root, "child")).unwrap(), state());
+        assert_eq!(forked_from(&root, "child"), Some(made));
+        assert_eq!(forked_from(&root, "parent"), None);
+        assert_eq!(
+            find(&root, "wave").unwrap().map(|(id, _)| id).as_deref(),
+            Some("parent"),
+            "a fork does not take its parent's name"
+        );
+        let grandchild = Fork {
+            parent: "child".into(),
+            at: Some(2),
+        };
+        std::fs::write(
+            fork_path(&root, "grandchild"),
+            serde_json::to_vec(&grandchild).unwrap(),
+        )
+        .unwrap();
+        saved_at(&root, "grandchild", None, 0);
+
+        let saved = recent(&root).unwrap();
+        let listed: Vec<(&str, usize)> = family(&root, &saved)
+            .into_iter()
+            .map(|(index, depth)| (saved[index].id.as_str(), depth))
+            .collect();
+        assert_eq!(
+            listed,
+            [("other", 0), ("parent", 0), ("child", 1), ("grandchild", 2)]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

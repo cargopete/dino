@@ -110,6 +110,13 @@ impl SessionId {
         Self(format!("{millis:x}-{pid:x}"))
     }
 
+    /// The id of the `nth` subagent this session started. Two started in the
+    /// same millisecond would share a generated id.
+    #[must_use]
+    pub fn child(&self, nth: u32) -> Self {
+        Self(format!("{}.{nth}", self.0))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

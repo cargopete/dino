@@ -87,6 +87,8 @@ fn argv(parts: &[&str]) -> Hook {
     Hook {
         command: parts.iter().map(|part| (*part).to_owned()).collect(),
         extension: None,
+        tool: None,
+        program: None,
     }
 }
 

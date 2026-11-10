@@ -59,8 +59,9 @@ matters.
 
 ## 4. Approvals
 
-The approval policy is the one the terminal uses; only the asker changes. A
-`RemoteApprover` puts the call to the pages and waits. The card shows the
+The approval policy is the one the terminal uses; only the asker changes. In a
+turn a page started, which is every turn of `dino serve` and a page's turn in a
+session `/serve` opened, `remote::Routed` puts the call to the pages and waits. The card shows the
 tool, the resolved subject (not a description the model wrote) and the call's
 arguments, up to 8 KiB. The pending approval survives a reconnect, and a run
 that is cancelled while asking takes its question back.

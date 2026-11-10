@@ -272,6 +272,12 @@ impl Renderer {
         Arc::clone(&self.status)
     }
 
+    /// A handle for holding the status row off a prompt drawn mid-call.
+    #[must_use]
+    pub fn hold_handle(&self) -> crate::spinner::Hold {
+        self.spinner.hold()
+    }
+
     /// Draws whatever is held back: a partial line of text, an open call.
     ///
     /// # Errors
@@ -386,6 +392,25 @@ impl Renderer {
                 self.calls.insert(call.id.clone(), call.clone());
                 Ok(())
             }
+            ModelEvent::Searched {
+                query,
+                results,
+                error,
+            } => {
+                self.break_stream()?;
+                let how = match error {
+                    Some(code) => format!("failed: {code}"),
+                    None => format!("{} results", results.len()),
+                };
+                let query = cap(query, MAX_SUMMARY_BYTES);
+                write_out(&style::paint(
+                    FAINT,
+                    &format!(
+                        "  {} web search {query:?} · {how} (at the provider)\n",
+                        crate::calls::icon("web_search")
+                    ),
+                ))
+            }
             ModelEvent::ReasoningDelta { .. }
             | ModelEvent::Started { .. }
             | ModelEvent::ToolCallStarted { .. }
@@ -474,7 +499,9 @@ impl Renderer {
                 | ModelEvent::ToolCallStarted { .. }
                 | ModelEvent::ToolCallArgumentsDelta { .. }
                 | ModelEvent::ToolCallCompleted { .. } => false,
-                ModelEvent::TextDelta { .. } | ModelEvent::Finished { .. } => true,
+                ModelEvent::TextDelta { .. }
+                | ModelEvent::Searched { .. }
+                | ModelEvent::Finished { .. } => true,
             },
             _ => true,
         }
@@ -571,6 +598,12 @@ impl EventSink for Renderer {
                 self.break_stream()?;
                 turn_retried(*attempt, error)
             }
+            AgentEvent::PersonRan {
+                command, exit_code, ..
+            } => self.aside(&format!(
+                "! {command} · {}; its output goes with your next message",
+                crate::shell::exit_label(*exit_code)
+            )),
             AgentEvent::WaitingForNetwork {
                 error,
                 waited_seconds,
@@ -803,6 +836,22 @@ pub fn describe_call(call: &ToolCall) -> String {
             }
         }),
         "web_fetch" => argument_string(&call.arguments, "url"),
+        "web_search" => argument_string(&call.arguments, "query").map(|query| format!("{query:?}")),
+        "ask" => call
+            .arguments
+            .get("questions")
+            .and_then(Value::as_array)
+            .and_then(|questions| questions.first())
+            .and_then(|first| first.get("question"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        dino_core::subagent::AGENT => argument_string(&call.arguments, "prompt").map(|prompt| {
+            let preset = argument_string(&call.arguments, "preset")
+                .unwrap_or_else(|| crate::preset::Preset::Review.name().to_owned());
+            let first = prompt.lines().next().unwrap_or_default().to_owned();
+            format!("({preset}) {first}")
+        }),
+        "code" => Some(calls::code_subject(&call.arguments)),
         "schedule_create" | "schedule_update" => {
             let when = ["delay", "at", "every", "daily", "weekly", "cron"]
                 .into_iter()

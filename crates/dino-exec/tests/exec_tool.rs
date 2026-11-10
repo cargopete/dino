@@ -547,3 +547,91 @@ async fn a_child_has_a_session_of_its_own_and_no_terminal() {
     assert_eq!(session, Ok(pid));
     assert_eq!(status.code(), Some(7), "the child could open a terminal");
 }
+
+fn git(directory: &std::path::Path, arguments: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// A linked worktree's index, objects and refs live in the main checkout's
+// `.git`, outside the workspace, beside the config and hooks that must stay shut.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn a_confined_command_in_a_linked_worktree_can_commit_and_build_in_the_shared_target() {
+    let fixture = Fixture::new();
+    let main = fixture.path.join("main");
+    fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    fs::write(main.join("a.txt"), "a\n").unwrap();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-q", "-m", "one"]);
+    let linked = fixture.path.join("linked");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let target = main.join("target");
+    let sandbox = dino_sandbox::detect_building_in(&linked, &[], Some(&target)).unwrap();
+    let tool = ExecTool::new(&linked, ExecLimits::default(), Arc::from(sandbox)).unwrap();
+    let sh = async |line: &str| {
+        parse(
+            &tool
+                .execute(&call(json!({"command": ["/bin/sh", "-c", line]})))
+                .await
+                .unwrap(),
+        )
+    };
+
+    let committed = sh(
+        "echo b > b.txt && git add b.txt && git -c user.name=t -c user.email=t@t \
+         -c commit.gpgsign=false commit -qm two && echo built > \"$CARGO_TARGET_DIR/built\"",
+    )
+    .await;
+    let config = sh("echo '[core]' >> ../main/.git/config").await;
+    let hook = sh("echo 'exit 0' > ../main/.git/hooks/pre-commit").await;
+    let own_config = sh("echo '[core]' > ../main/.git/worktrees/linked/config.worktree").await;
+
+    assert_eq!(committed["exit_code"], 0, "stderr: {}", committed["stderr"]);
+    assert!(target.join("built").is_file());
+    assert_ne!(
+        config["exit_code"], 0,
+        "the repository's config was writable"
+    );
+    assert_ne!(hook["exit_code"], 0, "the repository's hooks were writable");
+    assert!(!main.join(".git/hooks/pre-commit").exists());
+    // Landlock cannot carve it out of the worktree's git directory.
+    if cfg!(target_os = "macos") {
+        assert_ne!(own_config["exit_code"], 0, "config.worktree was writable");
+    }
+    let log = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&main)
+        .args(["log", "--oneline", "side"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&log.stdout).contains("two"));
+}

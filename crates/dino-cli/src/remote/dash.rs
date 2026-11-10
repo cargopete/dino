@@ -200,6 +200,8 @@ pub struct Digest {
     notes: VecDeque<String>,
     ended: Option<(bool, String)>,
     seen_start: bool,
+    /// When a subagent's log beside this one was last written.
+    children_ms: u64,
 }
 
 impl Digest {
@@ -232,6 +234,7 @@ impl Digest {
             notes: VecDeque::new(),
             ended: None,
             seen_start: false,
+            children_ms: 0,
         }
     }
 
@@ -325,6 +328,15 @@ impl Digest {
 
     #[allow(clippy::too_many_lines)]
     fn event(&mut self, event: AgentEvent, at: u64) {
+        // Run at the prompt, after the run's end, so it reopens nothing.
+        if let AgentEvent::PersonRan {
+            command, exit_code, ..
+        } = &event
+        {
+            let how = exit_code.map_or_else(|| "killed".to_owned(), |code| format!("exit {code}"));
+            self.note(&format!("you ran {command} ({how})"));
+            return;
+        }
         self.ended = None;
         match event {
             AgentEvent::Submitted { text } => {
@@ -355,6 +367,12 @@ impl Digest {
                         self.input_tokens += usage.input_tokens;
                         self.output_tokens += usage.output_tokens;
                     }
+                    ModelEvent::Searched { query, error, .. } => self.step(Step {
+                        tool: "search".to_owned(),
+                        summary: cut(&query, TEXT_CAP),
+                        ms: None,
+                        error: error.is_some(),
+                    }),
                     ModelEvent::Finished { .. } => self.phase = Phase::Calls,
                 }
             }
@@ -550,7 +568,9 @@ impl Digest {
             .find(|call| call.started_at.is_some() && !call.finished)
         {
             let ran = now.saturating_sub(call.started_at.unwrap_or(now));
-            if ran > TOOL_LONG_MS {
+            let child_busy = call.tool == dino_core::subagent::AGENT
+                && now.saturating_sub(self.children_ms) <= MODEL_SILENT_MS;
+            if ran > TOOL_LONG_MS && !child_busy {
                 problems.push((
                     "long_tool",
                     format!("{} has been running for {}", call.tool, took(ran)),
@@ -682,6 +702,7 @@ impl Watch {
             }
             entry.0 += whole as u64;
         }
+        entry.1.children_ms = children_written(path);
         Some(&entry.1)
     }
 
@@ -689,8 +710,12 @@ impl Watch {
     pub fn cards(&mut self, workspaces: &[PathBuf]) -> Vec<Card> {
         let now = unix_millis();
         let mut cards = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for workspace in workspaces {
             for path in recent_logs(workspace) {
+                if !seen.insert(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())) {
+                    continue;
+                }
                 let Some(digest) = self.refresh(&path) else {
                     continue;
                 };
@@ -728,15 +753,13 @@ fn unix_millis() -> u64 {
         })
 }
 
-/// The newest logs of `workspace` touched within the listing window.
-fn recent_logs(workspace: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(workspace.join(".dino").join("sessions")) else {
+/// The session logs directly in `directory`, with when each was written.
+/// Subagents' logs are a level down, in a directory named after the parent.
+fn logs_in(directory: &Path) -> Vec<(SystemTime, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
-    let cutoff = SystemTime::now()
-        .checked_sub(LISTED_FOR)
-        .unwrap_or(UNIX_EPOCH);
-    let mut logs: Vec<(SystemTime, PathBuf)> = entries
+    entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -744,9 +767,39 @@ fn recent_logs(workspace: &Path) -> Vec<PathBuf> {
                 .is_some_and(|extension| extension == "jsonl")
         })
         .filter_map(|path| {
-            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-            Some((modified, path))
+            let metadata = std::fs::metadata(&path).ok()?;
+            metadata
+                .is_file()
+                .then_some((metadata.modified().ok()?, path))
         })
+        .collect()
+}
+
+/// When any subagent of the session logged at `path` last wrote, in unix ms.
+fn children_written(path: &Path) -> u64 {
+    logs_in(&path.with_extension(""))
+        .into_iter()
+        .filter_map(|(modified, _)| modified.duration_since(UNIX_EPOCH).ok())
+        .map(duration_ms)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The newest logs of `workspace`, and of the worktree sessions made in it,
+/// touched within the listing window.
+fn recent_logs(workspace: &Path) -> Vec<PathBuf> {
+    let state = workspace.join(".dino");
+    let worktrees = std::fs::read_dir(state.join("worktrees"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join(".dino").join("sessions"));
+    let cutoff = SystemTime::now()
+        .checked_sub(LISTED_FOR)
+        .unwrap_or(UNIX_EPOCH);
+    let mut logs: Vec<(SystemTime, PathBuf)> = std::iter::once(state.join("sessions"))
+        .chain(worktrees)
+        .flat_map(|directory| logs_in(&directory))
         .filter(|(modified, _)| *modified >= cutoff)
         .collect();
     logs.sort_by_key(|log| std::cmp::Reverse(log.0));
@@ -1025,6 +1078,83 @@ mod tests {
         let card = digest(&lines).card(START + 600, Some(true));
         assert_eq!(card.state, State::Failed);
         assert!(card.doing.contains("transport failed"));
+    }
+
+    fn finished(at: u64) -> String {
+        format!(
+            r#"{{"record":"finished","seq":9,"unix_millis":{at},"outcome":{{"stop_reason":"end_turn","model_turns":2,"error":null}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_line_the_person_ran_at_the_prompt_leaves_the_session_idle() {
+        let mut lines = opening();
+        lines.push(finished(START + 500));
+        lines.push(event(
+            START + 600,
+            r#"{"type":"person_ran","command":"git status","exit_code":0,"output":"clean"}"#,
+        ));
+        let card = digest(&lines).card(START + 600 + MODEL_SILENT_MS + 1, Some(true));
+        assert_eq!(card.state, State::Idle);
+        assert_eq!(card.notes, ["you ran git status (exit 0)"]);
+    }
+
+    #[test]
+    fn a_providers_search_is_a_step() {
+        let mut lines = opening();
+        lines.push(model(
+            START + 100,
+            1,
+            r#"{"type":"searched","query":"tokio select","results":[]}"#,
+        ));
+        let card = digest(&lines).card(START + 200, Some(true));
+        assert_eq!(card.steps[0].tool, "search");
+        assert_eq!(card.steps[0].summary, "tokio select");
+    }
+
+    #[test]
+    fn a_long_subagent_call_is_not_stuck_while_its_child_is_writing() {
+        let mut lines = opening();
+        lines.push(event(
+            START + 150,
+            r#"{"type":"tool_started","model_turn":1,"call":{"id":"c1","name":"agent","arguments":{"task":"look"}}}"#,
+        ));
+        let mut digest = digest(&lines);
+        let now = START + 150 + TOOL_LONG_MS + 1;
+        assert_eq!(digest.card(now, Some(true)).state, State::Stuck);
+        digest.children_ms = now - 1_000;
+        assert_eq!(digest.card(now, Some(true)).state, State::Working);
+    }
+
+    #[test]
+    fn subagents_forks_and_checkpoints_are_not_sessions_and_worktrees_are() {
+        let workspace = std::env::temp_dir().join(format!("dino-dash-logs-{}", std::process::id()));
+        let sessions = workspace.join(".dino/sessions");
+        let worktree = workspace.join(".dino/worktrees/look/.dino/sessions");
+        for directory in [
+            &sessions.join("p1"),
+            &worktree,
+            &workspace.join(".dino/checkpoints"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        for file in [
+            sessions.join("p1.jsonl"),
+            sessions.join("p1/p1.1.jsonl"),
+            sessions.join("p1.fork.json"),
+            worktree.join("w1.jsonl"),
+        ] {
+            std::fs::write(&file, format!("{}\n", started(Some(7)))).unwrap();
+        }
+        let mut found: Vec<String> = recent_logs(&workspace)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["p1.jsonl", "w1.jsonl"]);
+        assert!(children_written(&sessions.join("p1.jsonl")) > 0);
+        assert_eq!(children_written(&worktree.join("w1.jsonl")), 0);
+        std::fs::remove_dir_all(&workspace).unwrap();
     }
 
     #[test]

@@ -392,11 +392,12 @@ fn list(store: &Store) -> Result<ExitCode> {
 
 fn loads(active: &super::Active) -> String {
     let skills = dino_core::skills::discover(&[active.skills_dir()]).len();
+    let commands = super::commands(&active.dir).len();
     let manifest = &active.manifest;
     style::paint(
         style::OK,
         &format!(
-            "loads: skills {skills}, hooks {}, mcp {}{}",
+            "loads: skills {skills}, commands {commands}, hooks {}, mcp {}{}",
             manifest.hooks.len(),
             manifest.mcp.len(),
             if manifest.instructions.is_some() {

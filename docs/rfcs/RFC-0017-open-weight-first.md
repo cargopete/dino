@@ -164,9 +164,18 @@ would miss within the first hour of switching.
 These stay out, and the reason is stated so the next person does not have to
 rediscover it.
 
-- **Subagents and multi-agent orchestration.** Not until a single agent on a
-  tier B model passes the corpus. Parallelism multiplies whatever the single
-  loop does, including its failures.
+- **Multi-agent orchestration.** Agents directing agents stay out. This
+  bullet first kept subagents out too, until a single agent on a tier B model
+  passes the corpus, because parallelism multiplies whatever the single loop
+  does, including its failures. That condition has not been met: no tier B
+  profile has passed the corpus at section 8.1's trial count. On 2026-11-10 the
+  owner admitted subagents regardless (#290), on narrow terms: a child is one
+  bounded job whose only output is its final message, it reads only unless the
+  call asks otherwise, it runs under the parent's approval mode and never a
+  wider one, and it cannot start children of its own. The case for building it
+  before the condition was the parent's context, which every read and dead end
+  fills, rather than parallelism. Whether subagents help or hurt a tier B model
+  is unmeasured; the corpus does not offer the tool.
 - **Cloud sessions, a desktop app, IDE extensions.** Each is a product of its
   own. The terminal is the product here.
 - **A plugin or MCP marketplace.** A catalogue is a supply chain. Dino

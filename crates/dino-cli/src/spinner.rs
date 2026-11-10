@@ -45,6 +45,10 @@ pub struct Status {
     pub typed: String,
     /// Messages entered during the run and not yet delivered.
     pub queued: usize,
+    /// Each subagent running, by session id, at its current turn.
+    pub agents: std::collections::BTreeMap<String, u32>,
+    /// The person's own command, whose line stands in for the row.
+    pub line: Option<Arc<crate::statusline::StatusLine>>,
 }
 
 impl Status {
@@ -111,6 +115,15 @@ impl Spinner {
         }
     }
 
+    /// A handle that can take the row off the screen while something else
+    /// draws, and put it back.
+    #[must_use]
+    pub fn hold(&self) -> Hold {
+        Hold {
+            state: Arc::clone(&self.state),
+        }
+    }
+
     /// Stops ticking and leaves the row's line empty.
     pub fn stop(&mut self) {
         let Ok(mut state) = self.state.lock() else {
@@ -126,6 +139,47 @@ impl Spinner {
     }
 }
 
+/// Holds the row off the screen, for a prompt drawn while it ticks: a
+/// subagent's approval, which arrives in the middle of the parent's call.
+#[derive(Debug, Clone, Default)]
+pub struct Hold {
+    state: Arc<Mutex<Option<Ticking>>>,
+}
+
+impl Hold {
+    /// Clears the row and stops it ticking until [`Hold::release`].
+    #[must_use]
+    pub fn take(&self) -> Held {
+        let Ok(mut state) = self.state.lock() else {
+            return Held(None);
+        };
+        let ticking = state.take();
+        if ticking.as_ref().is_some_and(|ticking| ticking.drawn) {
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "{CLEAR_LINE}");
+            let _ = out.flush();
+        }
+        Held(ticking)
+    }
+
+    /// Lets the row tick again, unless something started or stopped it since.
+    pub fn release(&self, held: Held) {
+        let Some(mut ticking) = held.0 else {
+            return;
+        };
+        if let Ok(mut state) = self.state.lock()
+            && state.is_none()
+        {
+            ticking.drawn = false;
+            *state = Some(ticking);
+        }
+    }
+}
+
+/// What [`Hold::take`] took.
+#[derive(Debug)]
+pub struct Held(Option<Ticking>);
+
 fn tick(state: &Mutex<Option<Ticking>>, status: &Mutex<Status>) {
     loop {
         std::thread::sleep(TICK);
@@ -135,21 +189,32 @@ fn tick(state: &Mutex<Option<Ticking>>, status: &Mutex<Status>) {
         let Some(ticking) = guard.as_mut() else {
             continue;
         };
-        let elapsed = ticking.since.elapsed();
-        if elapsed < QUIET {
-            continue;
-        }
         let figures = status
             .lock()
             .map(|status| status.clone())
             .unwrap_or_default();
+        let elapsed = ticking.since.elapsed();
+        if let Some(line) = &figures.line {
+            line.refresh(&figures, ticking.label, elapsed);
+        }
+        if elapsed < QUIET {
+            continue;
+        }
         let frames = usize::try_from(elapsed.as_millis() / FRAME.as_millis()).unwrap_or(0);
         let frame = FRAMES[frames % FRAMES.len()];
         let room = crate::markdown::terminal_width().saturating_sub(5);
+        let text = figures
+            .line
+            .as_ref()
+            .and_then(|line| line.latest())
+            .map_or_else(
+                || row(ticking.label, elapsed, &figures, room),
+                |text| crate::calls::cut(&text, room),
+            );
         let line = format!(
             "  {} {}",
             style::paint(PURPLE, frame),
-            style::paint(FAINT, &row(ticking.label, elapsed, &figures, room))
+            style::paint(FAINT, &text)
         );
         let mut out = std::io::stdout().lock();
         let _ = write!(out, "{CLEAR_LINE}{line}");
@@ -167,6 +232,9 @@ fn row(label: &str, elapsed: Duration, status: &Status, room: usize) -> String {
         u8::MAX,
         format!("{label} {}", crate::render::duration(elapsed)),
     )];
+    if let Some(agents) = crate::subagent::status_part(&status.agents) {
+        parts.push((5, agents));
+    }
     if !status.model.is_empty() {
         parts.push((1, status.model.clone()));
     }
@@ -283,6 +351,22 @@ mod tests {
         assert_eq!(
             row(70),
             "thinking 4s · 25% context · $0.0186 session · esc to interrupt"
+        );
+    }
+
+    #[test]
+    fn the_row_names_the_turn_each_subagent_is_at() {
+        let mut status = status();
+        status.agents.insert("a.1".into(), 3);
+        status.agents.insert("a.2".into(), 5);
+        assert_eq!(
+            row("running", Duration::from_secs(9), &status, 60),
+            "running 9s · 2 agents at turns 3, 5 · esc to interrupt"
+        );
+        status.agents.remove("a.1");
+        assert_eq!(
+            row("running", Duration::from_secs(9), &status, 60),
+            "running 9s · agent at turn 5 · esc to interrupt"
         );
     }
 

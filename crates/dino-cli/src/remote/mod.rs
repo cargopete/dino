@@ -35,6 +35,11 @@ use dino_core::approval::ApprovalReply;
 use dino_core::approval::Approver;
 use dino_core::approval::AskContext;
 use dino_core::approval::ReplyFuture;
+use dino_core::ask::Answer;
+use dino_core::ask::AnswerFuture;
+use dino_core::ask::Answered;
+use dino_core::ask::Asker;
+use dino_core::ask::Question;
 use dino_core::session::EventSink;
 use dino_core::session::SinkError;
 use dino_protocol::AgentEvent;
@@ -112,6 +117,9 @@ enum Payload<'a> {
     Approval {
         approval: &'a Approval,
     },
+    Question {
+        question: &'a Questions,
+    },
     Resolved {
         id: u64,
         outcome: &'a str,
@@ -154,10 +162,38 @@ struct WireChoice {
     label: String,
 }
 
+/// The model's questions waiting for a person, as the page sees them.
+#[derive(Debug, Serialize)]
+pub struct Questions {
+    id: u64,
+    questions: Vec<Question>,
+}
+
+/// One question's answer from a page: the options picked, by index, or words
+/// of the person's own. Neither is a question left unanswered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageAnswer {
+    #[serde(default)]
+    pub chosen: Vec<usize>,
+    #[serde(default)]
+    pub other: Option<String>,
+}
+
 struct Pending {
     frame: Frame,
-    offered: Vec<(&'static str, ApprovalReply)>,
-    reply: oneshot::Sender<ApprovalReply>,
+    waiting: Waiting,
+}
+
+enum Waiting {
+    Approval {
+        offered: Vec<(&'static str, ApprovalReply)>,
+        reply: oneshot::Sender<ApprovalReply>,
+    },
+    Question {
+        questions: Vec<Question>,
+        reply: oneshot::Sender<Vec<Answer>>,
+    },
 }
 
 #[derive(Default)]
@@ -208,6 +244,16 @@ pub enum AnswerError {
     NotOffered,
 }
 
+/// Why a page's answers to the model's questions were not taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyError {
+    /// Answered already, withdrawn, or never asked.
+    NoSuchQuestion,
+    /// Not one answer per question, an option that does not exist, several
+    /// for a question that takes one, or words too long.
+    Malformed,
+}
+
 /// The meeting point of a session and the pages watching it.
 pub struct Hub {
     state: Mutex<State>,
@@ -216,6 +262,9 @@ pub struct Hub {
     inbox: Inbox,
     cancel: Notify,
     info: Mutex<Option<Info>>,
+    /// What fills the window, as `/context` reports it, kept current by the
+    /// session between submissions.
+    context: Mutex<Option<serde_json::Value>>,
     workspaces: OnceLock<Workspaces>,
 }
 
@@ -245,6 +294,7 @@ impl Hub {
             inbox,
             cancel: Notify::new(),
             info: Mutex::new(None),
+            context: Mutex::new(None),
             workspaces: OnceLock::new(),
         });
         (hub, prompts)
@@ -263,6 +313,22 @@ impl Hub {
             .info
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(info);
+    }
+
+    /// Replaces what the page is told fills the window.
+    pub fn set_context(&self, report: serde_json::Value) {
+        *self
+            .context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    }
+
+    #[must_use]
+    pub fn context(&self) -> Option<serde_json::Value> {
+        self.context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn info(&self) -> Option<Info> {
@@ -482,24 +548,91 @@ impl Hub {
     /// `choice`. Nothing is decided then.
     pub fn answer(&self, id: u64, choice: &str) -> Result<(), AnswerError> {
         let mut state = self.lock();
-        let pending = state.pending.get(&id).ok_or(AnswerError::NoSuchApproval)?;
-        let reply = pending
-            .offered
+        let Some(Pending {
+            waiting: Waiting::Approval { offered, .. },
+            ..
+        }) = state.pending.get(&id)
+        else {
+            return Err(AnswerError::NoSuchApproval);
+        };
+        let reply = offered
             .iter()
             .find(|(key, _)| *key == choice)
             .map(|(_, reply)| reply.clone())
             .ok_or(AnswerError::NotOffered)?;
-        if let Some(pending) = state.pending.remove(&id) {
+        if let Some(Pending {
+            waiting: Waiting::Approval { reply: sender, .. },
+            ..
+        }) = state.pending.remove(&id)
+        {
             let outcome = if matches!(reply, ApprovalReply::Reject(_)) {
                 "refused"
             } else {
                 "allowed"
             };
             // The asker is gone when its run was cancelled; nothing to tell.
-            let _ = pending.reply.send(reply);
+            let _ = sender.send(reply);
             self.publish(&mut state, Payload::Resolved { id, outcome });
         }
         Ok(())
+    }
+
+    /// Takes a page's answers to the questions `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the questions are not waiting or the answers do
+    /// not fit them. Nothing is answered then.
+    pub fn reply(&self, id: u64, given: &[PageAnswer]) -> Result<(), ReplyError> {
+        let mut state = self.lock();
+        let Some(Pending {
+            waiting: Waiting::Question { questions, .. },
+            ..
+        }) = state.pending.get(&id)
+        else {
+            return Err(ReplyError::NoSuchQuestion);
+        };
+        let answers = page_answers(questions, given).ok_or(ReplyError::Malformed)?;
+        if let Some(Pending {
+            waiting: Waiting::Question { reply, .. },
+            ..
+        }) = state.pending.remove(&id)
+        {
+            let _ = reply.send(answers);
+            self.publish(
+                &mut state,
+                Payload::Resolved {
+                    id,
+                    outcome: "answered",
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Puts the model's questions to the pages and waits for the answers.
+    async fn ask_questions(&self, questions: Vec<Question>) -> Option<Vec<Answer>> {
+        let (reply, answer) = oneshot::channel();
+        let id = {
+            let mut state = self.lock();
+            state.next_approval += 1;
+            let id = state.next_approval;
+            let card = Questions {
+                id,
+                questions: questions.clone(),
+            };
+            let frame = self.publish(&mut state, Payload::Question { question: &card });
+            state.pending.insert(
+                id,
+                Pending {
+                    frame,
+                    waiting: Waiting::Question { questions, reply },
+                },
+            );
+            id
+        };
+        let _withdraw = Withdraw { hub: self, id };
+        answer.await.ok()
     }
 
     /// Puts a call to the pages and waits for an answer.
@@ -524,8 +657,7 @@ impl Hub {
                 id,
                 Pending {
                     frame,
-                    offered,
-                    reply,
+                    waiting: Waiting::Approval { offered, reply },
                 },
             );
             id
@@ -556,6 +688,66 @@ impl Drop for Withdraw<'_> {
                 },
             );
         }
+    }
+}
+
+/// The answers a page gave, read against the questions they answer.
+fn page_answers(questions: &[Question], given: &[PageAnswer]) -> Option<Vec<Answer>> {
+    if given.len() != questions.len() {
+        return None;
+    }
+    questions
+        .iter()
+        .zip(given)
+        .map(|(question, given)| {
+            let fits = given
+                .chosen
+                .iter()
+                .all(|&index| index < question.options.len())
+                && (question.multi_select || given.chosen.len() <= 1)
+                && given
+                    .other
+                    .as_ref()
+                    .is_none_or(|other| other.len() <= MAX_PROMPT_BYTES);
+            fits.then(|| Answer {
+                question: question.question.clone(),
+                chosen: given
+                    .chosen
+                    .iter()
+                    .map(|&index| question.options[index].label.clone())
+                    .collect(),
+                other: given
+                    .other
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|other| !other.is_empty())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// Asks the model's questions on a page.
+pub struct RemoteAsker {
+    hub: Arc<Hub>,
+}
+
+impl RemoteAsker {
+    #[must_use]
+    pub fn new(hub: Arc<Hub>) -> Self {
+        Self { hub }
+    }
+}
+
+impl Asker for RemoteAsker {
+    fn ask(&self, questions: Vec<Question>) -> AnswerFuture<'_> {
+        Box::pin(async move {
+            let answers = self.hub.ask_questions(questions).await?;
+            Some(Answered {
+                by: "page".to_owned(),
+                answers,
+            })
+        })
     }
 }
 
@@ -656,11 +848,12 @@ pub struct Late {
 }
 
 impl Late {
+    /// With a hub from the start, as `dino serve`, every turn is a page's.
     #[must_use]
     pub fn new(hub: Option<Arc<Hub>>) -> Self {
         Self {
+            page_turn: Arc::new(std::sync::atomic::AtomicBool::new(hub.is_some())),
             hub: Arc::new(Mutex::new(hub)),
-            page_turn: Arc::default(),
         }
     }
 
@@ -707,20 +900,20 @@ impl EventSink for Tap {
     }
 }
 
-/// Asks at the terminal, except for a turn a page started, which asks there.
-pub struct RoutedApprover {
-    terminal: crate::approve::TerminalApprover,
+/// Asks `terminal`, except in a turn a page started, which asks on the page.
+pub struct Routed<T> {
+    terminal: T,
     late: Late,
 }
 
-impl RoutedApprover {
+impl<T> Routed<T> {
     #[must_use]
-    pub fn new(terminal: crate::approve::TerminalApprover, late: Late) -> Self {
+    pub fn new(terminal: T, late: Late) -> Self {
         Self { terminal, late }
     }
 }
 
-impl Approver for RoutedApprover {
+impl<T: Approver> Approver for Routed<T> {
     fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
         self.ask_in(call, action, &AskContext::default())
     }
@@ -738,19 +931,12 @@ impl Approver for RoutedApprover {
     }
 }
 
-/// Asks about a call on a page, and offers it less than the terminal would.
-///
-/// A page may give every answer the terminal can except a rule kept for later
-/// sessions: whoever holds the token holds a phone that can be lost, and that is
-/// the one answer that outlasts this session.
-pub struct RemoteApprover {
-    hub: Arc<Hub>,
-}
-
-impl RemoteApprover {
-    #[must_use]
-    pub fn new(hub: Arc<Hub>) -> Self {
-        Self { hub }
+impl<T: Asker> Asker for Routed<T> {
+    fn ask(&self, questions: Vec<Question>) -> AnswerFuture<'_> {
+        match self.late.asking_page() {
+            Some(hub) => Box::pin(async move { RemoteAsker::new(hub).ask(questions).await }),
+            None => self.terminal.ask(questions),
+        }
     }
 }
 
@@ -768,21 +954,11 @@ fn wire_key(reply: &ApprovalReply) -> Option<&'static str> {
     }
 }
 
-impl Approver for RemoteApprover {
-    fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
-        self.ask_in(call, action, &AskContext::default())
-    }
-
-    fn ask_in(
-        &self,
-        call: &ToolCall,
-        action: &ToolAction,
-        context: &AskContext,
-    ) -> ReplyFuture<'_> {
-        ask_page(Arc::clone(&self.hub), call, action, context)
-    }
-}
-
+/// Asks about a call on a page, and offers it less than the terminal would.
+///
+/// A page may give every answer the terminal can except a rule kept for later
+/// sessions: whoever holds the token holds a phone that can be lost, and that is
+/// the one answer that outlasts this session.
 fn ask_page(
     hub: Arc<Hub>,
     call: &ToolCall,
@@ -851,6 +1027,118 @@ mod tests {
         serde_json::from_str(&frame.json).expect("a frame is JSON")
     }
 
+    /// Stands in for the terminal, rejecting every call, so a test sees which
+    /// side was asked.
+    pub(super) struct Terminal;
+
+    impl Approver for Terminal {
+        fn ask(&self, _call: &ToolCall, _action: &ToolAction) -> ReplyFuture<'_> {
+            Box::pin(async { ApprovalReply::Reject(Some("terminal".to_owned())) })
+        }
+    }
+
+    /// As [`Terminal`], for the model's questions.
+    struct TerminalQuestions;
+
+    impl Asker for TerminalQuestions {
+        fn ask(&self, _questions: Vec<Question>) -> AnswerFuture<'_> {
+            Box::pin(async {
+                Some(Answered {
+                    by: "terminal".to_owned(),
+                    answers: Vec::new(),
+                })
+            })
+        }
+    }
+
+    /// Asks on the page, as every turn of `dino serve` does.
+    pub(super) fn on_page(hub: &Arc<Hub>) -> Routed<Terminal> {
+        Routed::new(Terminal, Late::new(Some(Arc::clone(hub))))
+    }
+
+    /// Answers the next approval the hub publishes with `key`.
+    fn answering(hub: &Arc<Hub>, key: &'static str) -> tokio::task::JoinHandle<()> {
+        let mut live = hub.subscribe(0).live;
+        let hub = Arc::clone(hub);
+        tokio::spawn(async move {
+            let approval = next_approval(&mut live).await;
+            hub.answer(approval["id"].as_u64().unwrap(), key).unwrap();
+        })
+    }
+
+    #[tokio::test]
+    async fn a_hub_served_late_asks_a_page_turn_on_the_page_and_the_rest_at_the_terminal() {
+        let late = Late::default();
+        let approver = Routed::new(Terminal, late.clone());
+        let action = ToolAction::process("cargo test");
+        let asked = || approver.ask_in(&call("c1"), &action, &AskContext::default());
+        let terminal = ApprovalReply::Reject(Some("terminal".to_owned()));
+        // A page turn with nothing served yet has no page to ask.
+        late.page_turn(true);
+        assert_eq!(asked().await, terminal);
+
+        let (hub, _prompts) = Hub::new();
+        late.set(Some(Arc::clone(&hub)));
+        late.page_turn(false);
+        assert_eq!(asked().await, terminal);
+
+        late.page_turn(true);
+        let page = answering(&hub, "once");
+        assert_eq!(asked().await, ApprovalReply::Once);
+        page.await.unwrap();
+
+        late.set(None);
+        assert_eq!(asked().await, terminal);
+    }
+
+    #[tokio::test]
+    async fn a_page_turn_in_a_session_served_late_asks_the_models_questions_on_the_page() {
+        let late = Late::default();
+        let asker = Routed::new(TerminalQuestions, late.clone());
+        let (hub, _prompts) = Hub::new();
+        late.set(Some(Arc::clone(&hub)));
+        assert_eq!(asker.ask(questions()).await.unwrap().by, "terminal");
+
+        late.page_turn(true);
+        let mut live = hub.subscribe(0).live;
+        let answered = tokio::spawn(async move { asker.ask(questions()).await });
+        let id = loop {
+            let value = parsed(&live.recv().await.unwrap());
+            if value["kind"] == "question" {
+                break value["question"]["id"].as_u64().unwrap();
+            }
+        };
+        let pick = |index| PageAnswer {
+            chosen: vec![index],
+            other: None,
+        };
+        hub.reply(id, &[pick(0), pick(1)]).unwrap();
+        assert_eq!(answered.await.unwrap().unwrap().by, "page");
+    }
+
+    #[tokio::test]
+    async fn a_subagent_of_a_page_turn_asks_on_the_page() {
+        let late = Late::default();
+        let child = crate::subagent::Asking::new(
+            Routed::new(Terminal, late.clone()),
+            crate::spinner::Hold::default(),
+            Arc::default(),
+        );
+        let (hub, _prompts) = Hub::new();
+        late.set(Some(Arc::clone(&hub)));
+        late.page_turn(true);
+        let page = answering(&hub, "session");
+        let reply = child
+            .ask_in(
+                &call("c1"),
+                &ToolAction::process("cargo test"),
+                &AskContext::default(),
+            )
+            .await;
+        assert_eq!(reply, ApprovalReply::ForSession);
+        page.await.unwrap();
+    }
+
     /// The approval frame the next `ask` publishes, read off the live channel.
     async fn next_approval(live: &mut broadcast::Receiver<Frame>) -> Value {
         loop {
@@ -862,11 +1150,76 @@ mod tests {
         }
     }
 
+    fn questions() -> Vec<Question> {
+        let choice = |label: &str| dino_core::ask::Choice {
+            label: label.to_owned(),
+            description: None,
+        };
+        vec![
+            Question {
+                question: "Which error type?".into(),
+                options: vec![choice("thiserror"), choice("anyhow")],
+                multi_select: false,
+            },
+            Question {
+                question: "Which targets?".into(),
+                options: vec![choice("linux"), choice("macos"), choice("windows")],
+                multi_select: true,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_page_answers_the_models_questions_and_the_tool_gets_the_labels() {
+        let (hub, _prompts) = Hub::new();
+        let mut live = hub.subscribe(0).live;
+        let page = RemoteAsker::new(Arc::clone(&hub));
+        let asked = tokio::spawn(async move { page.ask(questions()).await });
+
+        let card = loop {
+            let value = parsed(&live.recv().await.unwrap());
+            if value["kind"] == "question" {
+                break value["question"].clone();
+            }
+        };
+        assert_eq!(card["questions"][1]["options"][2]["label"], "windows");
+        let id = card["id"].as_u64().unwrap();
+        let several = PageAnswer {
+            chosen: vec![0, 1],
+            other: None,
+        };
+        // Two picks for a question that takes one, or one answer for two
+        // questions, is refused and leaves the questions waiting.
+        assert_eq!(
+            hub.reply(id, &[several.clone(), several.clone()]),
+            Err(ReplyError::Malformed)
+        );
+        assert_eq!(
+            hub.reply(id, std::slice::from_ref(&several)),
+            Err(ReplyError::Malformed)
+        );
+        let own = PageAnswer {
+            chosen: Vec::new(),
+            other: Some(" both, behind a feature ".into()),
+        };
+        hub.reply(id, &[own, several]).unwrap();
+
+        let answered = asked.await.unwrap().unwrap();
+        assert_eq!(answered.by, "page");
+        assert_eq!(
+            answered.answers[0].other.as_deref(),
+            Some("both, behind a feature")
+        );
+        assert_eq!(answered.answers[1].chosen, ["linux", "macos"]);
+        assert_eq!(hub.reply(id, &[]), Err(ReplyError::NoSuchQuestion));
+        assert_eq!(hub.answer(id, "once"), Err(AnswerError::NoSuchApproval));
+    }
+
     #[tokio::test]
     async fn a_page_answers_an_approval_and_the_session_gets_the_reply() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask_in(
@@ -899,7 +1252,7 @@ mod tests {
     async fn a_rule_for_later_sessions_is_never_offered_to_a_page() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let context = AskContext {
             also_pending: vec!["other".to_owned()],
             program: Some("cargo".to_owned()),
@@ -925,7 +1278,7 @@ mod tests {
     async fn a_call_outside_the_sandbox_can_be_run_once_from_a_page() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let context = AskContext {
             unconfined: Some("needs the network".to_owned()),
             ..AskContext::default()
@@ -957,7 +1310,7 @@ mod tests {
     async fn a_page_may_allow_every_command_but_never_remember_a_rule() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask(&call("c1"), &ToolAction::process("cargo test"))
@@ -982,7 +1335,7 @@ mod tests {
     async fn a_cancelled_run_withdraws_its_question() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask(&call("c1"), &ToolAction::process("cargo test"))
@@ -1005,7 +1358,7 @@ mod tests {
     async fn a_page_that_connects_late_is_owed_the_approval_still_waiting() {
         let (hub, _prompts) = Hub::new();
         let mut live = hub.subscribe(0).live;
-        let approver = RemoteApprover::new(Arc::clone(&hub));
+        let approver = on_page(&hub);
         let asked = tokio::spawn(async move {
             approver
                 .ask(&call("c1"), &ToolAction::process("cargo test"))

@@ -27,6 +27,9 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
     let fine = |text: String| Some((Tone::Fine, text));
     match call.name.as_str() {
         "todo" | "report_blocker" => None,
+        dino_core::subagent::AGENT => {
+            crate::subagent::gist(&output.content).and_then(|gist| fine(gist.to_owned()))
+        }
         "read" => match (
             number("start_line"),
             number("end_line"),
@@ -62,6 +65,11 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
         "list" => {
             number("total_entries").and_then(|entries| fine(count(entries, "entry", "entries")))
         }
+        "code" => match number("total") {
+            Some(total) => fine(count(total, "location", "locations")),
+            None if value.get("hover").is_some_and(Value::is_string) => fine(size(output)),
+            None => fine("nothing to show".to_owned()),
+        },
         "progress" => {
             let first = output.content.lines().next().unwrap_or_default();
             let done = first
@@ -288,6 +296,23 @@ mod tests {
                 json!({"created": true})
             ),
             Some((Tone::Fine, "created, 1 line".into()))
+        );
+    }
+
+    #[test]
+    fn code_counts_its_locations() {
+        let found = json!({"operation": "references", "total": 1, "locations": []});
+        assert_eq!(
+            gist("code", json!({}), found),
+            Some((Tone::Fine, "1 location".into()))
+        );
+        assert_eq!(
+            gist(
+                "code",
+                json!({}),
+                json!({"operation": "hover", "hover": null})
+            ),
+            Some((Tone::Fine, "nothing to show".into()))
         );
     }
 

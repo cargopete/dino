@@ -86,6 +86,20 @@ impl Meter {
         }
     }
 
+    /// One search the provider ran, billed apart from the tokens.
+    pub fn record_search(&self, model: &str, provider: dino_protocol::ProviderKind) {
+        let usd = dino_model::native_search_usd(provider);
+        if let Ok(mut spent) = self.spent.lock() {
+            match usd {
+                Some(usd) => spent.usd += usd,
+                None => spent.unpriced += 1,
+            }
+        }
+        if let Some(ledger) = &self.ledger {
+            ledger.append_search(model, usd);
+        }
+    }
+
     /// Kept in Dino's state directory, where there is one.
     #[must_use]
     pub fn for_session(session: &str) -> Self {
@@ -139,6 +153,17 @@ struct Entry {
     model: String,
     usd: Option<f64>,
     tokens: TokenUsage,
+    /// Searches run at the provider, which this line is the price of.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    searches: u64,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes a reference"
+)]
+const fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 impl Ledger {
@@ -157,14 +182,28 @@ impl Ledger {
     }
 
     fn append(&self, model: &str, usd: Option<f64>, tokens: &TokenUsage) {
-        let entry = Entry {
+        self.write(&Entry {
             session: self.session.clone(),
             model: model.to_owned(),
             usd,
             tokens: *tokens,
-        };
+            searches: 0,
+        });
+    }
+
+    fn append_search(&self, model: &str, usd: Option<f64>) {
+        self.write(&Entry {
+            session: self.session.clone(),
+            model: model.to_owned(),
+            usd,
+            tokens: TokenUsage::default(),
+            searches: 1,
+        });
+    }
+
+    fn write(&self, entry: &Entry) {
         let written = std::fs::create_dir_all(&self.dir).and_then(|()| {
-            let mut line = serde_json::to_string(&entry).map_err(std::io::Error::other)?;
+            let mut line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
             line.push('\n');
             std::fs::OpenOptions::new()
                 .create(true)
@@ -344,11 +383,14 @@ impl<S: ModelSession> ModelSession for Metered<S> {
             // Read after the call, which is when a fallback has chosen its model.
             let model = self.inner.profile().key.clone();
             let price = self.inner.profile().price;
+            let provider = self.inner.profile().provider;
             let meter = Arc::clone(&self.meter);
-            let metered = stream.inspect(move |event| {
-                if let Ok(ModelEvent::Usage { usage }) = event {
-                    meter.record(&model, price, usage);
+            let metered = stream.inspect(move |event| match event {
+                Ok(ModelEvent::Usage { usage }) => meter.record(&model, price, usage),
+                Ok(ModelEvent::Searched { error: None, .. }) => {
+                    meter.record_search(&model, provider);
                 }
+                _ => {}
             });
             Ok(Box::pin(metered) as ModelEventStream)
         })
@@ -648,6 +690,53 @@ mod tests {
         spending.meter.task().lift();
         assert!(session.next(ask()).await.is_ok());
         assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
+    /// Answers with two searches the provider ran, one of which failed.
+    struct Searches(ModelProfile);
+
+    impl ModelSession for Searches {
+        fn profile(&self) -> &ModelProfile {
+            &self.0
+        }
+
+        fn next(&mut self, _input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
+            let searched = |error: Option<&str>| {
+                Ok(ModelEvent::Searched {
+                    query: "tokio".into(),
+                    results: Vec::new(),
+                    error: error.map(str::to_owned),
+                })
+            };
+            let events = [searched(None), searched(Some("too_many_requests"))];
+            Box::pin(
+                async move { Ok(Box::pin(futures_util::stream::iter(events)) as ModelEventStream) },
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn a_search_at_the_provider_is_priced_and_one_that_failed_is_not() {
+        let dir = state_dir("searches");
+        let spending = Spending {
+            meter: Arc::new(Meter::new(Some(Ledger::new(&dir, "one")))),
+            cap: None,
+        };
+        let mut session = Metered::new(
+            Searches(dino_model::builtin_profile("claude-opus").unwrap()),
+            &spending,
+        );
+        let stream = session
+            .next(TurnInput::User {
+                content: "search".into(),
+            })
+            .await
+            .unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        assert!((spending.meter.spent().usd - 0.01).abs() < 1e-9);
+        assert_eq!(spending.meter.today(), Some(0.01));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

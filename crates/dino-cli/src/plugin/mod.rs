@@ -132,6 +132,9 @@ pub fn inspect(dir: &Path) -> Result<Bundle> {
         if let Err(problem) = check_command(dir, &hook.command) {
             problems.push(format!("hooks[{index}]: {problem}"));
         }
+        if let Some(problem) = hook.problem() {
+            problems.push(format!("hooks[{index}]: {problem}"));
+        }
     }
     for (name, server) in &manifest.mcp {
         if let Err(problem) = check_name(name) {
@@ -142,11 +145,13 @@ pub fn inspect(dir: &Path) -> Result<Bundle> {
         }
     }
     if skills.is_empty()
+        && commands(dir).is_empty()
         && manifest.hooks.is_empty()
         && manifest.mcp.is_empty()
         && manifest.instructions.is_none()
     {
-        problems.push("contributes nothing: no skills, hooks, mcp or instructions".into());
+        problems
+            .push("contributes nothing: no skills, commands, hooks, mcp or instructions".into());
     }
 
     if !problems.is_empty() {
@@ -164,6 +169,20 @@ pub fn inspect(dir: &Path) -> Result<Bundle> {
         skills,
         digest: digest_of(&files)?,
     })
+}
+
+/// The slash commands a bundle's `commands/` holds, as a person types them.
+pub fn commands(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("commands"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .filter_map(|path| Some(format!("/{}", path.file_stem()?.to_str()?)))
+        .collect();
+    names.sort();
+    names
 }
 
 /// Lower-case letters, digits and hyphens, starting with a letter: a name that
@@ -335,6 +354,10 @@ pub fn describe(bundle: &Bundle, source: &str) -> Vec<(&'static str, String)> {
             .collect();
         rows.push(("skills", names.join(", ")));
     }
+    let commands = commands(&bundle.dir);
+    if !commands.is_empty() {
+        rows.push(("commands", commands.join(", ")));
+    }
     if let Some(file) = &manifest.instructions {
         rows.push((
             "instructions",
@@ -387,6 +410,10 @@ fn event_name(event: HookEvent) -> &'static str {
         HookEvent::BeforeEndTurn => "before_end_turn",
         HookEvent::SessionStart => "session_start",
         HookEvent::TaskEnd => "task_end",
+        HookEvent::BeforeCall => "before_call",
+        HookEvent::AfterCall => "after_call",
+        HookEvent::PromptSubmit => "prompt_submit",
+        HookEvent::AwaitingApproval => "awaiting_approval",
     }
 }
 
@@ -582,6 +609,10 @@ impl Active {
         self.dir.join("skills")
     }
 
+    pub fn commands_dir(&self) -> PathBuf {
+        self.dir.join("commands")
+    }
+
     fn expand(&self, command: &[String]) -> Vec<String> {
         let dir = self.dir.display().to_string();
         command
@@ -598,6 +629,8 @@ impl Active {
             .map(|hook| dino_exec::Hook {
                 command: self.expand(&hook.command),
                 extension: hook.extension.clone(),
+                tool: hook.tool.clone(),
+                program: hook.program.clone(),
             })
             .collect()
     }
@@ -801,6 +834,27 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_bundle_of_commands_alone_contributes_them_and_says_so() {
+        let scratch = Scratch::new("commands");
+        let dir = scratch.0.join("cmds");
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(dir.join("commands/ship.md"), "Ship $ARGUMENTS").unwrap();
+        std::fs::write(
+            dir.join(MANIFEST),
+            "name = \"cmds\"\nversion = \"0.1.0\"\ndescription = \"Commands\"\nengines = \"*\"\n",
+        )
+        .unwrap();
+
+        let bundle = inspect(&dir).unwrap();
+
+        assert!(
+            describe(&bundle, "here").contains(&("commands", "/ship".to_owned())),
+            "{:?}",
+            describe(&bundle, "here")
+        );
+    }
+
     #[test]
     fn a_symbolic_link_in_a_bundle_is_refused() {
         let scratch = Scratch::new("symlink");

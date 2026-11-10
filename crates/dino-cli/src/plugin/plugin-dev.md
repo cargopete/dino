@@ -26,7 +26,8 @@ engines = ">=0.1"                 # the Dino versions it works with, a semver ra
 instructions = "INSTRUCTIONS.md"  # optional; read into every session's prompt
 
 [[hooks]]                         # same fields as [[hooks]] in config.toml
-event = "after_edit"              # after_edit, before_end_turn, session_start, task_end
+event = "after_edit"              # after_edit, before_end_turn, session_start, task_end,
+                                  # before_call, after_call, prompt_submit, awaiting_approval
 extension = "rs"
 command = ["{plugin}/bin/tidy.sh", "{path}"]
 
@@ -38,6 +39,9 @@ sandbox = true                    # the default; say why if you turn it off
 - Skills are folders under `skills/`, each with a `SKILL.md` whose front matter
   has `name:` and `description:`. The description is all the model sees until
   it loads the skill, so say when to use it.
+- Slash commands are `commands/<name>.md`: a prompt the person sends with
+  `/<name> args`, `$ARGUMENTS` and `$1`, `$2` filled in, and `description:` in
+  front matter for `/help`.
 - `{plugin}` is the installed bundle's directory. A command that starts with it
   must name a file in the bundle. Make scripts executable.
 - Hooks and MCP servers run as the person, in every session. Contribute one
