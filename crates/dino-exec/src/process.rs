@@ -226,11 +226,45 @@ pub async fn run_with(
     timeout: Duration,
     extra: &[(&str, &str)],
 ) -> Result<Execution, ToolError> {
+    run_fed(
+        program, arguments, directory, sandbox, limit, timeout, extra, None,
+    )
+    .await
+}
+
+/// [`run_with`], with `input` written to the child's standard input.
+///
+/// # Errors
+///
+/// As [`run`].
+#[allow(clippy::too_many_arguments, reason = "run_with's, and one more")]
+pub async fn run_fed(
+    program: &str,
+    arguments: &[String],
+    directory: &Path,
+    sandbox: &dyn Sandbox,
+    limit: usize,
+    timeout: Duration,
+    extra: &[(&str, &str)],
+    input: Option<&[u8]>,
+) -> Result<Execution, ToolError> {
     let (mut command, mut snapshot) = prepare(program, arguments, directory, sandbox, extra)?;
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
 
     let mut child = spawn(&mut command)
         .await
         .map_err(|error| ToolError::new(format!("cannot run {program}: {error}")))?;
+    if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
+        let input = input.to_vec();
+        // Its own task, so a child that never reads cannot hold the call; a
+        // child that exits without reading is a broken pipe nobody needs to hear.
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let _ = stdin.write_all(&input).await;
+        });
+    }
     let stdout = child
         .stdout
         .take()

@@ -143,6 +143,20 @@ CI and evals.
   that no tool result came after is sent when the turn ends, and anything typed
   but not entered starts the next prompt. A command entered during a turn, and
   anything after it, waits for the turn to end and then runs on its own.
+- **A status line of your own.** `status_line = ["sh", "-c", "..."]` in the
+  user file runs a command with the session as JSON on standard input: the
+  model, the workspace, its git branch (read from `HEAD`), the context used and
+  the window, the submission's tokens, the session's cost, what the turn is
+  doing and for how long, and how many messages are queued. Nothing typed or
+  said is in it. Its first line, with escape sequences and control characters
+  taken out and cut to the terminal's width, takes the place of the built-in
+  row while a turn runs, refreshed at most once a second on a task of its own,
+  and is printed above each prompt, which a slow one holds back by up to half a
+  second. A run that fails, prints nothing or takes
+  more than 500 ms leaves the built-in row in place, and prints nothing at the
+  prompt. It runs outside the sandbox, which is why only the user file may set
+  it, and under `--plain` it does not run. Tested with `sh` scripts standing in
+  for one; not yet tried in a live session.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events
@@ -258,9 +272,10 @@ CI and evals.
 - **Configuration, split by who wrote it.** `~/.config/dino/config.toml` for your
   defaults, `<workspace>/.dino/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
-  `sandbox`, `api_base`, `hooks` or `mcp`: two weaken a boundary, one redirects
-  where a credential is sent and two run commands. A project file that tries is an
-  error naming the file and the key. No file holds a credential at any layer.
+  `sandbox`, `api_base`, `hooks`, `mcp` or `status_line`: two weaken a boundary,
+  one redirects where a credential is sent and three run commands. A project
+  file that tries is an error naming the file and the key. No file holds a
+  credential at any layer.
 - **MCP, stdio only.** `[mcp.<name>]` in the user file starts a local server
   (`command`, plus `pass_env` naming variables to pass through, so no token is
   written into the file). Its tools appear as `mcp__<name>__<tool>` and ask like
@@ -301,6 +316,28 @@ CI and evals.
   a hook that exits 0 ran, which is not proof the message arrived, and a
   process killed before its task ends sends none. For Discord:
   `command = ["curl", "-sS", "--form-string", "content={message}", "https://discord.com/api/webhooks/ID/TOKEN"]`.
+- **Hooks around calls and messages.** A `before_call` hook runs once a call
+  is classified and before anyone is asked, with `{"call": ..., "action": ...}`
+  on standard input. `tool` limits it to one tool, and `program` to an `exec`
+  of that program, matched by file name, or a `shell` line whose first word it
+  is; `cd x && rm -rf y` starts with `cd`, so to police `shell`, match the tool
+  and read the line. Exit 0 hands the call on to the approval policy, exit 2
+  refuses it with what the hook printed as the reason the model is given, and
+  any other exit refuses it too, naming only the program. It can only refuse:
+  a call that would have asked still asks, and `--dangerously-allow-all` does
+  not get round it. An `after_call` hook gets the call and its result, and
+  what it prints is added to the result under `after_call`. A `prompt_submit`
+  hook gets `{"message": ...}` for each message sent, typed, from a page, from
+  a schedule or to `dino run`; what it prints goes to the model after the
+  message, exit 2 refuses the message with the hook's output shown to the
+  person, and any other failure is reported and the message goes anyway. These
+  three run inside the sandbox, for at most 60 seconds each. An
+  `awaiting_approval` hook runs outside the sandbox, as `task_end` does, once a
+  question has gone `ping_after_seconds` unanswered, with `{tool}` and
+  `{message}` in its arguments and `DINO_TOOL` and `DINO_MESSAGE`; the message
+  names the workspace and the tool, never the call's arguments, and the
+  question goes on waiting. It fires once per question. All four are tested
+  against stand-in tools, policies and approvers, not yet in a live session.
 - **Schedules.** In a session, `schedule_create`, `schedule_list`,
   `schedule_update` and `schedule_delete` set a message to be sent into this
   conversation later: once after a `delay` (`20m`, `1h30m`), once `at` a time

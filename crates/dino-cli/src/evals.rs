@@ -575,6 +575,8 @@ fn eval_settings(
         end_turn_hooks: Vec::new(),
         start_hooks: Vec::new(),
         task_end_hooks: Vec::new(),
+        call_hooks: config::CallHooks::default(),
+        status_line: None,
         verify: None,
         task_limits: crate::task::Limits::default(),
         compaction: config::Compaction::Manual,
