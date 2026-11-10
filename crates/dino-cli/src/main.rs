@@ -7,6 +7,7 @@ mod diff;
 mod evals;
 mod greeting;
 mod handover;
+mod hooks;
 mod listen;
 mod markdown;
 mod plugin;
@@ -20,6 +21,7 @@ mod session;
 mod settings;
 mod spend;
 mod spinner;
+mod statusline;
 mod style;
 mod summary;
 mod task;
@@ -493,13 +495,16 @@ fn session_tool_set(
     tool_set(
         &settings.workspace,
         Arc::clone(sandbox),
-        &interactive_options(
-            &settings.workspace,
-            settings.protected.clone(),
-            settings.max_diagnostics,
-            settings.hooks.clone(),
-            settings.verify.clone(),
-        ),
+        &dino_eval::ToolOptions {
+            after_call: settings.call_hooks.after_call.clone(),
+            ..interactive_options(
+                &settings.workspace,
+                settings.protected.clone(),
+                settings.max_diagnostics,
+                settings.hooks.clone(),
+                settings.verify.clone(),
+            )
+        },
         mcp,
     )
     .map(|tools| tools.keeping(|name| preset.offers(name)))
@@ -588,10 +593,12 @@ fn interactive_options(
         protected,
         max_diagnostics,
         hooks,
+        after_call: Vec::new(),
         memory: memory_files(workspace),
         skills: skills(workspace),
         github: dino_exec::GithubTool::available(),
         web: true,
+        code: true,
         skip_edit_check: false,
         escalation: true,
         verify,
@@ -675,6 +682,14 @@ pub(crate) struct Prepared {
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
     spending: spend::Spending,
+}
+
+fn prompt_hooks(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> dino_exec::PromptHooks {
+    dino_exec::PromptHooks::new(
+        settings.call_hooks.prompt_submit.clone(),
+        &settings.workspace,
+        Arc::clone(sandbox),
+    )
 }
 
 impl Prepared {
@@ -854,6 +869,7 @@ fn prepare(
     if let Ok(mut status) = status.lock() {
         status.answering(&settings.profile);
         status.meter = Some(Arc::clone(&spending.meter));
+        status.line = statusline::StatusLine::configured(&settings);
     }
     let shown = shown(json, renderer, meta)?;
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -865,9 +881,12 @@ fn prepare(
             ..AgentConfig::default()
         },
     )
-    .with_policy(dino_core::approval::PlanGate::new(
-        policy(settings.mode, &sandbox_label, &settings.workspace, remote),
-        Arc::clone(&planning),
+    .with_policy(gated_policy(
+        &settings,
+        &sandbox_label,
+        &sandbox,
+        remote,
+        &planning,
     ))
     .with_sink(((shown, log), remote::Tap(remote.map(Arc::clone))));
     let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
@@ -1244,6 +1263,7 @@ async fn drive(common: CommonArgs, remote: Option<&mut Remote>) -> Result<Next> 
         approvals: prepared.settings.mode.label().to_owned(),
         log_path: prepared.settings.log_path.display().to_string(),
         end_hooks: prepared.settings.task_end_hooks.clone(),
+        prompt_hooks: prompt_hooks(&prepared.settings, &prepared.sandbox),
         history_path: prepared.settings.workspace.join(".dino").join("history"),
         name: resume::label(&prepared.state_path)
             .ok()
@@ -1349,8 +1369,15 @@ async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
 }
 
 /// Starts the clock on a one-shot run's task, and says when the message set its
-/// limits. Returns the request, with a note added when the branch is behind.
-async fn begin_task(prepared: &mut Prepared, request: String) -> String {
+/// limits. Returns the request, with a note added when the branch is behind
+/// and what the `prompt_submit` hooks added, or an error when one refused it.
+async fn begin_task(prepared: &mut Prepared, request: String) -> Result<String> {
+    let added = hooks::submitted(
+        &prompt_hooks(&prepared.settings, &prepared.sandbox),
+        &request,
+    )
+    .await
+    .map_err(|reason| anyhow::anyhow!("not sent: {reason}"))?;
     let (limits, named) = prepared.spending.meter.begin_task(&request);
     if named {
         eprintln!(
@@ -1365,11 +1392,12 @@ async fn begin_task(prepared: &mut Prepared, request: String) -> String {
     let finishing = (prepared.settings.keep_going || task::wants_to_finish(&request))
         && !matches!(prepared.settings.mode, ApprovalMode::ReadOnly);
     prepared.agent.set_keep_going(finishing);
-    if finishing {
+    let request = if finishing {
         task::note_if_behind(&prepared.settings.workspace, request).await
     } else {
         request
-    }
+    };
+    Ok(dino_exec::with_context(request, &added))
 }
 
 /// Ends the task a handover chain ran and pings for it.
@@ -1498,7 +1526,7 @@ async fn run_in(args: RunArgs) -> Result<ExitCode> {
         }
     });
 
-    let request = begin_task(&mut prepared, request).await;
+    let request = begin_task(&mut prepared, request).await?;
     if let Some(progress) = &progress {
         let ended = handover::run(
             &mut prepared,
@@ -1685,6 +1713,8 @@ fn hooks_for(layers: &Layers, event: settings::HookEvent) -> Vec<dino_exec::Hook
                 .map(|hook| dino_exec::Hook {
                     command: hook.command,
                     extension: hook.extension,
+                    tool: hook.tool,
+                    program: hook.program,
                 })
                 .collect()
         })
@@ -1697,14 +1727,30 @@ fn hooks_for(layers: &Layers, event: settings::HookEvent) -> Vec<dino_exec::Hook
     hooks
 }
 
-/// The user file's hooks for the end of a task, each with how long a task must
-/// have run before it fires.
-fn end_hooks(layers: &Layers) -> Vec<task::EndHook> {
-    let after = std::time::Duration::from_secs(
+/// How long a task must run, or an approval wait, before a ping fires.
+fn ping_after(layers: &Layers) -> std::time::Duration {
+    std::time::Duration::from_secs(
         layers
             .pick_user_only(|file| file.ping_after_seconds)
             .map_or(300, |(seconds, _)| seconds),
-    );
+    )
+}
+
+/// The hooks around calls, submissions and unanswered questions.
+fn call_hooks(layers: &Layers) -> config::CallHooks {
+    config::CallHooks {
+        before_call: hooks_for(layers, settings::HookEvent::BeforeCall),
+        after_call: hooks_for(layers, settings::HookEvent::AfterCall),
+        prompt_submit: hooks_for(layers, settings::HookEvent::PromptSubmit),
+        awaiting_approval: hooks_for(layers, settings::HookEvent::AwaitingApproval),
+        ping_after: ping_after(layers),
+    }
+}
+
+/// The user file's hooks for the end of a task, each with how long a task must
+/// have run before it fires.
+fn end_hooks(layers: &Layers) -> Vec<task::EndHook> {
+    let after = ping_after(layers);
     hooks_for(layers, settings::HookEvent::TaskEnd)
         .into_iter()
         .map(|hook| task::EndHook { hook, after })
@@ -2173,6 +2219,12 @@ fn run_settings(
         end_turn_hooks: resolved.end_turn_hooks,
         start_hooks: resolved.start_hooks,
         task_end_hooks: resolved.task_end_hooks,
+        call_hooks: call_hooks(&resolved.layers),
+        status_line: resolved
+            .layers
+            .pick_user_only(|file| file.status_line.clone())
+            .map(|(command, _)| command)
+            .filter(|command| !command.is_empty()),
         verify,
         task_limits: resolved.task_limits,
         mcp: resolved.mcp,
@@ -2222,24 +2274,61 @@ fn interactive_policy<A: Approver + 'static>(
     }
 }
 
+/// The session's policy behind its plan gate, with the `before_call` hooks in
+/// front of both.
+fn gated_policy(
+    settings: &RunSettings,
+    sandbox_label: &str,
+    sandbox: &Arc<dyn Sandbox>,
+    remote: Option<&Arc<remote::Hub>>,
+    planning: &Arc<std::sync::atomic::AtomicBool>,
+) -> impl ApprovalPolicy + 'static {
+    dino_exec::BeforeCall::new(
+        dino_core::approval::PlanGate::new(
+            policy(
+                settings.mode,
+                sandbox_label,
+                &settings.workspace,
+                remote,
+                &settings.call_hooks,
+            ),
+            Arc::clone(planning),
+        ),
+        settings.call_hooks.before_call.clone(),
+        &settings.workspace,
+        Arc::clone(sandbox),
+    )
+}
+
 /// With `remote`, approvals are asked on the pages and not at the terminal.
 fn policy(
     mode: ApprovalMode,
     sandbox: &str,
     workspace: &Path,
     remote: Option<&Arc<remote::Hub>>,
+    waiting: &config::CallHooks,
 ) -> Box<dyn ApprovalPolicy> {
     match mode {
         ApprovalMode::Interactive | ApprovalMode::AcceptEdits => {
             let accept_edits = mode == ApprovalMode::AcceptEdits;
             match remote {
                 Some(hub) => interactive_policy(
-                    remote::RemoteApprover::new(Arc::clone(hub)),
+                    hooks::Pinging::new(
+                        remote::RemoteApprover::new(Arc::clone(hub)),
+                        waiting.awaiting_approval.clone(),
+                        workspace.to_path_buf(),
+                        waiting.ping_after,
+                    ),
                     workspace,
                     accept_edits,
                 ),
                 None => interactive_policy(
-                    TerminalApprover::new(sandbox, workspace),
+                    hooks::Pinging::new(
+                        TerminalApprover::new(sandbox, workspace),
+                        waiting.awaiting_approval.clone(),
+                        workspace.to_path_buf(),
+                        waiting.ping_after,
+                    ),
                     workspace,
                     accept_edits,
                 ),

@@ -56,7 +56,7 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Fourteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Fifteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
@@ -84,7 +84,24 @@ CI and evals.
   and CI (`pr_checks`, `checks_wait` until no check is pending, `run_list`,
   `run_view` with `log_failed`) through a fixed set of read-only `gh` commands,
   run by `dino` rather than by a confined process, and is offered only where
-  `gh` is installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
+  `gh` is installed. `code` asks rust-analyzer for a definition, the
+  references, the hover text (type, signature and docs), the implementations,
+  or the workspace's items matching a name, given a path, a line and the
+  identifier on it. It answers as `search` does, `path:line:col` with the
+  line's text, at most 100 locations and the total, and unlike `search` it
+  follows re-exports and trait methods and tells two items of one name apart.
+  One rust-analyzer is started on the first call, inside the sandbox with
+  `checkOnSave` off, and killed when the session ends; a call waits up to 90
+  seconds for it to finish indexing and says so when it had not. Its own file
+  watcher reports an edit some time after it lands, so each call first sends it
+  every Rust file changed since the last. It is classed read-only, but loading
+  a workspace runs its build scripts and procedural macros, confined as
+  `cargo check` is. It is offered only where rust-analyzer runs: through rustup
+  under the channel a `rust-toolchain.toml` pins, or the first on PATH that
+  answers `--version`, since the rustup proxy is on PATH whether or not the
+  component is installed. It has run under Seatbelt, not yet under Landlock.
+  Evals leave it out unless asked for with `dino eval --code`, and whether it
+  saves reads on the hard corpus has not been measured. `web_fetch` reads one URL as text, HTML rendered, and asks per
   host, because a URL can carry workspace text out; a redirect to another host
   is refused rather than followed past that approval.
 - **Approval enforced below the model.** Every call is classified read-only,
@@ -113,7 +130,7 @@ CI and evals.
   what the agent did an hour ago and where selection and copying still work.
   Each call is one line, `✓ $ cargo test · 7 passed`: an icon for its kind, a
   mark for running, done, failed or refused (by you, or blocked by policy), and
-  a run of reads, lists and searches folded into one `explored` line. The line
+  a run of reads, lists, searches and `code` lookups folded into one `explored` line. The line
   is redrawn in place only while it is still the last one written. Beneath it,
   while a turn runs, one status row gives the model, the context used, the
   submission's tokens with the cached share, the session's cost at list price,
@@ -126,6 +143,20 @@ CI and evals.
   that no tool result came after is sent when the turn ends, and anything typed
   but not entered starts the next prompt. A command entered during a turn, and
   anything after it, waits for the turn to end and then runs on its own.
+- **A status line of your own.** `status_line = ["sh", "-c", "..."]` in the
+  user file runs a command with the session as JSON on standard input: the
+  model, the workspace, its git branch (read from `HEAD`), the context used and
+  the window, the submission's tokens, the session's cost, what the turn is
+  doing and for how long, and how many messages are queued. Nothing typed or
+  said is in it. Its first line, with escape sequences and control characters
+  taken out and cut to the terminal's width, takes the place of the built-in
+  row while a turn runs, refreshed at most once a second on a task of its own,
+  and is printed above each prompt, which a slow one holds back by up to half a
+  second. A run that fails, prints nothing or takes
+  more than 500 ms leaves the built-in row in place, and prints nothing at the
+  prompt. It runs outside the sandbox, which is why only the user file may set
+  it, and under `--plain` it does not run. Tested with `sh` scripts standing in
+  for one; not yet tried in a live session.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events
@@ -259,9 +290,10 @@ CI and evals.
 - **Configuration, split by who wrote it.** `~/.config/dino/config.toml` for your
   defaults, `<workspace>/.dino/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
-  `sandbox`, `api_base`, `hooks` or `mcp`: two weaken a boundary, one redirects
-  where a credential is sent and two run commands. A project file that tries is an
-  error naming the file and the key. No file holds a credential at any layer.
+  `sandbox`, `api_base`, `hooks`, `mcp` or `status_line`: two weaken a boundary,
+  one redirects where a credential is sent and three run commands. A project
+  file that tries is an error naming the file and the key. No file holds a
+  credential at any layer.
 - **MCP, stdio only.** `[mcp.<name>]` in the user file starts a local server
   (`command`, plus `pass_env` naming variables to pass through, so no token is
   written into the file). Its tools appear as `mcp__<name>__<tool>` and ask like
@@ -302,6 +334,28 @@ CI and evals.
   a hook that exits 0 ran, which is not proof the message arrived, and a
   process killed before its task ends sends none. For Discord:
   `command = ["curl", "-sS", "--form-string", "content={message}", "https://discord.com/api/webhooks/ID/TOKEN"]`.
+- **Hooks around calls and messages.** A `before_call` hook runs once a call
+  is classified and before anyone is asked, with `{"call": ..., "action": ...}`
+  on standard input. `tool` limits it to one tool, and `program` to an `exec`
+  of that program, matched by file name, or a `shell` line whose first word it
+  is; `cd x && rm -rf y` starts with `cd`, so to police `shell`, match the tool
+  and read the line. Exit 0 hands the call on to the approval policy, exit 2
+  refuses it with what the hook printed as the reason the model is given, and
+  any other exit refuses it too, naming only the program. It can only refuse:
+  a call that would have asked still asks, and `--dangerously-allow-all` does
+  not get round it. An `after_call` hook gets the call and its result, and
+  what it prints is added to the result under `after_call`. A `prompt_submit`
+  hook gets `{"message": ...}` for each message sent, typed, from a page, from
+  a schedule or to `dino run`; what it prints goes to the model after the
+  message, exit 2 refuses the message with the hook's output shown to the
+  person, and any other failure is reported and the message goes anyway. These
+  three run inside the sandbox, for at most 60 seconds each. An
+  `awaiting_approval` hook runs outside the sandbox, as `task_end` does, once a
+  question has gone `ping_after_seconds` unanswered, with `{tool}` and
+  `{message}` in its arguments and `DINO_TOOL` and `DINO_MESSAGE`; the message
+  names the workspace and the tool, never the call's arguments, and the
+  question goes on waiting. It fires once per question. All four are tested
+  against stand-in tools, policies and approvers, not yet in a live session.
 - **Schedules.** In a session, `schedule_create`, `schedule_list`,
   `schedule_update` and `schedule_delete` set a message to be sent into this
   conversation later: once after a `delay` (`20m`, `1h30m`), once `at` a time
@@ -385,7 +439,9 @@ CI and evals.
   how the log's sufficiency gets tested. A case may carry hidden tests, laid
   over the workspace only after the run, and protected paths the model may not
   change. `--without <tool>` hides a tool as completely as if it had never been
-  built, which is how several of the findings below were obtained.
+  built, which is how several of the findings below were obtained. `--code`
+  adds the `code` tool, which evals otherwise leave out, and records that it
+  was asked for.
   `scripts/bench.sh` runs cases through `dino` on a self-hosted model and
   through Claude Code as a baseline, and `scripts/analyse-bench.py` mines the
   logs (see [evals/README.md](evals/README.md)).

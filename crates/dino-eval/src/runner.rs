@@ -97,6 +97,10 @@ pub struct Outcome {
     /// a run that never did is still told apart from one that was not watched.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub early_stop: bool,
+    /// Whether `code` was asked for. It is offered only where rust-analyzer
+    /// runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub code: bool,
 }
 
 /// Why a run was stopped before it finished.
@@ -135,6 +139,8 @@ pub struct Variant {
     pub review_model: Option<String>,
     /// Stop the run as soon as it changes a protected path. Issue #140.
     pub early_stop: bool,
+    /// Offer the `code` tool, where rust-analyzer can be run. Issue #297.
+    pub code: bool,
 }
 
 /// What shapes the tools a session gets.
@@ -153,12 +159,17 @@ pub struct ToolOptions {
     pub github: bool,
     /// Offer `web_fetch`. Off for evals, for the same reason.
     pub web: bool,
+    /// Offer `code` where rust-analyzer can be run. Off for evals unless a
+    /// variant asks, until the corpus has measured it.
+    pub code: bool,
     /// Skills offered through the `skill` tool. None in evals.
     pub skills: Vec<dino_core::skills::Skill>,
     /// Where `remember` writes. None in evals, which keep no memory.
     pub memory: Option<dino_core::memory::MemoryFiles>,
     /// After-edit hooks around the file tools. None in evals.
     pub hooks: Vec<dino_exec::Hook>,
+    /// After-call hooks around every tool. None in evals.
+    pub after_call: Vec<dino_exec::Hook>,
     /// Leave out the `cargo check` that follows a turn's Rust edits.
     pub skip_edit_check: bool,
     /// Let `exec` and `shell` ask to run one command outside the sandbox, for
@@ -518,6 +529,7 @@ pub(crate) async fn conclude(
         cost: None,
         review_model: variant.review_model.clone(),
         early_stop: variant.early_stop,
+        code: variant.code,
     })
 }
 
@@ -591,6 +603,7 @@ pub(crate) fn wall_outcome(
         cost: None,
         review_model: variant.review_model.clone(),
         early_stop: variant.early_stop,
+        code: variant.code,
     })
 }
 
@@ -672,7 +685,9 @@ fn eval_session(
                 max_diagnostics: variant.max_diagnostics,
                 github: false,
                 web: false,
+                code: variant.code,
                 hooks: Vec::new(),
+                after_call: Vec::new(),
                 memory: None,
                 skills: Vec::new(),
                 skip_edit_check: false,
@@ -1145,6 +1160,16 @@ pub fn session_tools_with(
             GithubTool::new(workspace, GithubLimits::default()).map_err(setup)?,
         ));
     }
+    if options.code
+        && let Some(code) = dino_exec::CodeTool::new(
+            workspace,
+            dino_exec::CodeLimits::default(),
+            Arc::clone(&sandbox),
+        )
+        .map_err(setup)?
+    {
+        runtimes.push(Box::new(code));
+    }
     // Offered before a Cargo.toml exists too: a new project needs it to fetch.
     // The gate is deliberately absent. RFC-0011 section 13.
     let limits = CargoLimits {
@@ -1153,6 +1178,7 @@ pub fn session_tools_with(
             .unwrap_or(CargoLimits::default().max_diagnostics),
         ..CargoLimits::default()
     };
+    let wrapping = Arc::clone(&sandbox);
     runtimes.push(Box::new(
         CargoTool::new(workspace, limits, sandbox).map_err(setup)?,
     ));
@@ -1160,7 +1186,30 @@ pub fn session_tools_with(
         runtimes.push(Box::new(dino_core::todo::TodoTool));
     }
     runtimes.extend(extra);
-    ToolSet::new(runtimes).map_err(setup)
+    ToolSet::new(after_calls(runtimes, options, workspace, &wrapping)).map_err(setup)
+}
+
+/// Each runtime, wrapped in the user's after-call hooks when there are any.
+fn after_calls(
+    runtimes: Vec<Box<dyn ToolRuntime>>,
+    options: &ToolOptions,
+    workspace: &Path,
+    sandbox: &Arc<dyn Sandbox>,
+) -> Vec<Box<dyn ToolRuntime>> {
+    if options.after_call.is_empty() {
+        return runtimes;
+    }
+    runtimes
+        .into_iter()
+        .map(|runtime| -> Box<dyn ToolRuntime> {
+            Box::new(dino_exec::AfterCall::new(
+                runtime,
+                options.after_call.clone(),
+                workspace,
+                Arc::clone(sandbox),
+            ))
+        })
+        .collect()
 }
 
 /// The file tools, wrapped in the user's after-edit hooks when there are any.
