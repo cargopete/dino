@@ -316,14 +316,47 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelEvent {
-    Started { response_id: Option<String> },
-    TextDelta { text: String },
-    ReasoningDelta { text: String },
-    ToolCallStarted { id: String, name: String },
-    ToolCallArgumentsDelta { id: String, delta: String },
-    ToolCallCompleted { call: ToolCall },
-    Usage { usage: TokenUsage },
-    Finished { reason: StopReason },
+    Started {
+        response_id: Option<String>,
+    },
+    TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ToolCallStarted {
+        id: String,
+        name: String,
+    },
+    ToolCallArgumentsDelta {
+        id: String,
+        delta: String,
+    },
+    ToolCallCompleted {
+        call: ToolCall,
+    },
+    Usage {
+        usage: TokenUsage,
+    },
+    /// A search the provider ran itself, as a server-side tool. `error` is the
+    /// provider's code for one that failed, which is not billed.
+    Searched {
+        query: String,
+        results: Vec<SearchHit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    Finished {
+        reason: StopReason,
+    },
+}
+
+/// One result of a search: where it is and what it is called.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub title: String,
+    pub url: String,
 }
 
 /// What a tool call would do, as classified by the runtime that owns the tool.

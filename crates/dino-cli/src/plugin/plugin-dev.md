@@ -26,7 +26,8 @@ engines = ">=0.1"                 # the Dino versions it works with, a semver ra
 instructions = "INSTRUCTIONS.md"  # optional; read into every session's prompt
 
 [[hooks]]                         # same fields as [[hooks]] in config.toml
-event = "after_edit"              # after_edit, before_end_turn, session_start, task_end
+event = "after_edit"              # after_edit, before_end_turn, session_start, task_end,
+                                  # before_call, after_call, prompt_submit, awaiting_approval
 extension = "rs"
 command = ["{plugin}/bin/tidy.sh", "{path}"]
 

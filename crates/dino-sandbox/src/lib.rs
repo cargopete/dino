@@ -13,6 +13,7 @@
 mod landlock;
 mod restore;
 mod seatbelt;
+mod worktree;
 
 use std::fmt::Debug;
 use std::path::Path;
@@ -22,6 +23,7 @@ use thiserror::Error;
 pub use crate::landlock::Landlock;
 pub use crate::restore::Snapshot;
 pub use crate::seatbelt::Seatbelt;
+pub use crate::worktree::LinkedWorktree;
 
 /// Home-relative paths that hold credentials, denied to confined reads.
 pub const CREDENTIAL_PATHS: &[&str] = &[
@@ -128,6 +130,12 @@ pub trait Sandbox: Send + Sync + Debug {
             .map(|state| state.join("cache"))
     }
 
+    /// Where Cargo builds when not in the workspace's own `target`, given to
+    /// every process as `CARGO_TARGET_DIR` and inside the writable set.
+    fn target_dir(&self) -> Option<&Path> {
+        None
+    }
+
     /// The same confinement plus outbound HTTPS and writes beneath `writable`,
     /// for fetching dependencies. `None` where this sandbox cannot express it.
     fn for_fetching(&self, _writable: &[std::path::PathBuf]) -> Option<Box<dyn Sandbox>> {
@@ -179,6 +187,40 @@ impl Sandbox for Unconfined {
     }
 }
 
+/// [`Unconfined`], with Cargo building in a target directory of its own.
+#[derive(Debug, Clone)]
+pub struct UnconfinedBuildingIn(pub std::path::PathBuf);
+
+impl Sandbox for UnconfinedBuildingIn {
+    fn label(&self) -> String {
+        Unconfined.label()
+    }
+
+    fn confines_writes(&self) -> bool {
+        false
+    }
+
+    fn denies_network(&self) -> bool {
+        false
+    }
+
+    fn temp_dir(&self) -> Option<&Path> {
+        None
+    }
+
+    fn target_dir(&self) -> Option<&Path> {
+        Some(&self.0)
+    }
+
+    fn for_fetching(&self, _writable: &[std::path::PathBuf]) -> Option<Box<dyn Sandbox>> {
+        Some(Box::new(self.clone()))
+    }
+
+    fn wrap(&self, program: &str, arguments: &[String]) -> Result<WrappedCommand, SandboxError> {
+        Unconfined.wrap(program, arguments)
+    }
+}
+
 /// Builds the platform's sandbox for one workspace root.
 ///
 /// # Errors
@@ -204,16 +246,44 @@ pub fn detect_protecting(
     workspace: &Path,
     protected: &[std::path::PathBuf],
 ) -> Result<Box<dyn Sandbox>, SandboxError> {
+    detect_building_in(workspace, protected, None)
+}
+
+/// As [`detect_protecting`], with Cargo building in `target_dir`, which
+/// processes may then write, rather than in the workspace.
+///
+/// # Errors
+///
+/// As [`detect`], and [`SandboxError::Profile`] when `target_dir` cannot be
+/// created.
+pub fn detect_building_in(
+    workspace: &Path,
+    protected: &[std::path::PathBuf],
+    target_dir: Option<&Path>,
+) -> Result<Box<dyn Sandbox>, SandboxError> {
+    let target_dir = target_dir.map(existing).transpose()?;
     if cfg!(target_os = "macos") {
-        return Ok(Box::new(Seatbelt::protecting(workspace, protected)?));
+        return Ok(Box::new(Seatbelt::building_in(
+            workspace, protected, target_dir,
+        )?));
     }
     if cfg!(target_os = "linux") {
-        return Ok(Box::new(Landlock::protecting(workspace, protected)?));
+        return Ok(Box::new(Landlock::building_in(
+            workspace, protected, target_dir,
+        )?));
     }
     Err(SandboxError::Unavailable(format!(
         "{} has no Dino sandbox yet; see RFC-0009 section 5",
         std::env::consts::OS
     )))
+}
+
+/// Creates and canonicalises a directory to be granted, since Landlock grants
+/// only what exists and Seatbelt matches the resolved path.
+fn existing(path: &Path) -> Result<std::path::PathBuf, SandboxError> {
+    std::fs::create_dir_all(path)
+        .and_then(|()| std::fs::canonicalize(path))
+        .map_err(|error| SandboxError::Profile(format!("cannot use {}: {error}", path.display())))
 }
 
 #[cfg(test)]

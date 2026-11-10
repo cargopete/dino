@@ -156,6 +156,14 @@ pub(crate) fn choices(asking: &Asking<'_>, always: &str) -> Vec<Choice> {
             choice('n', "refuse", ApprovalReply::Reject(None)),
         ];
     }
+    // Every query goes to the same engine, so search is asked about once.
+    if asking.tool == dino_exec::WEB_SEARCH {
+        return vec![
+            choice('a', "search this session", ApprovalReply::ForSession),
+            choice('r', "remember", ApprovalReply::Remember),
+            choice('n', "refuse", ApprovalReply::Reject(None)),
+        ];
+    }
     let mut choices = vec![choice('y', "once", ApprovalReply::Once)];
     let others = asking.context.also_pending.len();
     if others > 0 {
@@ -224,6 +232,13 @@ fn ask_on_terminal(asking: &Asking<'_>, caveat_shown: &AtomicBool, sandbox: &str
                     "      runs code on your machine · containment: {sandbox} · what it runs may change"
                 )
             }),
+        ),
+        ToolClass::Network if asking.tool == dino_exec::WEB_SEARCH => (
+            "always for this host",
+            Some(format!(
+                "      sends each query this session to {} · a query can carry workspace text with it",
+                asking.subject
+            )),
         ),
         ToolClass::Network => (
             "always for this host",
@@ -645,6 +660,24 @@ mod tests {
         };
         assert_eq!(keys(ToolClass::Mutating), "yaren");
         assert_eq!(keys(ToolClass::Process), "yarsn");
+    }
+
+    #[test]
+    fn search_is_asked_about_for_the_session_not_for_one_query() {
+        let context = AskContext::default();
+        let asking = Asking {
+            summary: "",
+            tool: "web_search",
+            subject: "api.search.brave.com",
+            class: ToolClass::Network,
+            context: &context,
+            change: None,
+        };
+        let keys: String = choices(&asking, always_label(ToolClass::Network))
+            .iter()
+            .map(|choice| choice.key)
+            .collect();
+        assert_eq!(keys, "arn");
     }
 
     #[test]

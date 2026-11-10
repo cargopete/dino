@@ -65,6 +65,8 @@ pub struct Contents<'a> {
     pub window: Option<u32>,
     pub reported: Option<u64>,
     pub marks: Vec<String>,
+    /// The provider's own search tool, as declared in the request, when on.
+    pub native_search: Option<&'a str>,
 }
 
 pub fn estimate(bytes: usize) -> u64 {
@@ -152,6 +154,13 @@ pub fn fixed(prompt: &[PromptPart], tools: &[ToolDefinition]) -> Vec<Group> {
 impl Report {
     pub fn new(contents: &Contents<'_>) -> Self {
         let mut groups = fixed(contents.prompt, contents.tools);
+        if let Some(declared) = contents.native_search {
+            groups[1].rows.push(row(
+                "provider web search",
+                declared.len(),
+                Some("the provider adds its own instructions, not counted".to_owned()),
+            ));
+        }
         let rows = match contents.history {
             Some((provider, payload)) => conversation(provider, payload).rows(),
             None => vec![Row {
@@ -472,6 +481,7 @@ mod tests {
             window: Some(200_000),
             reported: Some(5_000),
             marks: marks(Some(200_000), crate::config::Compaction::Manual),
+            native_search: Some(r#"{"type":"web_search"}"#),
         });
 
         let labels: Vec<&str> = report
@@ -487,6 +497,7 @@ mod tests {
                 "AGENTS.md",
                 "built in, 1 tool",
                 "mcp github, 2 tools",
+                "provider web search",
                 "held by the provider"
             ]
         );

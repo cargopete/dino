@@ -44,7 +44,8 @@ compatibility in the MVP.
 - A plugin marketplace, remote MCP catalogue, desktop application, cloud agent,
   multi-agent orchestration, or background daemon. (RFC-0020 later added
   `dino serve`, a foreground session with a page, and section 2 there says why
-  that is neither.)
+  that is neither. RFC-0017 section 5 later admitted subagents, one bounded
+  child session per call, and still excludes orchestration.)
 - Automatic commits, pushes, pull requests, deployments or purchases.
 - Semantic indexing before the ordinary tool loop and eval harness work.
 

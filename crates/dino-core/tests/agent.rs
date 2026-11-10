@@ -2098,3 +2098,108 @@ fn only_a_promise_to_act_counts_as_one() {
         assert!(!dino_core::announces_action(answer), "{answer}");
     }
 }
+
+/// An `agent` tool that finishes only once `meet` of its calls are running.
+struct Meeting {
+    meet: tokio::sync::Barrier,
+    denied: &'static str,
+}
+
+impl ToolRuntime for Meeting {
+    fn definitions(&self) -> Vec<dino_protocol::ToolDefinition> {
+        vec![dino_protocol::ToolDefinition {
+            name: dino_core::subagent::AGENT.into(),
+            description: "meets the others".into(),
+            input_schema: json!({"type": "object"}),
+        }]
+    }
+
+    fn classify(
+        &self,
+        call: &dino_protocol::ToolCall,
+    ) -> Result<dino_protocol::ToolAction, dino_core::ToolError> {
+        let job = call.arguments["prompt"].as_str().unwrap_or_default();
+        Ok(if job == self.denied {
+            dino_protocol::ToolAction::mutating(job)
+        } else {
+            dino_protocol::ToolAction::read_only()
+        })
+    }
+
+    fn execute(&self, call: &dino_protocol::ToolCall) -> dino_core::ToolFuture<'_> {
+        let job = call.arguments["prompt"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        Box::pin(async move {
+            self.meet.wait().await;
+            Ok(ToolOutput::success(format!("{job} done")))
+        })
+    }
+}
+
+fn job(id: &str, prompt: &str) -> dino_protocol::ToolCall {
+    dino_protocol::ToolCall {
+        id: id.into(),
+        name: dino_core::subagent::AGENT.into(),
+        arguments: json!({"prompt": prompt}),
+    }
+}
+
+#[tokio::test]
+async fn consecutive_agent_calls_run_at_once_and_answer_in_call_order() {
+    let mut agent = Agent::new(
+        ScriptedSession::new(vec![
+            Turn::Events(vec![
+                ModelEvent::ToolCallCompleted {
+                    call: job("a", "first"),
+                },
+                ModelEvent::ToolCallCompleted {
+                    call: job("b", "second"),
+                },
+                ModelEvent::ToolCallCompleted {
+                    call: job("c", "edit"),
+                },
+                ModelEvent::Finished {
+                    reason: StopReason::ToolUse,
+                },
+            ]),
+            text_turn("both back"),
+        ]),
+        Meeting {
+            meet: tokio::sync::Barrier::new(2),
+            denied: "edit",
+        },
+        AgentConfig::default(),
+    );
+
+    // Run one at a time, the first would wait for a second that never starts.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run("split it"))
+        .await
+        .expect("the two calls ran together")
+        .unwrap();
+
+    assert_eq!(result.text, "both back");
+    // The refusal is recorded first, being settled before anything runs, but
+    // the model gets the results in the order it made the calls.
+    match &agent.session().inputs[1] {
+        TurnInput::ToolResults { results, .. } => {
+            let said: Vec<(&str, &str)> = results
+                .iter()
+                .map(|result| (result.call_id.as_str(), result.output.content.as_str()))
+                .collect();
+            assert_eq!(
+                said,
+                vec![
+                    ("a", "first done"),
+                    ("b", "second done"),
+                    (
+                        "c",
+                        "refused by approval policy: this session runs in read-only mode"
+                    ),
+                ]
+            );
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}

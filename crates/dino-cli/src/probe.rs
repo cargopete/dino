@@ -699,6 +699,7 @@ fn note(transcript: &mut Transcript, event: ModelEvent, at: Duration) {
         ModelEvent::Started { .. }
         | ModelEvent::ToolCallStarted { .. }
         | ModelEvent::ToolCallArgumentsDelta { .. }
+        | ModelEvent::Searched { .. }
         | ModelEvent::Finished { .. } => {}
     }
 }

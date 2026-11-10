@@ -236,6 +236,8 @@ enum Input {
     SaveModel(Option<String>),
     Resume(Option<String>),
     Rename(Option<String>),
+    Rewind(Option<String>),
+    Fork(Option<String>),
     Plan(Option<String>),
     Compact,
     Auto,
@@ -249,6 +251,7 @@ enum Input {
     /// A shell line the person runs themselves, after a `!`.
     Shell(String),
     Custom(crate::commands::Invocation),
+    Worktree(Option<String>),
     Exit,
     Unknown(String),
     Blank,
@@ -312,11 +315,14 @@ fn parse(line: &str) -> Input {
         }
         "resume" => Input::Resume(remainder()),
         "rename" => Input::Rename(remainder()),
+        "rewind" => Input::Rewind(remainder()),
+        "fork" => Input::Fork(remainder()),
         "plan" => Input::Plan(remainder()),
         "log" => Input::Log,
         "schedules" => Input::Schedules,
         "context" => Input::Context,
         "expand" => Input::Expand(remainder().map_or(Some(1), |n| n.parse().ok())),
+        "worktree" => Input::Worktree(remainder()),
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
         other if rest.trim() == other => Input::Unknown(other.to_owned()),
@@ -520,11 +526,14 @@ pub struct Session<S> {
     pub log_path: String,
     /// Pinged when a task ends, if it ran long enough.
     pub end_hooks: Vec<crate::task::EndHook>,
+    pub prompt_hooks: dino_exec::PromptHooks,
     pub history_path: std::path::PathBuf,
     /// Where this conversation is persisted after each submission.
     pub state_path: std::path::PathBuf,
     /// What `/rename` called this conversation, saved with it.
     pub name: Option<String>,
+    /// A checkpoint `/rewind` previewed, and the next line says how to go back.
+    pub rewinding: Option<u32>,
     /// Open with the dinosaur rather than the plain heading.
     pub greeting: bool,
     /// Set when pages are watching and driving this session, as `dino serve`.
@@ -537,6 +546,14 @@ pub struct Session<S> {
     pub prompt: dino_core::prompt::PromptContext,
     /// Shell lines the person ran since their last message, which it carries.
     pub ran: Vec<crate::shell::Ran>,
+    /// How the session searches, so `/context` can count the provider's tool.
+    pub web_search: crate::search::WebSearch,
+    /// Shared with `ask`: cleared while `/auto` sees every submission through.
+    pub attended: Arc<std::sync::atomic::AtomicBool>,
+    /// Which linked worktree this is, for the banner.
+    pub worktree: Option<String>,
+    /// Made by `/worktree`, for the next session to start in.
+    pub moving_to: Option<crate::worktree::Worktree>,
 }
 
 impl<S> Session<S>
@@ -608,6 +625,7 @@ where
                 println!("{prompt}{queued}");
                 queued
             } else {
+                crate::statusline::at_prompt(&self.status).await;
                 // Blocking on purpose. Nothing else is running while a person is
                 // typing, and moving the editor across a spawn_blocking boundary
                 // every keystroke would buy nothing.
@@ -637,7 +655,9 @@ where
                 Some(invocation) => Input::Custom(invocation),
                 None => parse(&line),
             };
-            let input = if self.awaiting_plan {
+            let input = if let Some(number) = self.rewinding.take() {
+                self.decide_rewind(number, input)
+            } else if self.awaiting_plan {
                 self.decide_plan(input).await
             } else {
                 input
@@ -949,7 +969,13 @@ where
             .ok()
             .map(|status| status.context)
             .filter(|tokens| *tokens > 0 && !empty);
-        let window = self.agent.session().profile().context_window_tokens;
+        let profile = self.agent.session().profile();
+        let window = profile.context_window_tokens;
+        let native_search = self
+            .web_search
+            .switch(profile.provider)
+            .is_some_and(|search| search.on())
+            .then(|| crate::search::declared(profile.provider));
         crate::context::Report::new(&crate::context::Contents {
             prompt: &parts,
             tools: &tools,
@@ -957,6 +983,7 @@ where
             window,
             reported,
             marks: crate::context::marks(window, self.compaction),
+            native_search: native_search.as_deref(),
         })
     }
 
@@ -994,6 +1021,9 @@ where
                 self.resume(&wanted);
             }
             Input::Rename(name) => self.rename(name),
+            Input::Rewind(None) => print!("{}", self.checkpoints()),
+            Input::Rewind(Some(number)) => self.preview_rewind(&number),
+            Input::Fork(name) => self.fork(name),
             Input::Diff => print!("{}", diff(&self.workspace_root)),
             Input::Plan(None) => println!(
                 "{}",
@@ -1010,6 +1040,8 @@ where
             }
             Input::Auto => {
                 self.keep_going = !self.keep_going;
+                self.attended
+                    .store(!self.keep_going, std::sync::atomic::Ordering::Relaxed);
                 println!("{}", style::paint(FAINT, &self.keep_going_banner()));
             }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
@@ -1028,6 +1060,20 @@ where
             ),
             Input::Shell(command) => self.run_shell(&command).await,
             Input::Custom(invocation) => self.invoke(invocation).await,
+            Input::Worktree(name) => {
+                match crate::worktree::Worktree::create(
+                    &self.workspace_root,
+                    name.as_deref().unwrap_or_default(),
+                ) {
+                    Ok(worktree) => {
+                        self.moving_to = Some(worktree);
+                        return Ok(true);
+                    }
+                    Err(error) => {
+                        println!("{}", style::paint(style::WARN, &format!("  {error:#}")));
+                    }
+                }
+            }
             Input::Unknown(name) => println!(
                 "{}",
                 style::paint(FAINT, &format!("no such command: /{name}. Try /help."))
@@ -1145,6 +1191,18 @@ where
 
     /// Runs one submission, cancellable on its own for its own lifetime.
     async fn submit(&mut self, text: String) {
+        let added = match crate::hooks::submitted(&self.prompt_hooks, &text).await {
+            Ok(added) => added,
+            Err(reason) => {
+                let reason = format!("not sent: {reason}");
+                println!("{}", style::paint(style::WARN, &format!("  {reason}")));
+                if let Some(hub) = &self.remote {
+                    hub.notice(&reason);
+                }
+                return;
+            }
+        };
+        let typed = text.clone();
         // Before attachments, which are file contents and name no limits.
         let (limits, named) = self.meter.begin_task(&text);
         if named {
@@ -1163,7 +1221,7 @@ where
         } else {
             text
         };
-        let text = self.with_attachments(text).await;
+        let text = dino_exec::with_context(self.with_attachments(text).await, &added);
         let text = if self.ran.is_empty() {
             text
         } else {
@@ -1175,7 +1233,17 @@ where
             Some(summary) => format!("{text}{}{summary}", crate::recall::SUMMARY_DIVIDER),
             None => text,
         };
+        let checkpoint = self.checkpoint(&typed);
         let run = self.run_submission(text).await;
+        if let Some(number) = checkpoint
+            && let Err(error) =
+                dino_core::checkpoint::end(&self.workspace_root, &self.current_id(), number)
+        {
+            println!(
+                "{}",
+                style::paint(style::WARN, &format!("  checkpoint {number}: {error}"))
+            );
+        }
         if let Some(run) = &run {
             self.recall.absorb(&run.events);
         }
@@ -1574,6 +1642,25 @@ where
         println!("{}", style::paint(FAINT, &said));
     }
 
+    /// Reads the line after a preview as how to go back. A command runs as
+    /// usual; anything else leaves everything as it is.
+    fn decide_rewind(&mut self, number: u32, input: Input) -> Input {
+        let Input::Submit(text) = &input else {
+            return input;
+        };
+        let (files, conversation) = match text.trim().to_ascii_lowercase().as_str() {
+            "c" | "conversation" => (false, true),
+            "f" | "files" => (true, false),
+            "b" | "both" => (true, true),
+            _ => {
+                println!("{}", style::paint(FAINT, "  nothing was rewound"));
+                return Input::Blank;
+            }
+        };
+        self.rewind(number, files, conversation);
+        Input::Blank
+    }
+
     /// Offers back the conversation the workspace's last session left in an
     /// error, such as a network outage mid-task.
     fn offer_resume(&self) -> Option<String> {
@@ -1594,7 +1681,7 @@ where
         ))
     }
 
-    fn current_id(&self) -> String {
+    pub(crate) fn current_id(&self) -> String {
         self.state_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1662,7 +1749,9 @@ where
         let current = self.current_id();
         let now = std::time::SystemTime::now();
         let mut block = String::new();
-        for item in saved.iter().take(10) {
+        let saved = &saved[..saved.len().min(10)];
+        for (index, depth) in dino_core::resume::family(&self.workspace_root, saved) {
+            let item = &saved[index];
             let age = now
                 .duration_since(item.modified)
                 .map_or_else(|_| "now".to_owned(), |age| describe_age(age.as_secs()));
@@ -1674,7 +1763,10 @@ where
             let _ = writeln!(
                 &mut block,
                 "  {marker} {}  {}{}",
-                style::paint(PURPLE, &format!("{:<22}", item.id)),
+                style::paint(
+                    PURPLE,
+                    &format!("{:<22}", format!("{}{}", "  ".repeat(depth), item.id))
+                ),
                 style::paint(MUTED, &format!("{age:>8} ago  {model}")),
                 if name.is_empty() {
                     String::new()
@@ -1722,8 +1814,11 @@ where
         } else {
             String::new()
         };
+        let worktree = self.worktree.as_ref().map_or_else(String::new, |worktree| {
+            format!("  {}\n", style::paint(crate::style::MUTED, worktree))
+        });
         format!(
-            "{hello}  {}\n  {}\n{keep_going}",
+            "{hello}{worktree}  {}\n  {}\n{keep_going}",
             style::paint(
                 crate::style::MUTED,
                 &format!(
@@ -1751,6 +1846,10 @@ where
         status_block(&[
             ("model", self.model.clone()),
             ("workspace", self.workspace.clone()),
+            (
+                "worktree",
+                self.worktree.clone().unwrap_or_else(|| "none".to_owned()),
+            ),
             ("approvals", self.approvals.clone()),
             ("sandbox", self.sandbox.clone()),
             ("log", self.log_path.clone()),
@@ -1760,7 +1859,7 @@ where
     }
 }
 
-fn describe_age(seconds: u64) -> String {
+pub(crate) fn describe_age(seconds: u64) -> String {
     match seconds {
         0..60 => format!("{seconds}s"),
         60..3_600 => format!("{}m", seconds / 60),
@@ -1805,7 +1904,7 @@ fn diff(workspace: &std::path::Path) -> String {
 }
 
 /// The built-in commands and what each does, for `/help` and Tab.
-const COMMANDS: [(&str, &str); 18] = [
+const COMMANDS: [(&str, &str); 21] = [
     ("help", "these commands"),
     ("status", "model, workspace, containment, approvals, log"),
     (
@@ -1824,6 +1923,14 @@ const COMMANDS: [(&str, &str); 18] = [
     (
         "rename",
         "/rename <name> names this conversation; alone, clears it",
+    ),
+    (
+        "rewind",
+        "list checkpoints; /rewind <n> goes back to before that message",
+    ),
+    (
+        "fork",
+        "/fork [name] carries on in a copy; the original stays resumable",
     ),
     (
         "plan",
@@ -1852,6 +1959,10 @@ const COMMANDS: [(&str, &str); 18] = [
     (
         "schedules",
         "reminders and recurring messages in this workspace",
+    ),
+    (
+        "worktree",
+        "/worktree [name]: a new session in a git worktree of its own",
     ),
     ("exit", "leave; Ctrl-D does the same"),
     ("quit", "leave"),
@@ -2019,6 +2130,15 @@ mod tests {
             Input::Rename(Some("rfc wave".into()))
         );
         assert_eq!(parse("/rename"), Input::Rename(None));
+        assert_eq!(parse("/rewind"), Input::Rewind(None));
+        assert_eq!(parse("/rewind 3"), Input::Rewind(Some("3".into())));
+        assert_eq!(parse("/fork"), Input::Fork(None));
+        assert_eq!(parse("/fork try b"), Input::Fork(Some("try b".into())));
+        assert_eq!(parse("/worktree"), Input::Worktree(None));
+        assert_eq!(
+            parse("/worktree fix-parser"),
+            Input::Worktree(Some("fix-parser".into()))
+        );
     }
 
     #[test]
@@ -2131,6 +2251,9 @@ mod tests {
             assert!(is_builtin(name), "{name}");
         }
         assert!(!is_builtin("review-pr"));
+        for taken in ["rewind", "fork", "worktree"] {
+            assert!(is_builtin(taken), "a custom /{taken} must lose");
+        }
         let custom = [("review-pr".to_owned(), "Review a pull request".to_owned())];
 
         let names = |line: &str| -> Vec<String> {
@@ -2141,7 +2264,10 @@ mod tests {
                 .collect()
         };
 
-        assert_eq!(names("/re"), ["/rename ", "/resume ", "/review-pr "]);
+        assert_eq!(
+            names("/re"),
+            ["/rename ", "/resume ", "/review-pr ", "/rewind "]
+        );
         assert_eq!(names("/con"), ["/context "]);
         assert!(complete_command("/model cl", 9, &custom).is_none());
         assert!(complete_command("look at /re", 11, &custom).is_none());

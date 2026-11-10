@@ -47,6 +47,8 @@ use super::AnswerError;
 use super::Frame;
 use super::Hub;
 use super::MoveError;
+use super::PageAnswer;
+use super::ReplyError;
 use super::SubmitError;
 use super::Submitted;
 use super::Subscription;
@@ -276,6 +278,7 @@ async fn route(request: Request<Incoming>, shared: &Shared, peer: SocketAddr) ->
             &serde_json::json!({ "cancelled": hub.cancel() }),
         ),
         (Method::POST, "/api/approve") => approve(request, hub).await,
+        (Method::POST, "/api/answer") => answer(request, hub).await,
         (Method::GET, "/api/sessions") => sessions(hub),
         (Method::GET, "/api/context") => match hub.context() {
             Some(report) => json(StatusCode::OK, &report),
@@ -290,8 +293,9 @@ async fn route(request: Request<Incoming>, shared: &Shared, peer: SocketAddr) ->
         (Method::POST, "/api/workspace") => workspace(request, hub).await,
         (
             _,
-            "/api/events" | "/api/prompt" | "/api/cancel" | "/api/approve" | "/api/sessions"
-            | "/api/context" | "/api/workspaces" | "/api/trace" | "/api/resume" | "/api/workspace",
+            "/api/events" | "/api/prompt" | "/api/cancel" | "/api/approve" | "/api/answer"
+            | "/api/sessions" | "/api/context" | "/api/workspaces" | "/api/trace" | "/api/resume"
+            | "/api/workspace",
         ) => status(StatusCode::METHOD_NOT_ALLOWED),
         _ => status(StatusCode::NOT_FOUND),
     }
@@ -390,6 +394,25 @@ async fn approve(request: Request<Incoming>, hub: &Hub) -> Response<Body> {
         Ok(()) => json(StatusCode::OK, &serde_json::json!({ "ok": true })),
         Err(AnswerError::NoSuchApproval) => status(StatusCode::NOT_FOUND),
         Err(AnswerError::NotOffered) => status(StatusCode::BAD_REQUEST),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerBody {
+    id: u64,
+    answers: Vec<PageAnswer>,
+}
+
+async fn answer(request: Request<Incoming>, hub: &Hub) -> Response<Body> {
+    let body: AnswerBody = match read_json(request).await {
+        Ok(body) => body,
+        Err(code) => return status(code),
+    };
+    match hub.reply(body.id, &body.answers) {
+        Ok(()) => json(StatusCode::OK, &serde_json::json!({ "ok": true })),
+        Err(ReplyError::NoSuchQuestion) => status(StatusCode::NOT_FOUND),
+        Err(ReplyError::Malformed) => status(StatusCode::BAD_REQUEST),
     }
 }
 

@@ -132,6 +132,9 @@ pub fn inspect(dir: &Path) -> Result<Bundle> {
         if let Err(problem) = check_command(dir, &hook.command) {
             problems.push(format!("hooks[{index}]: {problem}"));
         }
+        if let Some(problem) = hook.problem() {
+            problems.push(format!("hooks[{index}]: {problem}"));
+        }
     }
     for (name, server) in &manifest.mcp {
         if let Err(problem) = check_name(name) {
@@ -407,6 +410,10 @@ fn event_name(event: HookEvent) -> &'static str {
         HookEvent::BeforeEndTurn => "before_end_turn",
         HookEvent::SessionStart => "session_start",
         HookEvent::TaskEnd => "task_end",
+        HookEvent::BeforeCall => "before_call",
+        HookEvent::AfterCall => "after_call",
+        HookEvent::PromptSubmit => "prompt_submit",
+        HookEvent::AwaitingApproval => "awaiting_approval",
     }
 }
 
@@ -622,6 +629,8 @@ impl Active {
             .map(|hook| dino_exec::Hook {
                 command: self.expand(&hook.command),
                 extension: hook.extension.clone(),
+                tool: hook.tool.clone(),
+                program: hook.program.clone(),
             })
             .collect()
     }
