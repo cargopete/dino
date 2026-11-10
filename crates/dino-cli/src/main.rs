@@ -517,13 +517,16 @@ fn child_tools(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Result<Too
     tool_set(
         &settings.workspace,
         Arc::clone(sandbox),
-        &interactive_options(
-            &settings.workspace,
-            settings.protected.clone(),
-            settings.max_diagnostics,
-            settings.hooks.clone(),
-            settings.verify.clone(),
-        ),
+        &dino_eval::ToolOptions {
+            after_call: settings.call_hooks.after_call.clone(),
+            ..interactive_options(
+                &settings.workspace,
+                settings.protected.clone(),
+                settings.max_diagnostics,
+                settings.hooks.clone(),
+                settings.verify.clone(),
+            )
+        },
         Vec::new(),
     )
 }
@@ -811,6 +814,30 @@ fn shown(
     })
 }
 
+/// Restoring before the first turn, so the conversation continues rather than
+/// starting. A mismatch refuses here rather than confusing the provider later.
+fn restore(
+    common: &CommonArgs,
+    settings: &RunSettings,
+    session_id: &SessionId,
+    model: &mut dyn ModelSession,
+) -> Result<PathBuf> {
+    Ok(
+        match resume_from(common.resume.as_deref(), &settings.workspace)? {
+            Some((id, path)) => {
+                let state = resume::load(&path)?;
+                model.restore_state(&state)?;
+                eprintln!(
+                    "{}",
+                    style::paint(style::FAINT, &format!("resumed session {id}"))
+                );
+                path
+            }
+            None => resume::state_path(&settings.workspace, session_id.as_str()),
+        },
+    )
+}
+
 fn prepare(
     common: &CommonArgs,
     unattended: bool,
@@ -866,20 +893,7 @@ fn prepare(
     };
     let log = JsonlSessionLog::create(&settings.log_path, meta.clone())?;
 
-    // Restoring before the first turn, so the conversation continues rather than
-    // starting. A mismatch refuses here rather than confusing the provider later.
-    let state_path = match resume_from(common.resume.as_deref(), &settings.workspace)? {
-        Some((id, path)) => {
-            let state = resume::load(&path)?;
-            model.restore_state(&state)?;
-            eprintln!(
-                "{}",
-                style::paint(style::FAINT, &format!("resumed session {id}"))
-            );
-            path
-        }
-        None => resume::state_path(&settings.workspace, session_id.as_str()),
-    };
+    let state_path = restore(common, &settings, &session_id, model.as_mut())?;
 
     let renderer = Renderer::new(settings.show_reasoning);
     let usage = renderer.usage_handle();
@@ -953,10 +967,12 @@ fn subagent_kit(
         tools: Box::new(move |settings| child_tools(settings, &sandbox)),
         policy: child_policy(
             &prepared.sandbox_label,
+            &prepared.sandbox,
             &prepared.settings.workspace,
             remote,
             hold,
             Arc::clone(&prepared.planning),
+            prepared.settings.call_hooks.clone(),
         ),
     }
 }
@@ -2198,26 +2214,20 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
         ("fallback", in_order(&resolved.fallback)),
         (
             "review model",
-            resolved
-                .review_model
-                .clone()
-                .map_or_else(|| "off".to_owned(), |key| format!("{key}  (user file)")),
+            user_row(resolved.review_model.as_ref(), "off"),
         ),
         (
             "explore model",
-            resolved.explore_model.clone().map_or_else(
-                || "the session's".to_owned(),
-                |key| format!("{key}  (user file)"),
-            ),
+            user_row(resolved.explore_model.as_ref(), "the session's"),
         ),
         ("budget", budget_row(resolved.budget)),
         ("verify", verify_row(resolved.verify.as_ref())),
         ("plugins", plugins_row()),
         (
             "branch prefix",
-            resolved.layers.user.branch_prefix.clone().map_or_else(
-                || "dino/  (default)".to_owned(),
-                |prefix| format!("{prefix}  (user file)"),
+            user_row(
+                resolved.layers.user.branch_prefix.as_ref(),
+                "dino/  (default)",
             ),
         ),
         (
@@ -2233,6 +2243,11 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
         ),
         ("user file", file_named(resolved.layers.user_path.as_ref())),
     ]
+}
+
+/// A setting only the user file may hold, or what applies without it.
+fn user_row(value: Option<&String>, unset: &str) -> String {
+    value.map_or_else(|| unset.to_owned(), |value| format!("{value}  (user file)"))
 }
 
 fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
@@ -2405,16 +2420,20 @@ fn policy(
     }
 }
 
-/// A subagent's approvals: the parent's mode and plan gate, none of the
-/// parent's session grants, and a person asked about one child at a time.
+/// A subagent's approvals: the parent's mode, plan gate and `before_call`
+/// hooks, none of the parent's session grants, and a person asked about one
+/// child at a time.
 fn child_policy(
     sandbox: &str,
+    confined: &Arc<dyn Sandbox>,
     workspace: &Path,
     remote: Option<&Arc<remote::Hub>>,
     hold: spinner::Hold,
     planning: Arc<std::sync::atomic::AtomicBool>,
+    calls: config::CallHooks,
 ) -> subagent::OpenPolicy {
     let (sandbox, workspace) = (sandbox.to_owned(), workspace.to_path_buf());
+    let confined = Arc::clone(confined);
     let remote = remote.map(Arc::clone);
     let turn = Arc::new(tokio::sync::Mutex::new(()));
     Box::new(move |mode| {
@@ -2423,27 +2442,43 @@ fn child_policy(
         let inner = match (mode, &remote) {
             (ApprovalMode::Interactive | ApprovalMode::AcceptEdits, Some(hub)) => {
                 interactive_policy(
-                    subagent::Asking::new(remote::RemoteApprover::new(Arc::clone(hub)), hold, turn),
+                    hooks::Pinging::new(
+                        subagent::Asking::new(
+                            remote::RemoteApprover::new(Arc::clone(hub)),
+                            hold,
+                            turn,
+                        ),
+                        calls.awaiting_approval.clone(),
+                        workspace.clone(),
+                        calls.ping_after,
+                    ),
                     &workspace,
                     accept_edits,
                 )
             }
             (ApprovalMode::Interactive | ApprovalMode::AcceptEdits, None) => interactive_policy(
-                subagent::Asking::new(
-                    TerminalApprover::new(sandbox.as_str(), workspace.as_path()),
-                    hold,
-                    turn,
+                hooks::Pinging::new(
+                    subagent::Asking::new(
+                        TerminalApprover::new(sandbox.as_str(), workspace.as_path()),
+                        hold,
+                        turn,
+                    ),
+                    calls.awaiting_approval.clone(),
+                    workspace.clone(),
+                    calls.ping_after,
                 ),
                 &workspace,
                 accept_edits,
             ),
             (ApprovalMode::ReadOnly | ApprovalMode::AllowAll, _) => {
-                policy(mode, &sandbox, &workspace, None)
+                policy(mode, &sandbox, &workspace, None, &calls)
             }
         };
-        Box::new(dino_core::approval::PlanGate::new(
-            inner,
-            Arc::clone(&planning),
+        Box::new(dino_exec::BeforeCall::new(
+            dino_core::approval::PlanGate::new(inner, Arc::clone(&planning)),
+            calls.before_call.clone(),
+            &workspace,
+            Arc::clone(&confined),
         ))
     })
 }

@@ -628,6 +628,8 @@ mod tests {
             plain: true,
             greeting: false,
             fallback: Vec::new(),
+            call_hooks: crate::config::CallHooks::default(),
+            status_line: None,
             budget: None,
             review: None,
             explore: Some(dino_model::builtin_profile("claude-haiku-5.5").unwrap()),
