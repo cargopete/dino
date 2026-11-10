@@ -14,7 +14,8 @@ use serde_json::Value;
 pub fn icon(tool: &str) -> char {
     match tool {
         "read" | "list" => '→',
-        "search" | "code" => '✱',
+        "search" | "web_search" | "code" => '✱',
+        "ask" => '?',
         "apply_patch" | "write_file" => '←',
         "exec" | "shell" | "gate" | "cargo" | "background" | "packages" | "github" => '$',
         "web_fetch" => '%',

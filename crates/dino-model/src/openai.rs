@@ -9,6 +9,7 @@ use dino_protocol::ModelEvent;
 use dino_protocol::ModelProfile;
 use dino_protocol::ProviderKind;
 use dino_protocol::ReasoningEffort;
+use dino_protocol::SearchHit;
 use dino_protocol::StopReason;
 use dino_protocol::TokenUsage;
 use dino_protocol::ToolCall;
@@ -25,6 +26,7 @@ use crate::ModelError;
 use crate::ModelEventStream;
 use crate::ModelFuture;
 use crate::ModelSession;
+use crate::NativeSearch;
 use crate::RetryPolicy;
 use crate::SessionState;
 use crate::sse::SseDecoder;
@@ -44,6 +46,8 @@ pub struct OpenAiConfig {
     pub max_output_tokens: Option<u32>,
     pub reasoning_effort: ReasoningEffort,
     pub retry: RetryPolicy,
+    /// Offer `OpenAI`'s own web search while this is on.
+    pub web_search: Option<NativeSearch>,
 }
 
 impl OpenAiConfig {
@@ -60,6 +64,7 @@ impl OpenAiConfig {
             max_output_tokens: None,
             reasoning_effort: ReasoningEffort::High,
             retry: RetryPolicy::default(),
+            web_search: None,
         }
     }
 }
@@ -181,7 +186,7 @@ impl OpenAiSession {
             .lock()
             .map_err(|_| ModelError::Protocol("OpenAI response ID lock was poisoned".into()))?
             .clone();
-        let tools = self
+        let mut tools = self
             .config
             .tools
             .iter()
@@ -196,6 +201,14 @@ impl OpenAiSession {
                 })
             })
             .collect::<Vec<_>>();
+        let searching = self
+            .config
+            .web_search
+            .as_ref()
+            .is_some_and(NativeSearch::on);
+        if searching {
+            tools.push(json!({"type": "web_search"}));
+        }
 
         let mut body = serde_json::Map::new();
         body.insert("model".into(), json!(self.config.profile.provider_model));
@@ -217,6 +230,10 @@ impl OpenAiSession {
         if !tools.is_empty() {
             body.insert("tools".into(), Value::Array(tools));
             body.insert("tool_choice".into(), json!("auto"));
+        }
+        if searching {
+            // Every page a search consulted, not only those the answer cites.
+            body.insert("include".into(), json!(["web_search_call.action.sources"]));
         }
         if let Some(max_output_tokens) = self.config.max_output_tokens {
             body.insert("max_output_tokens".into(), json!(max_output_tokens));
@@ -414,6 +431,7 @@ impl ResponsesStreamParser {
                 }])
             }
             "response.output_item.added" => self.add_output_item(event.item),
+            "response.output_item.done" => Ok(event.item.and_then(searched).into_iter().collect()),
             "response.function_call_arguments.delta" => {
                 self.add_argument_delta(event.item_id, event.delta)
             }
@@ -568,6 +586,55 @@ impl ResponsesStreamParser {
     }
 }
 
+/// A finished search the provider ran. Opening or reading a page it found is
+/// part of the same call and not reported again.
+fn searched(item: ResponseItem) -> Option<ModelEvent> {
+    if item.kind != "web_search_call" {
+        return None;
+    }
+    let action = item.action.unwrap_or_default();
+    if action.get("type").and_then(Value::as_str) != Some("search") {
+        return None;
+    }
+    let query = action
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            let queries: Vec<&str> = action
+                .get("queries")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            Some(queries.join(" · "))
+        })
+        .unwrap_or_default();
+    let text = |source: &Value, key: &str| {
+        source
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let results = action
+        .get("sources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|source| SearchHit {
+            title: text(source, "title"),
+            url: text(source, "url"),
+        })
+        .collect();
+    let error = item.status.filter(|status| status != "completed");
+    Some(ModelEvent::Searched {
+        query,
+        results,
+        error,
+    })
+}
+
 fn provider_failure(event: ResponsesEvent) -> ModelError {
     let message = event
         .response
@@ -610,6 +677,8 @@ struct ResponseItem {
     call_id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,
+    status: Option<String>,
+    action: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -812,6 +881,64 @@ mod tests {
                 reason: StopReason::ToolUse
             })
         );
+    }
+
+    #[test]
+    fn a_search_the_provider_ran_is_reported_with_its_sources() {
+        let mut parser = ResponsesStreamParser::default();
+        let chunks = [
+            r#"{"type":"response.created","response":{"id":"resp-1"}}"#,
+            r#"{"type":"response.output_item.added","item":{"type":"web_search_call","id":"ws-1","status":"in_progress"}}"#,
+            r#"{"type":"response.web_search_call.searching","item_id":"ws-1"}"#,
+            r#"{"type":"response.output_item.done","item":{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"tokio 2 changelog","sources":[{"type":"url","url":"https://tokio.rs/blog/2"}]}}}"#,
+            r#"{"type":"response.output_item.done","item":{"type":"web_search_call","id":"ws-2","status":"completed","action":{"type":"open_page","url":"https://tokio.rs/blog/2"}}}"#,
+            r#"{"type":"response.output_text.delta","delta":"Tokio 2.0 is out."}"#,
+            r#"{"type":"response.completed","response":{"id":"resp-1","usage":{"input_tokens":50,"output_tokens":12}}}"#,
+        ];
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(parser.consume(chunk).unwrap());
+        }
+        let searched: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, ModelEvent::Searched { .. }))
+            .collect();
+        assert_eq!(
+            searched,
+            [&ModelEvent::Searched {
+                query: "tokio 2 changelog".into(),
+                results: vec![SearchHit {
+                    title: String::new(),
+                    url: "https://tokio.rs/blog/2".into(),
+                }],
+                error: None,
+            }]
+        );
+        assert_eq!(
+            events.last(),
+            Some(&ModelEvent::Finished {
+                reason: StopReason::EndTurn
+            })
+        );
+    }
+
+    #[test]
+    fn the_search_tool_and_its_sources_are_asked_for_only_while_switched_on() {
+        let profile = crate::builtin_profile("terra").unwrap();
+        let mut config = OpenAiConfig::new("test-key", profile);
+        let switch = NativeSearch::default();
+        config.web_search = Some(switch.clone());
+        let session = OpenAiSession::new(config).unwrap();
+        let input = || TurnInput::User {
+            content: "what changed?".into(),
+        };
+
+        let off = session.request_body(input()).unwrap();
+        assert!(off.get("tools").is_none() && off.get("include").is_none());
+        switch.set(true);
+        let on = session.request_body(input()).unwrap();
+        assert_eq!(on["tools"], json!([{"type": "web_search"}]));
+        assert_eq!(on["include"], json!(["web_search_call.action.sources"]));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! proposed action, the decision, the execution and the result.
 
 pub mod approval;
+pub mod ask;
 pub mod blocker;
 pub mod checkpoint;
 pub mod git;
@@ -1470,7 +1471,8 @@ where
                 | ModelEvent::ReasoningDelta { .. }
                 | ModelEvent::ToolCallStarted { .. }
                 | ModelEvent::ToolCallArgumentsDelta { .. }
-                | ModelEvent::Usage { .. } => {}
+                | ModelEvent::Usage { .. }
+                | ModelEvent::Searched { .. } => {}
             }
 
             self.emit(AgentEvent::Model { model_turn, event }, events)?;

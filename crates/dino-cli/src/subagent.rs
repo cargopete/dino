@@ -333,6 +333,7 @@ async fn start(
         },
         review: None,
         explore: None,
+        web_search: parent.web_search.for_child(),
         ..parent.clone()
     };
     let tools = (kit.tools)(&settings)
@@ -634,6 +635,7 @@ mod tests {
             review: None,
             explore: Some(dino_model::builtin_profile("claude-haiku-5.5").unwrap()),
             preset: Preset::Standard,
+            web_search: crate::search::WebSearch::Off,
         }
     }
 

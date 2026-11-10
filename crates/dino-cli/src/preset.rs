@@ -100,6 +100,8 @@ mod tests {
         assert!(Preset::Standard.offers("schedule_create"));
         assert!(Preset::Minimal.offers("apply_patch"));
         assert!(!Preset::Minimal.offers("web_fetch"));
+        assert!(!Preset::Minimal.offers("web_search"));
+        assert!(!Preset::Minimal.offers("ask"));
         assert!(Preset::Review.offers("read"));
         assert!(!Preset::Review.offers("write_file"));
         assert!(!Preset::Review.offers("shell"));

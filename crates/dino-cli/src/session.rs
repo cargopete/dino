@@ -476,6 +476,8 @@ pub struct Session<S> {
     pub remote: Option<Arc<crate::remote::Hub>>,
     /// Set when the session offers the schedule tools.
     pub schedules: Option<Due>,
+    /// Shared with `ask`: cleared while `/auto` sees every submission through.
+    pub attended: Arc<std::sync::atomic::AtomicBool>,
     /// Which linked worktree this is, for the banner.
     pub worktree: Option<String>,
     /// Made by `/worktree`, for the next session to start in.
@@ -845,6 +847,8 @@ where
             }
             Input::Auto => {
                 self.keep_going = !self.keep_going;
+                self.attended
+                    .store(!self.keep_going, std::sync::atomic::Ordering::Relaxed);
                 println!("{}", style::paint(FAINT, &self.keep_going_banner()));
             }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),

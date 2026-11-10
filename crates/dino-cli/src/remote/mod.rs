@@ -31,6 +31,11 @@ use dino_core::approval::ApprovalReply;
 use dino_core::approval::Approver;
 use dino_core::approval::AskContext;
 use dino_core::approval::ReplyFuture;
+use dino_core::ask::Answer;
+use dino_core::ask::AnswerFuture;
+use dino_core::ask::Answered;
+use dino_core::ask::Asker;
+use dino_core::ask::Question;
 use dino_core::session::EventSink;
 use dino_core::session::SinkError;
 use dino_protocol::AgentEvent;
@@ -108,6 +113,9 @@ enum Payload<'a> {
     Approval {
         approval: &'a Approval,
     },
+    Question {
+        question: &'a Questions,
+    },
     Resolved {
         id: u64,
         outcome: &'a str,
@@ -150,10 +158,38 @@ struct WireChoice {
     label: String,
 }
 
+/// The model's questions waiting for a person, as the page sees them.
+#[derive(Debug, Serialize)]
+pub struct Questions {
+    id: u64,
+    questions: Vec<Question>,
+}
+
+/// One question's answer from a page: the options picked, by index, or words
+/// of the person's own. Neither is a question left unanswered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageAnswer {
+    #[serde(default)]
+    pub chosen: Vec<usize>,
+    #[serde(default)]
+    pub other: Option<String>,
+}
+
 struct Pending {
     frame: Frame,
-    offered: Vec<(&'static str, ApprovalReply)>,
-    reply: oneshot::Sender<ApprovalReply>,
+    waiting: Waiting,
+}
+
+enum Waiting {
+    Approval {
+        offered: Vec<(&'static str, ApprovalReply)>,
+        reply: oneshot::Sender<ApprovalReply>,
+    },
+    Question {
+        questions: Vec<Question>,
+        reply: oneshot::Sender<Vec<Answer>>,
+    },
 }
 
 #[derive(Default)]
@@ -202,6 +238,16 @@ pub enum AnswerError {
     NoSuchApproval,
     /// Not among the answers that approval offered.
     NotOffered,
+}
+
+/// Why a page's answers to the model's questions were not taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyError {
+    /// Answered already, withdrawn, or never asked.
+    NoSuchQuestion,
+    /// Not one answer per question, an option that does not exist, several
+    /// for a question that takes one, or words too long.
+    Malformed,
 }
 
 /// The meeting point of a session and the pages watching it.
@@ -471,24 +517,91 @@ impl Hub {
     /// `choice`. Nothing is decided then.
     pub fn answer(&self, id: u64, choice: &str) -> Result<(), AnswerError> {
         let mut state = self.lock();
-        let pending = state.pending.get(&id).ok_or(AnswerError::NoSuchApproval)?;
-        let reply = pending
-            .offered
+        let Some(Pending {
+            waiting: Waiting::Approval { offered, .. },
+            ..
+        }) = state.pending.get(&id)
+        else {
+            return Err(AnswerError::NoSuchApproval);
+        };
+        let reply = offered
             .iter()
             .find(|(key, _)| *key == choice)
             .map(|(_, reply)| reply.clone())
             .ok_or(AnswerError::NotOffered)?;
-        if let Some(pending) = state.pending.remove(&id) {
+        if let Some(Pending {
+            waiting: Waiting::Approval { reply: sender, .. },
+            ..
+        }) = state.pending.remove(&id)
+        {
             let outcome = if matches!(reply, ApprovalReply::Reject(_)) {
                 "refused"
             } else {
                 "allowed"
             };
             // The asker is gone when its run was cancelled; nothing to tell.
-            let _ = pending.reply.send(reply);
+            let _ = sender.send(reply);
             self.publish(&mut state, Payload::Resolved { id, outcome });
         }
         Ok(())
+    }
+
+    /// Takes a page's answers to the questions `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the questions are not waiting or the answers do
+    /// not fit them. Nothing is answered then.
+    pub fn reply(&self, id: u64, given: &[PageAnswer]) -> Result<(), ReplyError> {
+        let mut state = self.lock();
+        let Some(Pending {
+            waiting: Waiting::Question { questions, .. },
+            ..
+        }) = state.pending.get(&id)
+        else {
+            return Err(ReplyError::NoSuchQuestion);
+        };
+        let answers = page_answers(questions, given).ok_or(ReplyError::Malformed)?;
+        if let Some(Pending {
+            waiting: Waiting::Question { reply, .. },
+            ..
+        }) = state.pending.remove(&id)
+        {
+            let _ = reply.send(answers);
+            self.publish(
+                &mut state,
+                Payload::Resolved {
+                    id,
+                    outcome: "answered",
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Puts the model's questions to the pages and waits for the answers.
+    async fn ask_questions(&self, questions: Vec<Question>) -> Option<Vec<Answer>> {
+        let (reply, answer) = oneshot::channel();
+        let id = {
+            let mut state = self.lock();
+            state.next_approval += 1;
+            let id = state.next_approval;
+            let card = Questions {
+                id,
+                questions: questions.clone(),
+            };
+            let frame = self.publish(&mut state, Payload::Question { question: &card });
+            state.pending.insert(
+                id,
+                Pending {
+                    frame,
+                    waiting: Waiting::Question { questions, reply },
+                },
+            );
+            id
+        };
+        let _withdraw = Withdraw { hub: self, id };
+        answer.await.ok()
     }
 
     /// Puts a call to the pages and waits for an answer.
@@ -513,8 +626,7 @@ impl Hub {
                 id,
                 Pending {
                     frame,
-                    offered,
-                    reply,
+                    waiting: Waiting::Approval { offered, reply },
                 },
             );
             id
@@ -545,6 +657,66 @@ impl Drop for Withdraw<'_> {
                 },
             );
         }
+    }
+}
+
+/// The answers a page gave, read against the questions they answer.
+fn page_answers(questions: &[Question], given: &[PageAnswer]) -> Option<Vec<Answer>> {
+    if given.len() != questions.len() {
+        return None;
+    }
+    questions
+        .iter()
+        .zip(given)
+        .map(|(question, given)| {
+            let fits = given
+                .chosen
+                .iter()
+                .all(|&index| index < question.options.len())
+                && (question.multi_select || given.chosen.len() <= 1)
+                && given
+                    .other
+                    .as_ref()
+                    .is_none_or(|other| other.len() <= MAX_PROMPT_BYTES);
+            fits.then(|| Answer {
+                question: question.question.clone(),
+                chosen: given
+                    .chosen
+                    .iter()
+                    .map(|&index| question.options[index].label.clone())
+                    .collect(),
+                other: given
+                    .other
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|other| !other.is_empty())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// Asks the model's questions on a page.
+pub struct RemoteAsker {
+    hub: Arc<Hub>,
+}
+
+impl RemoteAsker {
+    #[must_use]
+    pub fn new(hub: Arc<Hub>) -> Self {
+        Self { hub }
+    }
+}
+
+impl Asker for RemoteAsker {
+    fn ask(&self, questions: Vec<Question>) -> AnswerFuture<'_> {
+        Box::pin(async move {
+            let answers = self.hub.ask_questions(questions).await?;
+            Some(Answered {
+                by: "page".to_owned(),
+                answers,
+            })
+        })
     }
 }
 
@@ -710,6 +882,71 @@ mod tests {
                 return value["approval"].clone();
             }
         }
+    }
+
+    fn questions() -> Vec<Question> {
+        let choice = |label: &str| dino_core::ask::Choice {
+            label: label.to_owned(),
+            description: None,
+        };
+        vec![
+            Question {
+                question: "Which error type?".into(),
+                options: vec![choice("thiserror"), choice("anyhow")],
+                multi_select: false,
+            },
+            Question {
+                question: "Which targets?".into(),
+                options: vec![choice("linux"), choice("macos"), choice("windows")],
+                multi_select: true,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_page_answers_the_models_questions_and_the_tool_gets_the_labels() {
+        let (hub, _prompts) = Hub::new();
+        let mut live = hub.subscribe(0).live;
+        let page = RemoteAsker::new(Arc::clone(&hub));
+        let asked = tokio::spawn(async move { page.ask(questions()).await });
+
+        let card = loop {
+            let value = parsed(&live.recv().await.unwrap());
+            if value["kind"] == "question" {
+                break value["question"].clone();
+            }
+        };
+        assert_eq!(card["questions"][1]["options"][2]["label"], "windows");
+        let id = card["id"].as_u64().unwrap();
+        let several = PageAnswer {
+            chosen: vec![0, 1],
+            other: None,
+        };
+        // Two picks for a question that takes one, or one answer for two
+        // questions, is refused and leaves the questions waiting.
+        assert_eq!(
+            hub.reply(id, &[several.clone(), several.clone()]),
+            Err(ReplyError::Malformed)
+        );
+        assert_eq!(
+            hub.reply(id, std::slice::from_ref(&several)),
+            Err(ReplyError::Malformed)
+        );
+        let own = PageAnswer {
+            chosen: Vec::new(),
+            other: Some(" both, behind a feature ".into()),
+        };
+        hub.reply(id, &[own, several]).unwrap();
+
+        let answered = asked.await.unwrap().unwrap();
+        assert_eq!(answered.by, "page");
+        assert_eq!(
+            answered.answers[0].other.as_deref(),
+            Some("both, behind a feature")
+        );
+        assert_eq!(answered.answers[1].chosen, ["linux", "macos"]);
+        assert_eq!(hub.reply(id, &[]), Err(ReplyError::NoSuchQuestion));
+        assert_eq!(hub.answer(id, "once"), Err(AnswerError::NoSuchApproval));
     }
 
     #[tokio::test]

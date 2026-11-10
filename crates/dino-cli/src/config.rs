@@ -178,6 +178,8 @@ pub struct RunSettings {
     pub explore: Option<ModelProfile>,
     /// The tools offered and the limits started under.
     pub preset: crate::preset::Preset,
+    /// How the session searches the web, if it does.
+    pub web_search: crate::search::WebSearch,
 }
 
 /// Resolves the model profile named by a flag or `DINO_MODEL`.
@@ -239,6 +241,7 @@ pub fn review_settings(settings: &RunSettings, review: &ModelProfile) -> Result<
         enable_thinking: None,
         fallback: Vec::new(),
         review: None,
+        web_search: crate::search::WebSearch::Off,
         explore: None,
         ..settings.clone()
     };
@@ -308,6 +311,7 @@ fn build_provider(
             }
             // A backstop is there so work does not stop, so it should not crawl.
             config.fast = is_fallback && FAST_MODELS.contains(&profile.provider_model.as_str());
+            config.web_search = settings.web_search.switch(profile.provider);
             if let Some(effort) = effort {
                 config.effort = effort;
             }
@@ -319,6 +323,7 @@ fn build_provider(
             config.instructions = system_prompt;
             config.tools = tools;
             config.max_output_tokens = profile.max_output_tokens;
+            config.web_search = settings.web_search.switch(profile.provider);
             if let Some(effort) = effort {
                 config.reasoning_effort = effort;
             }
@@ -519,6 +524,7 @@ mod tests {
             review: None,
             explore: None,
             preset: crate::preset::Preset::Standard,
+            web_search: crate::search::WebSearch::Off,
         }
     }
 

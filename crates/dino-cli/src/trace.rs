@@ -359,7 +359,8 @@ impl Builder {
                     ModelEvent::ToolCallCompleted { .. } => turn.calls.extend(call),
                     ModelEvent::ReasoningDelta { .. }
                     | ModelEvent::ToolCallStarted { .. }
-                    | ModelEvent::ToolCallArgumentsDelta { .. } => {}
+                    | ModelEvent::ToolCallArgumentsDelta { .. }
+                    | ModelEvent::Searched { .. } => {}
                 }
             }
             AgentEvent::ToolDecided {

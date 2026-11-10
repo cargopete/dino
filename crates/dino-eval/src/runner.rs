@@ -159,6 +159,8 @@ pub struct ToolOptions {
     pub github: bool,
     /// Offer `web_fetch`. Off for evals, for the same reason.
     pub web: bool,
+    /// Offer `web_search` through this engine. None in evals, likewise.
+    pub search: Option<dino_exec::SearchBackend>,
     /// Offer `code` where rust-analyzer can be run. Off for evals unless a
     /// variant asks, until the corpus has measured it.
     pub code: bool,
@@ -685,6 +687,7 @@ fn eval_session(
                 max_diagnostics: variant.max_diagnostics,
                 github: false,
                 web: false,
+                search: None,
                 code: variant.code,
                 hooks: Vec::new(),
                 after_call: Vec::new(),
@@ -1153,6 +1156,11 @@ pub fn session_tools_with(
     if options.web {
         runtimes.push(Box::new(
             WebFetchTool::new(WebLimits::default()).map_err(setup)?,
+        ));
+    }
+    if let Some(backend) = &options.search {
+        runtimes.push(Box::new(
+            dino_exec::WebSearchTool::new(backend.clone()).map_err(setup)?,
         ));
     }
     if options.github {
