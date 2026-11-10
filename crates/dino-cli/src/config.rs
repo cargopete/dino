@@ -174,6 +174,8 @@ pub struct RunSettings {
     /// The model that reviews a run's change before it ends, with none of the
     /// conversation. Off unless set.
     pub review: Option<ModelProfile>,
+    /// The model a read-only subagent runs on when its call names none.
+    pub explore: Option<ModelProfile>,
     /// The tools offered and the limits started under.
     pub preset: crate::preset::Preset,
 }
@@ -237,6 +239,7 @@ pub fn review_settings(settings: &RunSettings, review: &ModelProfile) -> Result<
         enable_thinking: None,
         fallback: Vec::new(),
         review: None,
+        explore: None,
         ..settings.clone()
     };
     build_session(&review, String::new(), Vec::new())?;
@@ -514,6 +517,7 @@ mod tests {
             fallback: Vec::new(),
             budget: None,
             review: None,
+            explore: None,
             preset: crate::preset::Preset::Standard,
         }
     }

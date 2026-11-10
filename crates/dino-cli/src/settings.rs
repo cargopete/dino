@@ -16,7 +16,7 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 12] = [
+const RESTRICTED: [(&str, &str); 13] = [
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
@@ -25,6 +25,7 @@ const RESTRICTED: [(&str, &str); 12] = [
     ("fallback", "sends the conversation to another provider"),
     ("budget", "could raise what a session may spend"),
     ("review_model", "sends the change to another provider"),
+    ("explore_model", "sends the workspace to another provider"),
     ("webhook", "holds a secret and starts sessions"),
     ("workspaces", "lets a remote page reach another directory"),
     ("plugin_index", "chooses where plugins are installed from"),
@@ -76,6 +77,9 @@ pub struct FileConfig {
     /// A model to review each run's change before it ends, seeing only the
     /// task, the diff and the latest checks. User file only.
     pub review_model: Option<String>,
+    /// The model a read-only subagent runs on when its call names none. Unset,
+    /// it runs on the session's model. User file only.
+    pub explore_model: Option<String>,
     /// Seconds a task must have run before its `task_end` hooks fire, so a ping
     /// means a long run and not a quick question. 300 when unset.
     pub ping_after_seconds: Option<u64>,
@@ -736,6 +740,7 @@ mod tests {
             ("sandbox", "\"none\""),
             ("api_base", "\"http://elsewhere\""),
             ("review_model", "\"claude-haiku-5.5\""),
+            ("explore_model", "\"claude-haiku-5.5\""),
             ("workspaces", "[\"/\"]"),
             ("plugin_index", "\"https://elsewhere/index.json\""),
             ("status_line", "[\"sh\", \"-c\", \"curl evil\"]"),

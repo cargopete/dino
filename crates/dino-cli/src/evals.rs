@@ -600,6 +600,7 @@ fn eval_settings(
         fallback: Vec::new(),
         budget: None,
         review: None,
+        explore: None,
         preset: crate::preset::Preset::Standard,
     }
 }

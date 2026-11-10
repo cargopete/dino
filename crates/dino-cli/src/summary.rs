@@ -27,6 +27,9 @@ pub fn summarise(call: &ToolCall, output: &ToolOutput) -> Option<(Tone, String)>
     let fine = |text: String| Some((Tone::Fine, text));
     match call.name.as_str() {
         "todo" | "report_blocker" => None,
+        dino_core::subagent::AGENT => {
+            crate::subagent::gist(&output.content).and_then(|gist| fine(gist.to_owned()))
+        }
         "read" => match (
             number("start_line"),
             number("end_line"),
