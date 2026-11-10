@@ -49,3 +49,6 @@ nav#views button.on { border-color: var(--ember); color: var(--ember); }
 .call .took { color: var(--muted); }
 .call.bad summary { color: var(--bad); }
 .call pre { margin: .3rem 0; max-height: 16em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); border-left: 2px solid var(--line); padding-left: .5rem; }
+.approval .question { margin: .4rem 0 .2rem; }
+.approval input { width: 100%; margin: .4rem 0; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: .35rem .5rem; font: inherit; }
+.approval .choices button.on { border-color: var(--ember); color: var(--ember); }

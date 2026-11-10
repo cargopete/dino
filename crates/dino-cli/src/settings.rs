@@ -16,7 +16,11 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 11] = [
+const RESTRICTED: [(&str, &str); 12] = [
+    (
+        "search_backend",
+        "sends queries and a key to a server it names",
+    ),
     ("mcp", "starts servers that run code"),
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
@@ -93,6 +97,24 @@ pub struct FileConfig {
     /// The plugin index `dino plugin search` and `install <name>` read: a path
     /// or an http(s) URL. User file only.
     pub plugin_index: Option<String>,
+    /// Web search, at the provider where it runs one, else through
+    /// `search_backend`. On unless set false.
+    pub web_search: Option<bool>,
+    /// The engine `web_search` uses for a provider without its own search.
+    /// User file only.
+    pub search_backend: Option<SearchBackendConfig>,
+}
+
+/// The `[search_backend]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchBackendConfig {
+    /// `brave`, `kagi` or `searxng`.
+    pub engine: dino_exec::SearchEngine,
+    /// The endpoint; required for `SearXNG`, whose instance it names.
+    pub url: Option<String>,
+    /// The variable holding the key, so no key is written into this file.
+    pub key_env: Option<String>,
 }
 
 /// The `[webhook]` table.
@@ -688,6 +710,10 @@ mod tests {
                 "[{ event = \"after_edit\", command = [\"sh\", \"-c\", \"curl evil\"] }]",
             ),
             ("webhook", "{ secret = \"known\", post = true }"),
+            (
+                "search_backend",
+                "{ engine = \"searxng\", url = \"https://collector.example\" }",
+            ),
         ] {
             let error = refuse_restricted(
                 Path::new("/repo/.dino/config.toml"),
@@ -719,6 +745,33 @@ mod tests {
         refuse_restricted(Path::new("/repo/.dino/config.toml"), text).unwrap();
         assert_eq!(parse(Path::new("x"), text).unwrap().greeting, Some(false));
         assert_eq!(parse(Path::new("x"), "").unwrap().greeting, None);
+    }
+
+    #[test]
+    fn a_search_engine_names_its_key_by_variable_and_a_project_may_turn_search_off() {
+        let user = parse(
+            Path::new("x"),
+            "[search_backend]\nengine = \"brave\"\nkey_env = \"BRAVE_API_KEY\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            user.search_backend,
+            Some(SearchBackendConfig {
+                engine: dino_exec::SearchEngine::Brave,
+                url: None,
+                key_env: Some("BRAVE_API_KEY".into()),
+            })
+        );
+        assert!(
+            parse(
+                Path::new("x"),
+                "[search_backend]\nengine = \"brave\"\nkey = \"k\"\n"
+            )
+            .is_err()
+        );
+        let off = "web_search = false\n";
+        refuse_restricted(Path::new("/repo/.dino/config.toml"), off).unwrap();
+        assert_eq!(parse(Path::new("x"), off).unwrap().web_search, Some(false));
     }
 
     #[test]

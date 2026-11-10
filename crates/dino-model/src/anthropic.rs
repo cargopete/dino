@@ -11,6 +11,7 @@ use dino_protocol::ModelEvent;
 use dino_protocol::ModelProfile;
 use dino_protocol::ProviderKind;
 use dino_protocol::ReasoningEffort;
+use dino_protocol::SearchHit;
 use dino_protocol::StopReason;
 use dino_protocol::TokenUsage;
 use dino_protocol::ToolCall;
@@ -30,6 +31,7 @@ use crate::ModelError;
 use crate::ModelEventStream;
 use crate::ModelFuture;
 use crate::ModelSession;
+use crate::NativeSearch;
 use crate::RetryPolicy;
 use crate::SessionState;
 use crate::elide_arguments;
@@ -41,6 +43,11 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Bump when the persisted history shape changes. RFC-0014 section 3.
 pub(crate) const STATE_VERSION: u32 = 1;
 const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
+/// The basic search, which Claude calls itself; later versions call it from
+/// code execution and add that tool's blocks to the history.
+const WEB_SEARCH_TOOL: &str = "web_search_20250305";
+/// Continuations of one turn the provider paused, before it is taken as stuck.
+const MAX_CONTINUATIONS: u32 = 4;
 /// The result written for a call whose own result never reached the provider.
 pub(crate) const UNANSWERED_CALL: &str =
     "No result was recorded: the request that carried it failed.";
@@ -66,6 +73,8 @@ pub struct AnthropicConfig {
     /// the price. Opus 5 and 5.5 only.
     pub fast: bool,
     pub retry: RetryPolicy,
+    /// Offer Anthropic's own web search while this is on.
+    pub web_search: Option<NativeSearch>,
 }
 
 impl AnthropicConfig {
@@ -82,6 +91,7 @@ impl AnthropicConfig {
             thinking: ThinkingMode::AdaptiveSummarized,
             fast: false,
             retry: RetryPolicy::default(),
+            web_search: None,
         }
     }
 }
@@ -255,14 +265,28 @@ impl AnthropicSession {
     }
 
     fn request_body(&self, pending: &AnthropicMessage) -> Result<Value, ModelError> {
+        self.body_ending(&[pending])
+    }
+
+    /// The request that carries on a turn the provider paused: the paused
+    /// assistant message goes back unchanged, after the message it answered.
+    fn continuation_body(
+        &self,
+        pending: &AnthropicMessage,
+        paused: &AnthropicMessage,
+    ) -> Result<Value, ModelError> {
+        self.body_ending(&[pending, paused])
+    }
+
+    fn body_ending(&self, tail: &[&AnthropicMessage]) -> Result<Value, ModelError> {
         validate_request_settings(&self.config)?;
         let history = self
             .history
             .lock()
             .map_err(|_| ModelError::Protocol("Anthropic history lock was poisoned".into()))?;
-        let mut messages = Vec::with_capacity(history.len() + 1);
+        let mut messages = Vec::with_capacity(history.len() + tail.len());
         messages.extend(history.iter().cloned());
-        messages.push(pending.clone());
+        messages.extend(tail.iter().map(|message| (*message).clone()));
         drop(history);
 
         let mut body = serde_json::Map::new();
@@ -284,23 +308,32 @@ impl AnthropicSession {
         if !self.config.system_prompt.is_empty() {
             body.insert("system".into(), json!(self.config.system_prompt));
         }
-        if !self.config.tools.is_empty() {
-            body.insert(
-                "tools".into(),
-                Value::Array(
-                    self.config
-                        .tools
-                        .iter()
-                        .map(|tool| {
-                            json!({
-                                "name": tool.name,
-                                "description": tool.description,
-                                "input_schema": tool.input_schema,
-                            })
-                        })
-                        .collect(),
-                ),
-            );
+        let mut tools: Vec<Value> = self
+            .config
+            .tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                })
+            })
+            .collect();
+        if self
+            .config
+            .web_search
+            .as_ref()
+            .is_some_and(NativeSearch::on)
+        {
+            tools.push(json!({
+                "type": WEB_SEARCH_TOOL,
+                "name": "web_search",
+                "max_uses": crate::MAX_NATIVE_SEARCHES,
+            }));
+        }
+        if !tools.is_empty() {
+            body.insert("tools".into(), Value::Array(tools));
             body.insert("tool_choice".into(), json!({"type": "auto"}));
         }
         Ok(Value::Object(body))
@@ -397,44 +430,76 @@ impl ModelSession for AnthropicSession {
             let response =
                 crate::send_with_retry(self.config.retry, || self.attempt(&body, &fast)).await?;
 
-            let history = Arc::clone(&self.history);
+            // What a paused turn needs to carry on from inside the stream.
+            let this = Self {
+                client: self.client.clone(),
+                endpoint: self.endpoint.clone(),
+                config: self.config.clone(),
+                history: Arc::clone(&self.history),
+            };
             let stream = try_stream! {
-                let mut chunks = response.bytes_stream();
-                let mut decoder = SseDecoder::default();
-                let mut parser = MessagesStreamParser::default();
-                let mut done = false;
+                let mut response = response;
+                let mut paused: Option<AnthropicMessage> = None;
+                let mut continued = 0;
+                loop {
+                    let mut chunks = response.bytes_stream();
+                    let mut decoder = SseDecoder::default();
+                    let mut parser = MessagesStreamParser::default();
+                    let mut done = false;
 
-                while let Some(chunk) = chunks.next().await {
-                    let chunk = chunk.map_err(|error| ModelError::Transport(error.to_string()))?;
-                    for data in decoder.push(&chunk)? {
-                        let events = parser.consume(&data)?;
-                        let terminal = events
-                            .iter()
-                            .any(|event| matches!(event, ModelEvent::Finished { .. }));
-                        if terminal {
-                            commit_history(
-                                &history,
-                                &pending,
-                                parser.assistant_message()?,
-                            )?;
+                    while let Some(chunk) = chunks.next().await {
+                        let chunk =
+                            chunk.map_err(|error| ModelError::Transport(error.to_string()))?;
+                        for data in decoder.push(&chunk)? {
+                            let events = parser.consume(&data)?;
+                            let terminal = events
+                                .iter()
+                                .any(|event| matches!(event, ModelEvent::Finished { .. }));
+                            if terminal {
+                                commit_history(
+                                    &this.history,
+                                    &pending,
+                                    joined(paused.take(), parser.assistant_message()?),
+                                )?;
+                            }
+                            for event in events {
+                                // A continuation is the same turn, already started.
+                                if continued == 0 || !matches!(event, ModelEvent::Started { .. }) {
+                                    yield event;
+                                }
+                            }
+                            if terminal || parser.stopped {
+                                done = true;
+                                break;
+                            }
                         }
-                        for event in events {
-                            yield event;
-                        }
-                        if terminal {
-                            done = true;
+                        if done {
                             break;
                         }
                     }
-                    if done {
+
+                    if !done {
+                        Err(ModelError::Protocol(
+                            "Anthropic stream ended before message_stop".into(),
+                        ))?;
+                    }
+                    if !parser.paused {
                         break;
                     }
-                }
-
-                if !done {
-                    Err(ModelError::Protocol(
-                        "Anthropic stream ended before message_stop".into(),
-                    ))?;
+                    continued += 1;
+                    if continued > MAX_CONTINUATIONS {
+                        Err(ModelError::Protocol(format!(
+                            "Anthropic paused the turn {continued} times in a row"
+                        )))?;
+                    }
+                    let so_far = joined(paused.take(), parser.assistant_message()?);
+                    let body = this.continuation_body(&pending, &so_far)?;
+                    let fast = AtomicBool::new(true);
+                    response = crate::send_with_retry(this.config.retry, || {
+                        this.attempt(&body, &fast)
+                    })
+                    .await?;
+                    paused = Some(so_far);
                 }
             };
 
@@ -498,6 +563,17 @@ fn thinking_config(mode: ThinkingMode) -> Value {
     }
 }
 
+/// A paused turn's message and its continuation, as the one message they are.
+fn joined(paused: Option<AnthropicMessage>, next: AnthropicMessage) -> AnthropicMessage {
+    match paused {
+        Some(mut message) => {
+            message.content.extend(next.content);
+            message
+        }
+        None => next,
+    }
+}
+
 fn commit_history(
     history: &Mutex<Vec<AnthropicMessage>>,
     pending: &AnthropicMessage,
@@ -534,6 +610,8 @@ struct MessagesStreamParser {
     usage: AnthropicUsage,
     stop_reason: Option<StopReason>,
     stopped: bool,
+    /// The provider paused a long server-side turn, to be sent back to finish.
+    paused: bool,
 }
 
 impl MessagesStreamParser {
@@ -581,10 +659,13 @@ impl MessagesStreamParser {
     fn start_block(
         &mut self,
         index: Option<u32>,
-        block: Option<ContentBlockStart>,
+        raw: Option<Value>,
     ) -> Result<Vec<ModelEvent>, ModelError> {
         let index = required(index, "content block index")?;
-        let block = required(block, "content block")?;
+        let raw = required(raw, "content block")?;
+        let block: ContentBlockStart = serde_json::from_value(raw.clone()).map_err(|error| {
+            ModelError::Protocol(format!("invalid Anthropic content block: {error}"))
+        })?;
         let (block, events) = match block.kind.as_str() {
             "text" => {
                 let text = block.text.unwrap_or_default();
@@ -595,9 +676,34 @@ impl MessagesStreamParser {
                 (
                     ContentBlock::Text {
                         text,
+                        citations: block.citations.unwrap_or_default(),
                         stopped: false,
                     },
                     events,
+                )
+            }
+            "server_tool_use" => (
+                ContentBlock::ServerToolUse {
+                    id: required(block.id, "server tool-use ID")?,
+                    name: required(block.name, "server tool-use name")?,
+                    initial_input: block.input.unwrap_or_else(|| json!({})),
+                    caller: block.caller,
+                    partial_json: String::new(),
+                    final_input: None,
+                    stopped: false,
+                },
+                Vec::new(),
+            ),
+            // Sent back exactly as it came: each result's encrypted content is
+            // checked by the provider on the next request.
+            "web_search_tool_result" => {
+                let event = self.searched(&raw);
+                (
+                    ContentBlock::Verbatim {
+                        value: raw,
+                        stopped: false,
+                    },
+                    vec![event],
                 )
             }
             "thinking" => {
@@ -674,6 +780,14 @@ impl MessagesStreamParser {
                 text.push_str(&delta);
                 Ok(vec![ModelEvent::TextDelta { text: delta }])
             }
+            (ContentBlock::Text { citations, .. }, "citations_delta") => {
+                citations.push(required(delta.citation, "citation")?);
+                Ok(Vec::new())
+            }
+            (ContentBlock::ServerToolUse { partial_json, .. }, "input_json_delta") => {
+                partial_json.push_str(&required(delta.partial_json, "partial server tool JSON")?);
+                Ok(Vec::new())
+            }
             (ContentBlock::Thinking { thinking, .. }, "thinking_delta") => {
                 let delta = required(delta.thinking, "thinking delta")?;
                 thinking.push_str(&delta);
@@ -713,6 +827,23 @@ impl MessagesStreamParser {
             )));
         }
         block.mark_stopped();
+        if let ContentBlock::ServerToolUse {
+            initial_input,
+            partial_json,
+            final_input,
+            ..
+        } = block
+        {
+            let input = if partial_json.is_empty() {
+                initial_input.clone()
+            } else {
+                serde_json::from_str(partial_json).map_err(|error| {
+                    ModelError::Protocol(format!("invalid Anthropic server tool input: {error}"))
+                })?
+            };
+            *final_input = Some(input);
+            return Ok(Vec::new());
+        }
         let ContentBlock::ToolUse {
             id,
             name,
@@ -756,12 +887,16 @@ impl MessagesStreamParser {
             self.usage.update(&usage);
         }
         if let Some(reason) = required(delta, "message delta")?.stop_reason {
-            if self.stop_reason.is_some() {
+            if self.stop_reason.is_some() || self.paused {
                 return Err(ModelError::Protocol(
                     "Anthropic sent more than one stop reason".into(),
                 ));
             }
-            self.stop_reason = Some(parse_stop_reason(&reason)?);
+            if reason == "pause_turn" {
+                self.paused = true;
+            } else {
+                self.stop_reason = Some(parse_stop_reason(&reason)?);
+            }
         }
         Ok(Vec::new())
     }
@@ -783,14 +918,64 @@ impl MessagesStreamParser {
             )));
         }
         ensure_contiguous_indices(&self.blocks)?;
-        let reason = required(self.stop_reason, "message stop reason")?;
+        // A paused turn is not finished: the continuation says how it ends.
+        let reason = if self.paused {
+            None
+        } else {
+            Some(required(self.stop_reason, "message stop reason")?)
+        };
         self.stopped = true;
-        Ok(vec![
-            ModelEvent::Usage {
-                usage: self.usage.normalized(),
-            },
-            ModelEvent::Finished { reason },
-        ])
+        let mut events = vec![ModelEvent::Usage {
+            usage: self.usage.normalized(),
+        }];
+        events.extend(reason.map(|reason| ModelEvent::Finished { reason }));
+        Ok(events)
+    }
+
+    /// What a search result block reports, with the query from the call it
+    /// answers, which streamed before it.
+    fn searched(&self, raw: &Value) -> ModelEvent {
+        let called = raw.get("tool_use_id").and_then(Value::as_str);
+        let query = self
+            .blocks
+            .values()
+            .find_map(|block| match block {
+                ContentBlock::ServerToolUse {
+                    id, final_input, ..
+                } if Some(id.as_str()) == called => final_input
+                    .as_ref()
+                    .and_then(|input| input.get("query"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let content = raw.get("content");
+        let error = content
+            .and_then(|content| content.get("error_code"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let text = |hit: &Value, key: &str| {
+            hit.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let results = content
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|hit| hit.get("type").and_then(Value::as_str) == Some("web_search_result"))
+            .map(|hit| SearchHit {
+                title: text(hit, "title"),
+                url: text(hit, "url"),
+            })
+            .collect();
+        ModelEvent::Searched {
+            query,
+            results,
+            error,
+        }
     }
 
     fn assistant_message(&self) -> Result<AnthropicMessage, ModelError> {
@@ -828,9 +1013,6 @@ fn parse_stop_reason(reason: &str) -> Result<StopReason, ModelError> {
         "tool_use" => Ok(StopReason::ToolUse),
         "max_tokens" | "model_context_window_exceeded" => Ok(StopReason::MaxTokens),
         "refusal" => Ok(StopReason::Refusal),
-        "pause_turn" => Err(ModelError::Protocol(
-            "Anthropic pause_turn requires server-tool continuation, which is not enabled".into(),
-        )),
         other => Err(ModelError::Protocol(format!(
             "unknown Anthropic stop reason {other:?}"
         ))),
@@ -852,6 +1034,9 @@ fn required<T>(value: Option<T>, field: &str) -> Result<T, ModelError> {
 enum ContentBlock {
     Text {
         text: String,
+        /// Where the text came from, when it quotes a search result. Sent
+        /// back, since each carries an index the provider checks.
+        citations: Vec<Value>,
         stopped: bool,
     },
     Thinking {
@@ -872,6 +1057,21 @@ enum ContentBlock {
         final_input: Option<Value>,
         stopped: bool,
     },
+    /// A call the provider runs itself, such as a search.
+    ServerToolUse {
+        id: String,
+        name: String,
+        initial_input: Value,
+        caller: Option<Value>,
+        partial_json: String,
+        final_input: Option<Value>,
+        stopped: bool,
+    },
+    /// A block kept as the provider sent it.
+    Verbatim {
+        value: Value,
+        stopped: bool,
+    },
 }
 
 impl ContentBlock {
@@ -880,7 +1080,9 @@ impl ContentBlock {
             Self::Text { stopped, .. }
             | Self::Thinking { stopped, .. }
             | Self::RedactedThinking { stopped, .. }
-            | Self::ToolUse { stopped, .. } => *stopped,
+            | Self::ToolUse { stopped, .. }
+            | Self::ServerToolUse { stopped, .. }
+            | Self::Verbatim { stopped, .. } => *stopped,
         }
     }
 
@@ -889,13 +1091,42 @@ impl ContentBlock {
             Self::Text { stopped, .. }
             | Self::Thinking { stopped, .. }
             | Self::RedactedThinking { stopped, .. }
-            | Self::ToolUse { stopped, .. } => *stopped = true,
+            | Self::ToolUse { stopped, .. }
+            | Self::ServerToolUse { stopped, .. }
+            | Self::Verbatim { stopped, .. } => *stopped = true,
         }
     }
 
     fn wire_value(&self) -> Result<Value, ModelError> {
         match self {
-            Self::Text { text, .. } => Ok(json!({"type": "text", "text": text})),
+            Self::Text {
+                text, citations, ..
+            } => {
+                let mut value = json!({"type": "text", "text": text});
+                if !citations.is_empty() {
+                    value["citations"] = Value::Array(citations.clone());
+                }
+                Ok(value)
+            }
+            Self::ServerToolUse {
+                id,
+                name,
+                caller,
+                final_input,
+                ..
+            } => {
+                let mut value = json!({
+                    "type": "server_tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": required(final_input.clone(), "completed server tool input")?,
+                });
+                if let Some(caller) = caller {
+                    value["caller"] = caller.clone();
+                }
+                Ok(value)
+            }
+            Self::Verbatim { value, .. } => Ok(value.clone()),
             Self::Thinking {
                 thinking,
                 signature,
@@ -978,7 +1209,7 @@ struct MessagesEvent {
     kind: String,
     index: Option<u32>,
     message: Option<MessageStart>,
-    content_block: Option<ContentBlockStart>,
+    content_block: Option<Value>,
     delta: Option<Value>,
     usage: Option<UsageDelta>,
     error: Option<ProviderError>,
@@ -1024,6 +1255,7 @@ struct ContentBlockStart {
     name: Option<String>,
     input: Option<Value>,
     caller: Option<Value>,
+    citations: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1034,6 +1266,7 @@ struct ContentBlockDelta {
     thinking: Option<String>,
     signature: Option<String>,
     partial_json: Option<String>,
+    citation: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1472,11 +1705,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn pause_turn_is_not_misreported_as_success() {
-        assert!(parse_stop_reason("pause_turn").is_err());
-    }
-
     #[tokio::test]
     async fn session_posts_and_streams_a_plain_answer() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1620,6 +1848,192 @@ mod tests {
             text: "hello".into()
         }));
         assert_eq!(server.await.unwrap(), 2);
+    }
+
+    const SEARCH_CALL: [&str; 4] = [
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu-1","name":"web_search"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"tokio 2 changelog\"}"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu-1","content":[{"type":"web_search_result","title":"Tokio 2.0","url":"https://tokio.rs/blog/2","encrypted_content":"opaque-1","page_age":"May 2, 2026"}]}}"#,
+    ];
+
+    #[test]
+    fn parser_keeps_search_blocks_and_citations_as_they_came() {
+        let mut parser = MessagesStreamParser::default();
+        let mut chunks = vec![
+            r#"{"type":"message_start","message":{"id":"msg-1","usage":{"input_tokens":20,"output_tokens":1}}}"#,
+        ];
+        chunks.extend(SEARCH_CALL);
+        chunks.extend([
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":"","citations":[]}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://tokio.rs/blog/2","title":"Tokio 2.0","encrypted_index":"opaque-2","cited_text":"Tokio 2.0 is out"}}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Tokio 2.0 is out."}}"#,
+            r#"{"type":"content_block_stop","index":2}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9,"server_tool_use":{"web_search_requests":1}}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(parser.consume(chunk).unwrap());
+        }
+        let assistant = parser.assistant_message().unwrap();
+
+        assert!(events.contains(&ModelEvent::Searched {
+            query: "tokio 2 changelog".into(),
+            results: vec![SearchHit {
+                title: "Tokio 2.0".into(),
+                url: "https://tokio.rs/blog/2".into(),
+            }],
+            error: None,
+        }));
+        assert_eq!(
+            assistant.content[0],
+            json!({"type": "server_tool_use", "id": "srvtoolu-1", "name": "web_search", "input": {"query": "tokio 2 changelog"}})
+        );
+        assert_eq!(
+            assistant.content[1],
+            serde_json::from_str::<Value>(SEARCH_CALL[3]).unwrap()["content_block"]
+        );
+        assert_eq!(
+            assistant.content[2]["citations"][0]["encrypted_index"],
+            "opaque-2"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&ModelEvent::Finished {
+                reason: StopReason::EndTurn
+            })
+        );
+    }
+
+    #[test]
+    fn a_failed_search_is_reported_with_its_code() {
+        let mut parser = MessagesStreamParser::default();
+        let chunks = [
+            r#"{"type":"message_start","message":{"id":"msg-1"}}"#,
+            SEARCH_CALL[0],
+            SEARCH_CALL[1],
+            SEARCH_CALL[2],
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu-1","content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}}"#,
+        ];
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(parser.consume(chunk).unwrap());
+        }
+        assert_eq!(
+            events,
+            vec![
+                ModelEvent::Started {
+                    response_id: Some("msg-1".into())
+                },
+                ModelEvent::Searched {
+                    query: "tokio 2 changelog".into(),
+                    results: Vec::new(),
+                    error: Some("max_uses_exceeded".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_search_tool_is_offered_only_while_switched_on() {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let mut config = AnthropicConfig::new("test-key", profile);
+        let switch = NativeSearch::default();
+        config.web_search = Some(switch.clone());
+        let session = AnthropicSession::new(config).unwrap();
+        let pending = AnthropicSession::pending_message(TurnInput::User {
+            content: "what changed in tokio 2?".into(),
+        });
+
+        assert!(
+            session
+                .request_body(&pending)
+                .unwrap()
+                .get("tools")
+                .is_none()
+        );
+        switch.set(true);
+        let body = session.request_body(&pending).unwrap();
+        assert_eq!(
+            body["tools"],
+            json!([{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}])
+        );
+        assert_eq!(body["tool_choice"]["type"], "auto");
+    }
+
+    #[tokio::test]
+    async fn a_paused_turn_is_sent_back_and_kept_as_one_message() {
+        let mut paused = vec![
+            r#"{"type":"message_start","message":{"id":"msg-1","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        ];
+        paused.extend(SEARCH_CALL);
+        paused.extend([
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":3}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        let (base, server) = crate::test_server::serve_in_turn(vec![
+            crate::test_server::sse(&paused),
+            crate::test_server::sse(&[
+                r#"{"type":"message_start","message":{"id":"msg-2","usage":{"input_tokens":30,"output_tokens":1}}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}"#,
+                r#"{"type":"content_block_stop","index":0}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+                r#"{"type":"message_stop"}"#,
+            ]),
+        ])
+        .await;
+        let mut session = quick_retries(base);
+        let events: Vec<_> = session
+            .next(TurnInput::User {
+                content: "search".into(),
+            })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(server.await.unwrap(), 2);
+        let started = events
+            .iter()
+            .filter(|event| matches!(event, ModelEvent::Started { .. }))
+            .count();
+        assert_eq!(started, 1);
+        assert_eq!(
+            events.last(),
+            Some(&ModelEvent::Finished {
+                reason: StopReason::EndTurn
+            })
+        );
+        let history = session.history.lock().unwrap();
+        assert_eq!(history.len(), 2);
+        let kinds: Vec<&str> = history[1]
+            .content
+            .iter()
+            .filter_map(|block| block["type"].as_str())
+            .collect();
+        assert_eq!(kinds, ["server_tool_use", "web_search_tool_result", "text"]);
+    }
+
+    #[test]
+    fn a_continuation_sends_the_paused_message_back_after_the_one_it_answers() {
+        let session = quick_retries("http://127.0.0.1:9/v1".into());
+        let pending = AnthropicSession::pending_message(TurnInput::User {
+            content: "search".into(),
+        });
+        let paused = AnthropicMessage {
+            role: Role::Assistant,
+            content: vec![
+                json!({"type": "server_tool_use", "id": "srvtoolu-1", "name": "web_search", "input": {"query": "q"}}),
+            ],
+        };
+        let body = session.continuation_body(&pending, &paused).unwrap();
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][1], json!(paused));
     }
 
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

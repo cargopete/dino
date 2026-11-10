@@ -1,6 +1,7 @@
 //! The `dino` executable.
 
 mod approve;
+mod ask;
 mod calls;
 mod config;
 mod diff;
@@ -16,6 +17,7 @@ mod recall;
 mod remote;
 mod render;
 mod replay;
+mod search;
 mod session;
 mod settings;
 mod spend;
@@ -378,8 +380,8 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
     let tools = tool_set(
         &workspace,
         sandbox,
-        &interactive_options(&workspace, Vec::new(), None, Vec::new(), None),
-        Vec::new(),
+        &interactive_options(&workspace, Vec::new(), None, Vec::new(), None, None),
+        vec![Box::new(dino_core::ask::AskTool::unattended())],
     )?
     .keeping(|name| preset.offers(name));
     let context = prompt_context(
@@ -494,6 +496,7 @@ fn session_tool_set(
             settings.max_diagnostics,
             settings.hooks.clone(),
             settings.verify.clone(),
+            settings.web_search.backend(),
         ),
         mcp,
     )
@@ -578,6 +581,7 @@ fn interactive_options(
     max_diagnostics: Option<usize>,
     hooks: Vec<dino_exec::Hook>,
     verify: Option<Vec<String>>,
+    search: Option<dino_exec::SearchBackend>,
 ) -> dino_eval::ToolOptions {
     dino_eval::ToolOptions {
         protected,
@@ -587,6 +591,7 @@ fn interactive_options(
         skills: skills(workspace),
         github: dino_exec::GithubTool::available(),
         web: true,
+        search,
         skip_edit_check: false,
         escalation: true,
         verify,
@@ -667,6 +672,8 @@ pub(crate) struct Prepared {
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
     spending: spend::Spending,
+    /// Set while someone is there to answer the model's questions.
+    attended: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Prepared {
@@ -688,6 +695,16 @@ fn metered(
     spending: &spend::Spending,
 ) -> Result<Box<dyn ModelSession>> {
     let model = config::build_session(settings, prompt, definitions)?;
+    let asks = settings
+        .web_search
+        .switch(settings.profile.provider)
+        .is_some();
+    let model: Box<dyn ModelSession> = match &settings.web_search {
+        search::WebSearch::Native(gate) if asks => {
+            Box::new(search::Gated::new(model, Arc::clone(gate)))
+        }
+        _ => model,
+    };
     Ok(Box::new(spend::Metered::new(model, spending)))
 }
 
@@ -770,10 +787,42 @@ fn shown(
     })
 }
 
+/// The `ask` tool, asking on the pages when there are any, and the switch
+/// that says whether anyone is there.
+fn ask_tool(
+    attended: bool,
+    remote: Option<&Arc<remote::Hub>>,
+) -> (Arc<std::sync::atomic::AtomicBool>, Box<dyn ToolRuntime>) {
+    let attended = Arc::new(std::sync::atomic::AtomicBool::new(attended));
+    let asker: Arc<dyn dino_core::ask::Asker> = match remote {
+        Some(hub) => Arc::new(remote::RemoteAsker::new(Arc::clone(hub))),
+        None => Arc::new(ask::TerminalAsker),
+    };
+    let tool = dino_core::ask::AskTool::new(asker, Arc::clone(&attended));
+    (attended, Box::new(tool))
+}
+
+/// Names how the session searches, and gives the provider's search the
+/// policy that decides whether it runs.
+fn open_search(settings: &RunSettings, sandbox: &str, remote: Option<&Arc<remote::Hub>>) {
+    if let search::WebSearch::Native(gate) = &settings.web_search {
+        gate.decide_with(policy(settings.mode, sandbox, &settings.workspace, remote));
+    }
+    if !matches!(settings.web_search, search::WebSearch::Off) {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::FAINT,
+                &format!("web search: {}", settings.web_search.label())
+            )
+        );
+    }
+}
+
 fn prepare(
     common: &CommonArgs,
     unattended: bool,
-    extra: Vec<Box<dyn ToolRuntime>>,
+    mut extra: Vec<Box<dyn ToolRuntime>>,
     remote: Option<&Arc<remote::Hub>>,
     json: bool,
 ) -> Result<Prepared> {
@@ -787,6 +836,9 @@ fn prepare(
         config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
     let sandbox_label = sandbox.label();
     warn_unprotected(&settings, sandbox.as_ref());
+    let (attended, ask) = ask_tool(!unattended && !settings.keep_going, remote);
+    extra.push(ask);
+    open_search(&settings, &sandbox_label, remote);
     let tools = session_tool_set(&settings, &sandbox, extra)?;
     let definitions = tools.definitions();
     let mut context = prompt_context(
@@ -880,6 +932,7 @@ fn prepare(
         status,
         sandbox,
         spending,
+        attended,
     })
 }
 
@@ -1155,6 +1208,7 @@ async fn drive(
         ),
         remote: hub,
         schedules,
+        attended: prepared.attended,
     };
     session.note_conversation();
     let moving = if let Some(remote) = remote {
@@ -1514,7 +1568,25 @@ struct Resolved {
     verify: Option<(Vec<String>, Source)>,
     task_limits: task::Limits,
     mcp: Vec<dino_exec::McpServer>,
+    search: SearchSettings,
     layers: Layers,
+}
+
+/// Whether to search, and the engine for a model whose provider has none.
+struct SearchSettings {
+    enabled: (bool, Source),
+    backend: Option<settings::SearchBackendConfig>,
+}
+
+fn search_settings(layers: &Layers) -> SearchSettings {
+    SearchSettings {
+        enabled: layers
+            .pick(|file| file.web_search)
+            .unwrap_or((true, Source::Default)),
+        backend: layers
+            .pick_user_only(|file| file.search_backend.clone())
+            .map(|(backend, _)| backend),
+    }
 }
 
 /// The verify command, if it may run: the user's own, or a project's the
@@ -1704,6 +1776,7 @@ fn resolve_layers(args: &CommonArgs, layers: Layers) -> Result<Resolved> {
             .filter(|(command, _)| !command.is_empty()),
         task_limits: layers.task_limits()?,
         mcp: mcp_servers(&layers),
+        search: search_settings(&layers),
         preset,
         layers,
     })
@@ -1979,6 +2052,7 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
         ("plain", switch(resolved.plain)),
         ("greeting", switch(resolved.greeting)),
         ("keep going", switch(resolved.keep_going)),
+        ("web search", search_row(resolved)),
         ("compaction", compaction_row(resolved.compaction)),
         ("fallback", in_order(&resolved.fallback)),
         (
@@ -2017,6 +2091,21 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
     run_settings(args, workspace, resolved, verify, session_id)
 }
 
+fn search_row(resolved: &Resolved) -> String {
+    let (enabled, source) = resolved.search.enabled;
+    if !enabled {
+        return format!("off  ({})", source.label());
+    }
+    if !resolved.preset.0.offers(dino_exec::WEB_SEARCH) {
+        return format!("off  (preset {})", resolved.preset.0.name());
+    }
+    let otherwise = resolved.search.backend.as_ref().map_or_else(
+        || "none for other models".to_owned(),
+        |backend| format!("{} for other models  (user file)", backend.engine.name()),
+    );
+    format!("at the provider for Claude and GPT, asked once; {otherwise}")
+}
+
 /// The settings `resolved` comes to, with the verify command already decided.
 fn run_settings(
     args: &CommonArgs,
@@ -2027,6 +2116,23 @@ fn run_settings(
 ) -> Result<RunSettings> {
     let profile = config::resolve_profile(resolved.model.0.as_deref())?;
     let fallback = config::resolve_fallback(&resolved.fallback, &profile)?;
+    // An engine that cannot be used leaves the session without search rather
+    // than without a session, as a failed MCP server does.
+    let web_search = search::resolve(
+        &profile,
+        resolved.search.enabled.0
+            && resolved.preset.0.offers(dino_exec::WEB_SEARCH)
+            && resolved.approvals.0 != ApprovalMode::ReadOnly,
+        resolved.search.backend.as_ref(),
+        &|name| std::env::var(name).ok(),
+    )
+    .unwrap_or_else(|error| {
+        eprintln!(
+            "{}",
+            style::paint(style::WARN, &format!("web search is off: {error}"))
+        );
+        search::WebSearch::Off
+    });
     let review = resolved
         .review_model
         .as_deref()
@@ -2065,6 +2171,7 @@ fn run_settings(
         greeting: resolved.greeting.0,
         fallback,
         budget: resolved.budget,
+        web_search,
         review,
         preset: resolved.preset.0,
     })

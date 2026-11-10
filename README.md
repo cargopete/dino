@@ -56,7 +56,7 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Fourteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Sixteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
@@ -86,7 +86,30 @@ CI and evals.
   run by `dino` rather than by a confined process, and is offered only where
   `gh` is installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
   host, because a URL can carry workspace text out; a redirect to another host
-  is refused rather than followed past that approval.
+  is refused rather than followed past that approval. `web_search` finds pages
+  by query and returns titles, URLs and snippets; reading one is still
+  `web_fetch`. On Claude and GPT it is the provider's own search, which runs
+  inside the response where no call can be stopped first, so it is left out of
+  the request until the session has been allowed it: the first request asks,
+  once, offering this session, remember or refuse, and the answer holds for the
+  session. Each search the provider ran is a line in the transcript and the
+  log, and goes into the spend ledger at the published $10 per thousand; a
+  turn Anthropic pauses mid-search is sent back and continued, four times at
+  most. For other models it is a tool through the engine `[search_backend]`
+  names in the user file (`engine` of `brave`, `kagi` or `searxng`, `url` for a
+  SearXNG instance, `key_env` naming the variable that holds the key), asked
+  once a session as every query goes to the one host. `web_search = false`
+  turns it off; `minimal`, read-only sessions and evals have none. Neither the
+  provider searches nor any engine has been driven against a live endpoint:
+  the adapters are tested on recorded streams shaped from the providers'
+  documentation, the engines against a local server. `ask` puts up to four
+  questions to the person in the middle of a turn, two to four options each,
+  the recommended one first, several where `multi_select` says so, and a line
+  of the person's own: one key per option at the terminal, buttons on the
+  `serve` page. Under `dino run`, `--keep-going` or `/auto` it answers at once
+  that no one is there to ask, and the model is told to take the recommended
+  option and say so. The questions and answers are in the session log as the
+  call and its result.
 - **Approval enforced below the model.** Every call is classified read-only,
   mutating, process or network. Read-only calls proceed, and so do git commands
   that only read (`status`, `log`, `diff`, `show`, `rev-parse`, `rev-list`,
@@ -179,7 +202,8 @@ CI and evals.
   loop.
 - **Driving a session from another device.** `dino serve` runs a session with
   no terminal and serves a small page: watch the stream, send a prompt, stop the
-  run and answer approvals from a phone. It listens only on loopback or a
+  run, and answer approvals and the model's questions from a phone. It listens
+  only on loopback or a
   Tailscale address, wants a fresh 256-bit token in a header on every request,
   and offers a page every approval answer the terminal has, leaving the sandbox
   included, except a rule remembered for later sessions.
@@ -319,7 +343,7 @@ CI and evals.
   `skill`, `todo`, `report_blocker`), runs read-only whatever a file says,
   refuses a contrary approval flag, and takes 40 turns unless `max_turns` or
   `--max-turns` says otherwise; `dino review` uses it. A tool a preset leaves
-  out is absent, not refused, and only `standard` has schedules. The system
+  out is absent, not refused, and only `standard` has schedules and `ask`. The system
   prompt's general guidance still names tools a preset may have removed.
 - **Plugins.** A plugin is a directory with a `dino-plugin.toml` naming it, a
   semver `version`, a `description` and an `engines` range of Dino versions,

@@ -593,6 +593,7 @@ fn eval_settings(
         budget: None,
         review: None,
         preset: crate::preset::Preset::Standard,
+        web_search: crate::search::WebSearch::Off,
     }
 }
 

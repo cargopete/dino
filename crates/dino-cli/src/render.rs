@@ -386,6 +386,25 @@ impl Renderer {
                 self.calls.insert(call.id.clone(), call.clone());
                 Ok(())
             }
+            ModelEvent::Searched {
+                query,
+                results,
+                error,
+            } => {
+                self.break_stream()?;
+                let how = match error {
+                    Some(code) => format!("failed: {code}"),
+                    None => format!("{} results", results.len()),
+                };
+                let query = cap(query, MAX_SUMMARY_BYTES);
+                write_out(&style::paint(
+                    FAINT,
+                    &format!(
+                        "  {} web search {query:?} · {how} (at the provider)\n",
+                        crate::calls::icon("web_search")
+                    ),
+                ))
+            }
             ModelEvent::ReasoningDelta { .. }
             | ModelEvent::Started { .. }
             | ModelEvent::ToolCallStarted { .. }
@@ -474,7 +493,9 @@ impl Renderer {
                 | ModelEvent::ToolCallStarted { .. }
                 | ModelEvent::ToolCallArgumentsDelta { .. }
                 | ModelEvent::ToolCallCompleted { .. } => false,
-                ModelEvent::TextDelta { .. } | ModelEvent::Finished { .. } => true,
+                ModelEvent::TextDelta { .. }
+                | ModelEvent::Searched { .. }
+                | ModelEvent::Finished { .. } => true,
             },
             _ => true,
         }
@@ -803,6 +824,15 @@ pub fn describe_call(call: &ToolCall) -> String {
             }
         }),
         "web_fetch" => argument_string(&call.arguments, "url"),
+        "web_search" => argument_string(&call.arguments, "query").map(|query| format!("{query:?}")),
+        "ask" => call
+            .arguments
+            .get("questions")
+            .and_then(Value::as_array)
+            .and_then(|questions| questions.first())
+            .and_then(|first| first.get("question"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         "schedule_create" | "schedule_update" => {
             let when = ["delay", "at", "every", "daily", "weekly", "cron"]
                 .into_iter()

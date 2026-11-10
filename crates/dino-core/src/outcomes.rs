@@ -18,12 +18,14 @@ const NAMED: usize = 3;
 
 /// Tools that cannot change the workspace. Anything else not recognised below
 /// is taken to have changed it, since a missed edit would call stale work done.
-const READ_ONLY: [&str; 10] = [
+const READ_ONLY: [&str; 12] = [
     "read",
     "search",
     "list",
     "gate",
     "web_fetch",
+    "web_search",
+    "ask",
     "progress",
     "todo",
     "remember",
