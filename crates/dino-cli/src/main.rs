@@ -115,6 +115,9 @@ enum Command {
     /// Run a session with no terminal, driven from a web page over Tailscale or
     /// an SSH tunnel. RFC-0020.
     Serve(ServeArgs),
+    /// A page of every session on this machine: what it is doing, and whether
+    /// it is stuck or gone.
+    Dash(DashArgs),
     /// Review pull requests as GitHub reports them ready, read-only, from a
     /// signed webhook. Configured under [webhook] in your own config file.
     Webhook(WebhookArgs),
@@ -237,6 +240,23 @@ struct ServeArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct DashArgs {
+    /// Address to listen on: a loopback or Tailscale address, and nothing else.
+    /// Defaults to localhost.
+    #[arg(long)]
+    bind: Option<std::net::IpAddr>,
+    /// Port to listen on.
+    #[arg(long, default_value_t = 7880)]
+    port: u16,
+    /// Put a short summary in Claude Haiku 5.5's dry British voice above the
+    /// cards. It is sent each session's state, counts and durations and nothing
+    /// else: never a prompt, reply, path, command or output. Needs
+    /// `ANTHROPIC_API_KEY`.
+    #[arg(long)]
+    blurb: bool,
+}
+
+#[derive(Debug, clap::Args)]
 struct WebhookArgs {
     /// Address to listen on: a loopback or Tailscale address, and nothing else.
     /// Default localhost, for `tailscale funnel` or another proxy that ends
@@ -303,6 +323,7 @@ fn dispatch() -> Result<ExitCode> {
         Some(Command::Replay(args)) => replay::run(&args),
         Some(Command::Trace(args)) => trace::run(&args),
         Some(Command::Serve(args)) => on_runtime(serve(args)),
+        Some(Command::Dash(args)) => on_runtime(dash(args)),
         Some(Command::Webhook(args)) => on_runtime(webhook(args)),
         Some(Command::Plugin(args)) => plugin::command::run(args),
         Some(Command::Palette) => {
@@ -667,6 +688,7 @@ pub(crate) struct Prepared {
     status: Arc<std::sync::Mutex<spinner::Status>>,
     sandbox: Arc<dyn Sandbox>,
     spending: spend::Spending,
+    late: remote::Late,
 }
 
 impl Prepared {
@@ -820,6 +842,7 @@ fn prepare(
         approval_mode: settings.mode.label().to_owned(),
         sandbox: sandbox_label.clone(),
         max_model_turns: settings.max_turns.get(),
+        pid: Some(std::process::id()),
     };
     let log = JsonlSessionLog::create(&settings.log_path, meta.clone())?;
 
@@ -848,6 +871,7 @@ fn prepare(
         status.meter = Some(Arc::clone(&spending.meter));
     }
     let shown = shown(json, renderer, meta)?;
+    let late = remote::Late::new(remote.map(Arc::clone));
     let planning = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Agent::new(
         model,
@@ -858,10 +882,10 @@ fn prepare(
         },
     )
     .with_policy(dino_core::approval::PlanGate::new(
-        policy(settings.mode, &sandbox_label, &settings.workspace, remote),
+        policy(settings.mode, &sandbox_label, &settings.workspace, &late),
         Arc::clone(&planning),
     ))
-    .with_sink(((shown, log), remote::Tap(remote.map(Arc::clone))));
+    .with_sink(((shown, log), remote::Tap(late.clone())));
     let agent = guarded(agent, &settings, &sandbox, unattended, &spending)?;
 
     Ok(Prepared {
@@ -880,6 +904,7 @@ fn prepare(
         status,
         sandbox,
         spending,
+        late,
     })
 }
 
@@ -893,6 +918,44 @@ async fn session(common: CommonArgs) -> Result<ExitCode> {
 struct Remote {
     hub: Arc<remote::Hub>,
     requests: tokio::sync::mpsc::Receiver<remote::Request>,
+}
+
+/// Serves the sessions page until interrupted.
+async fn dash(args: DashArgs) -> Result<ExitCode> {
+    let bind = args
+        .bind
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let address = remote::bind_address(Some(bind), args.port)?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("cannot listen on {address}"))?;
+    let address = listener.local_addr().context("cannot read the address")?;
+    let blurb = if args.blurb {
+        Some(remote::Blurb::from_env()?)
+    } else {
+        None
+    };
+    let token = remote::new_token()?;
+    let current = config::resolve_workspace(None)?;
+    let places = remote::Workspaces {
+        configured: settings::configured_workspaces()?,
+        recent: settings::recent_workspaces_path(),
+    };
+    eprintln!(
+        "{}",
+        style::paint(style::PURPLE, &format!("dash: http://{address}/#{token}"))
+    );
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            "the token is the only key: the page shows what your sessions are doing"
+        )
+    );
+    tokio::select! {
+        never = remote::serve_dash(listener, token, places, current, blurb) => match never {},
+        _ = tokio::signal::ctrl_c() => Ok(ExitCode::SUCCESS),
+    }
 }
 
 /// Listens for pages, then runs a session for them until the person at the
@@ -1065,6 +1128,18 @@ fn schedules(common: &CommonArgs) -> Result<(session::Due, Box<dyn ToolRuntime>)
     Ok((due, Box::new(tools)))
 }
 
+fn warn_open_approvals(mode: ApprovalMode) {
+    if matches!(mode, ApprovalMode::AllowAll) {
+        eprintln!(
+            "{}",
+            style::paint(
+                style::WARN,
+                "approvals are off, so a page may run anything the sandbox allows"
+            )
+        );
+    }
+}
+
 /// Runs one session, and returns the workspace a page asked to move to, if one
 /// did. A move starts a new session there, with that workspace's schedules.
 async fn drive(
@@ -1083,14 +1158,8 @@ async fn drive(
     if let Some(file) = settings::recent_workspaces_path() {
         let _ = remote::note_workspace(&file, &prepared.settings.workspace);
     }
-    if hub.is_some() && matches!(prepared.settings.mode, ApprovalMode::AllowAll) {
-        eprintln!(
-            "{}",
-            style::paint(
-                style::WARN,
-                "approvals are off, so a page may run anything the sandbox allows"
-            )
-        );
+    if hub.is_some() {
+        warn_open_approvals(prepared.settings.mode);
     }
     let base = prepared.settings.clone();
     let context = prepared.context.clone();
@@ -1154,6 +1223,8 @@ async fn drive(
             stdin().is_terminal(),
         ),
         remote: hub,
+        late: prepared.late,
+        serving: None,
         schedules,
     };
     session.note_conversation();
@@ -2096,24 +2167,26 @@ fn interactive_policy<A: Approver + 'static>(
     }
 }
 
-/// With `remote`, approvals are asked on the pages and not at the terminal.
+/// With a hub from the start, as `dino serve`, approvals are asked on the pages
+/// and not at the terminal; otherwise by whoever started the turn.
 fn policy(
     mode: ApprovalMode,
     sandbox: &str,
     workspace: &Path,
-    remote: Option<&Arc<remote::Hub>>,
+    late: &remote::Late,
 ) -> Box<dyn ApprovalPolicy> {
     match mode {
         ApprovalMode::Interactive | ApprovalMode::AcceptEdits => {
             let accept_edits = mode == ApprovalMode::AcceptEdits;
-            match remote {
-                Some(hub) => interactive_policy(
-                    remote::RemoteApprover::new(Arc::clone(hub)),
-                    workspace,
-                    accept_edits,
-                ),
+            match late.get() {
+                Some(hub) => {
+                    interactive_policy(remote::RemoteApprover::new(hub), workspace, accept_edits)
+                }
                 None => interactive_policy(
-                    TerminalApprover::new(sandbox, workspace),
+                    remote::RoutedApprover::new(
+                        TerminalApprover::new(sandbox, workspace),
+                        late.clone(),
+                    ),
                     workspace,
                     accept_edits,
                 ),

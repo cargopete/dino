@@ -6,9 +6,13 @@
 //! prompt answered from the page, and the sink that feeds the hub. The network
 //! half, and every check on who may connect, is in [`server`]. RFC-0020.
 
+mod blurb;
+mod dash;
 mod places;
 mod server;
 
+pub use blurb::Blurb;
+pub use dash::serve as serve_dash;
 pub use places::Place;
 pub use places::SavedSession;
 pub use places::Workspaces;
@@ -225,13 +229,20 @@ impl Hub {
     /// A hub, and the receiving end of the prompts sent to it.
     #[must_use]
     pub fn new() -> (Arc<Self>, mpsc::Receiver<Request>) {
+        Self::with_inbox(Inbox::default())
+    }
+
+    /// As [`Hub::new`], delivering lines typed during a run to `inbox`: for a
+    /// session already under way, whose agent reads that one.
+    #[must_use]
+    pub fn with_inbox(inbox: Inbox) -> (Arc<Self>, mpsc::Receiver<Request>) {
         let (commands, prompts) = mpsc::channel(WAITING);
         let (live, _) = broadcast::channel(LIVE);
         let hub = Arc::new(Self {
             state: Mutex::new(State::default()),
             live,
             commands,
-            inbox: Inbox::default(),
+            inbox,
             cancel: Notify::new(),
             info: Mutex::new(None),
             workspaces: OnceLock::new(),
@@ -584,15 +595,146 @@ fn cap_strings(value: &mut serde_json::Value) {
     }
 }
 
+/// A hub being served to pages for a session that was already running.
+pub struct Serving {
+    pub hub: Arc<Hub>,
+    pub requests: mpsc::Receiver<Request>,
+    /// Where the page is, token included.
+    pub url: String,
+    pub local_only: bool,
+    task: tokio::task::JoinHandle<std::convert::Infallible>,
+}
+
+impl Serving {
+    /// Stops accepting pages. One already connected keeps its stream, which goes
+    /// quiet because the session no longer feeds the hub.
+    pub fn stop(self) {
+        self.task.abort();
+    }
+}
+
+/// Starts serving `inbox`'s session to pages, on the address `dino serve` would
+/// choose for `bind` and `port`.
+///
+/// # Errors
+///
+/// Returns an error when the address is not one the page may be served on, it
+/// cannot be bound, or the token cannot be made.
+pub async fn start(
+    bind: Option<std::net::IpAddr>,
+    port: u16,
+    inbox: Inbox,
+    workspaces: Workspaces,
+) -> anyhow::Result<Serving> {
+    use anyhow::Context as _;
+    let address = bind_address(bind, port)?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("cannot listen on {address}"))?;
+    let address = listener.local_addr().context("cannot read the address")?;
+    let token = new_token()?;
+    let (hub, requests) = Hub::with_inbox(inbox);
+    hub.offer(workspaces);
+    // The token is in the fragment, which a browser keeps to itself.
+    let url = format!("http://{address}/#{token}");
+    let task = tokio::spawn(serve(listener, Arc::clone(&hub), token));
+    Ok(Serving {
+        hub,
+        requests,
+        url,
+        local_only: address.ip().is_loopback(),
+        task,
+    })
+}
+
+/// The hub of a session that `/serve` may start serving after it has begun, and
+/// whether the turn under way came from a page.
+#[derive(Clone, Default)]
+pub struct Late {
+    hub: Arc<Mutex<Option<Arc<Hub>>>>,
+    page_turn: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Late {
+    #[must_use]
+    pub fn new(hub: Option<Arc<Hub>>) -> Self {
+        Self {
+            hub: Arc::new(Mutex::new(hub)),
+            page_turn: Arc::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self) -> Option<Arc<Hub>> {
+        self.hub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set(&self, hub: Option<Arc<Hub>>) {
+        *self
+            .hub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hub;
+    }
+
+    /// Marks the turn about to run as one a page started, so its approvals are
+    /// asked there and not at a terminal nobody is watching.
+    pub fn page_turn(&self, page: bool) {
+        self.page_turn
+            .store(page, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn asking_page(&self) -> Option<Arc<Hub>> {
+        if self.page_turn.load(std::sync::atomic::Ordering::Relaxed) {
+            self.get()
+        } else {
+            None
+        }
+    }
+}
+
 /// Feeds the hub the events the terminal and the log get.
-pub struct Tap(pub Option<Arc<Hub>>);
+pub struct Tap(pub Late);
 
 impl EventSink for Tap {
     fn emit(&mut self, event: &AgentEvent) -> Result<(), SinkError> {
-        if let Some(hub) = &self.0 {
+        if let Some(hub) = self.0.get() {
             hub.event(event);
         }
         Ok(())
+    }
+}
+
+/// Asks at the terminal, except for a turn a page started, which asks there.
+pub struct RoutedApprover {
+    terminal: crate::approve::TerminalApprover,
+    late: Late,
+}
+
+impl RoutedApprover {
+    #[must_use]
+    pub fn new(terminal: crate::approve::TerminalApprover, late: Late) -> Self {
+        Self { terminal, late }
+    }
+}
+
+impl Approver for RoutedApprover {
+    fn ask(&self, call: &ToolCall, action: &ToolAction) -> ReplyFuture<'_> {
+        self.ask_in(call, action, &AskContext::default())
+    }
+
+    fn ask_in(
+        &self,
+        call: &ToolCall,
+        action: &ToolAction,
+        context: &AskContext,
+    ) -> ReplyFuture<'_> {
+        match self.late.asking_page() {
+            Some(hub) => ask_page(hub, call, action, context),
+            None => self.terminal.ask_in(call, action, context),
+        }
     }
 }
 
@@ -637,49 +779,57 @@ impl Approver for RemoteApprover {
         action: &ToolAction,
         context: &AskContext,
     ) -> ReplyFuture<'_> {
-        let summary = crate::render::describe_call(call);
-        let subject = action.subject.clone().unwrap_or_else(|| call.name.clone());
-        let asking = crate::approve::Asking {
-            summary: &summary,
-            tool: &call.name,
-            subject: &subject,
-            class: action.class,
-            context,
-            change: None,
-        };
-        let offered: Vec<(&'static str, ApprovalReply, String)> =
-            crate::approve::choices(&asking, crate::approve::always_label(action.class))
-                .into_iter()
-                .filter_map(|choice| {
-                    wire_key(&choice.reply).map(|key| (key, choice.reply, choice.label))
-                })
-                .collect();
-        let arguments = serde_json::to_string_pretty(&call.arguments).unwrap_or_default();
-        let approval = Approval {
-            id: 0,
-            call_id: call.id.clone(),
-            tool: call.name.clone(),
-            class: action.class,
-            subject,
-            summary,
-            arguments: dino_core::text::capped_head(&arguments, MAX_ARGUMENT_BYTES),
-            choices: offered
-                .iter()
-                .map(|(key, _, label)| WireChoice {
-                    key,
-                    label: label.clone(),
-                })
-                .collect(),
-            also_pending: context.also_pending.len(),
-            unconfined: context.unconfined.clone(),
-        };
-        let offered = offered
-            .into_iter()
-            .map(|(key, reply, _)| (key, reply))
-            .collect();
-        let hub = Arc::clone(&self.hub);
-        Box::pin(async move { hub.ask(approval, offered).await })
+        ask_page(Arc::clone(&self.hub), call, action, context)
     }
+}
+
+fn ask_page(
+    hub: Arc<Hub>,
+    call: &ToolCall,
+    action: &ToolAction,
+    context: &AskContext,
+) -> ReplyFuture<'static> {
+    let summary = crate::render::describe_call(call);
+    let subject = action.subject.clone().unwrap_or_else(|| call.name.clone());
+    let asking = crate::approve::Asking {
+        summary: &summary,
+        tool: &call.name,
+        subject: &subject,
+        class: action.class,
+        context,
+        change: None,
+    };
+    let offered: Vec<(&'static str, ApprovalReply, String)> =
+        crate::approve::choices(&asking, crate::approve::always_label(action.class))
+            .into_iter()
+            .filter_map(|choice| {
+                wire_key(&choice.reply).map(|key| (key, choice.reply, choice.label))
+            })
+            .collect();
+    let arguments = serde_json::to_string_pretty(&call.arguments).unwrap_or_default();
+    let approval = Approval {
+        id: 0,
+        call_id: call.id.clone(),
+        tool: call.name.clone(),
+        class: action.class,
+        subject,
+        summary,
+        arguments: dino_core::text::capped_head(&arguments, MAX_ARGUMENT_BYTES),
+        choices: offered
+            .iter()
+            .map(|(key, _, label)| WireChoice {
+                key,
+                label: label.clone(),
+            })
+            .collect(),
+        also_pending: context.also_pending.len(),
+        unconfined: context.unconfined.clone(),
+    };
+    let offered = offered
+        .into_iter()
+        .map(|(key, reply, _)| (key, reply))
+        .collect();
+    Box::pin(async move { hub.ask(approval, offered).await })
 }
 
 #[cfg(test)]

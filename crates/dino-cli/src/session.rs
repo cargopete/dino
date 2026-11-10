@@ -200,6 +200,8 @@ enum Input {
     Init,
     Log,
     Schedules,
+    /// Serve this session to pages: nothing for the address, a port, or `stop`.
+    Serve(Option<String>),
     Exit,
     Unknown(String),
     Blank,
@@ -258,6 +260,7 @@ fn parse(line: &str) -> Input {
         "plan" => Input::Plan(remainder()),
         "log" => Input::Log,
         "schedules" => Input::Schedules,
+        "serve" => Input::Serve(remainder()),
         "exit" | "quit" | "q" => Input::Exit,
         // A lone word is a mistyped command; a word with more after it is prose.
         other if rest.trim() == other => Input::Unknown(other.to_owned()),
@@ -465,6 +468,11 @@ pub struct Session<S> {
     pub greeting: bool,
     /// Set when pages are watching and driving this session, as `dino serve`.
     pub remote: Option<Arc<crate::remote::Hub>>,
+    /// Where the hub is handed to the agent's sink and approver, so `/serve` can
+    /// start serving a session that began without one.
+    pub late: crate::remote::Late,
+    /// Set by `/serve` in a session with a terminal.
+    pub serving: Option<crate::remote::Serving>,
     /// Set when the session offers the schedule tools.
     pub schedules: Option<Due>,
 }
@@ -524,6 +532,12 @@ where
                 // every keystroke would buy nothing.
                 let mut typed = std::mem::take(&mut self.typed_ahead);
                 typed.push_str(&crate::style::take_typeahead());
+                if self.serving.is_some()
+                    && typed.is_empty()
+                    && !self.key_before_page(&prompt).await
+                {
+                    continue;
+                }
                 at_prompt.store(true, std::sync::atomic::Ordering::Relaxed);
                 let read = editor.readline_with_initial(&prompt, (&typed, ""));
                 at_prompt.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -544,7 +558,14 @@ where
             } else {
                 input
             };
-            if self.handle(input).await? {
+            if let Some(hub) = &self.remote {
+                hub.set_busy(true);
+            }
+            let leaving = self.handle(input).await;
+            if let Some(hub) = &self.remote {
+                hub.set_busy(false);
+            }
+            if leaving? {
                 break;
             }
         }
@@ -606,6 +627,158 @@ where
             hub.set_busy(false);
         }
         Ok(None)
+    }
+
+    /// Waits at an idle prompt for a key or a page, whichever comes first.
+    /// Returns true when a key is waiting, and false once a page's request has
+    /// been run, so the caller starts the prompt over.
+    async fn key_before_page(&mut self, prompt: &str) -> bool {
+        use std::io::Write as _;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watcher = {
+            let stop = Arc::clone(&stop);
+            tokio::task::spawn_blocking(move || crate::listen::wait_for_key(&stop))
+        };
+        tokio::pin!(watcher);
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+        let watching = self.schedules.is_some();
+        let request = match self.serving.as_mut() {
+            Some(serving) => {
+                tokio::select! {
+                    request = serving.requests.recv() => Some(request),
+                    () = tokio::time::sleep(SCHEDULE_POLL), if watching => None,
+                    ready = &mut watcher => {
+                        print!("\r\x1b[2K");
+                        return ready.unwrap_or(true);
+                    }
+                }
+            }
+            None => return true,
+        };
+        // The watcher puts the terminal back as it finds it when it stops.
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watcher.await;
+        println!();
+        match request {
+            Some(Some(request)) => self.page_request(request).await,
+            Some(None) => self.stop_serving(),
+            None => {}
+        }
+        false
+    }
+
+    /// Runs what a page asked of a session that is also at a terminal.
+    async fn page_request(&mut self, request: crate::remote::Request) {
+        let Some(hub) = self.remote.clone() else {
+            return;
+        };
+        match request {
+            crate::remote::Request::Prompt(prompt) => {
+                hub.set_busy(true);
+                self.late.page_turn(true);
+                self.submit(prompt).await;
+                self.late.page_turn(false);
+                hub.set_busy(false);
+            }
+            crate::remote::Request::Resume(id) => {
+                if self.resume(&id) {
+                    self.describe_to(&hub);
+                    hub.notice(&format!("resumed {id} on {}", self.model));
+                } else {
+                    hub.notice(&format!("could not resume {id}; the terminal says why"));
+                }
+            }
+            crate::remote::Request::Workspace(_) => {
+                hub.notice("this session is at a terminal and stays in its workspace");
+            }
+        }
+    }
+
+    /// `/serve`: lets a page watch and drive this session as well, `/serve stop`
+    /// ends that, and a port number picks the port.
+    async fn serve_here(&mut self, argument: Option<&str>) {
+        let say = |text: &str, ink| println!("{}", style::paint(ink, &format!("  {text}")));
+        let port = match argument {
+            Some("stop") => {
+                if self.serving.is_some() {
+                    self.stop_serving();
+                    say("no longer served", FAINT);
+                } else {
+                    say("not being served", FAINT);
+                }
+                return;
+            }
+            Some(port) => {
+                let Ok(port) = port.parse::<u16>() else {
+                    say("/serve takes a port number, or stop", style::WARN);
+                    return;
+                };
+                port
+            }
+            None => 0,
+        };
+        if let Some(serving) = &self.serving {
+            say(&serving.url, PURPLE);
+            return;
+        }
+        if self.remote.is_some() {
+            say("this session is already driven from a page", FAINT);
+            return;
+        }
+        let started = crate::remote::start(
+            None,
+            port,
+            Arc::clone(&self.inbox),
+            crate::remote::Workspaces::default(),
+        )
+        .await;
+        let serving = match started {
+            Ok(serving) => serving,
+            Err(error) => {
+                say(&format!("{error:#}"), style::WARN);
+                return;
+            }
+        };
+        if serving.local_only {
+            let port = serving
+                .url
+                .split(':')
+                .nth(2)
+                .and_then(|rest| rest.split('/').next());
+            if let Some(port) = port {
+                say(
+                    &format!("from another machine: ssh -L {port}:localhost:{port} <this machine>"),
+                    FAINT,
+                );
+            }
+        }
+        say(&format!("remote: {}", serving.url), PURPLE);
+        say(
+            "the token is the only key: anyone who has it can drive this session",
+            FAINT,
+        );
+        if self.approvals.starts_with("allow-all") {
+            say(
+                "approvals are off, so a page may run anything the sandbox allows",
+                style::WARN,
+            );
+        }
+        let hub = Arc::clone(&serving.hub);
+        self.late.set(Some(Arc::clone(&hub)));
+        self.remote = Some(Arc::clone(&hub));
+        self.describe_to(&hub);
+        hub.set_busy(false);
+        self.serving = Some(serving);
+    }
+
+    fn stop_serving(&mut self) {
+        self.late.set(None);
+        self.late.page_turn(false);
+        self.remote = None;
+        if let Some(serving) = self.serving.take() {
+            serving.stop();
+        }
     }
 
     fn describe_to(&self, hub: &crate::remote::Hub) {
@@ -830,6 +1003,7 @@ where
             }
             Input::Log => println!("{}", style::paint(MUTED, &self.log_path)),
             Input::Schedules => print!("{}", self.schedules()),
+            Input::Serve(argument) => self.serve_here(argument.as_deref()).await,
             Input::Unknown(name) => println!(
                 "{}",
                 style::paint(FAINT, &format!("no such command: /{name}. Try /help."))
@@ -1641,6 +1815,10 @@ fn help() -> String {
             "/schedules",
             "reminders and recurring messages in this workspace",
         ),
+        (
+            "/serve",
+            "drive this session from a page too; /serve <port> picks the port, /serve stop ends it",
+        ),
         ("/exit", "leave; Ctrl-D does the same"),
     ];
     let mut block = String::new();
@@ -1707,6 +1885,13 @@ mod tests {
             join_continuations("thread panicked\nstack backtrace:"),
             "thread panicked\nstack backtrace:"
         );
+    }
+
+    #[test]
+    fn serve_takes_nothing_a_port_or_stop() {
+        assert_eq!(parse("/serve"), Input::Serve(None));
+        assert_eq!(parse("/serve 8080"), Input::Serve(Some("8080".into())));
+        assert_eq!(parse("/serve stop"), Input::Serve(Some("stop".into())));
     }
 
     #[test]

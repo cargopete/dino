@@ -51,17 +51,17 @@ use super::SubmitError;
 use super::Submitted;
 use super::Subscription;
 
-type Body = UnsyncBoxBody<Bytes, Infallible>;
+pub(super) type Body = UnsyncBoxBody<Bytes, Infallible>;
 
 const INDEX_HTML: &str = include_str!("page/index.html");
 const APP_JS: &str = include_str!("page/app.js");
 const APP_CSS: &str = include_str!("page/app.css");
 
 /// Connections open at once, streams included. More are dropped unanswered.
-const MAX_CONNECTIONS: usize = 32;
+pub(super) const MAX_CONNECTIONS: usize = 32;
 
 /// How long a client has to send its request headers.
-const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a client has to send a request body it announced.
 const BODY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,14 +70,14 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BODY_BYTES: usize = 64 * 1_024;
 
 /// The most a request's headers and buffered input may weigh.
-const MAX_BUFFER_BYTES: usize = 16 * 1_024;
+pub(super) const MAX_BUFFER_BYTES: usize = 16 * 1_024;
 
 /// A stream with nothing to say sends a comment this often, so a tunnel that
 /// drops idle connections does not, and a dead client is noticed.
 const KEEPALIVE: Duration = Duration::from_secs(20);
 
 /// What a refused client waits before it is told.
-const REFUSAL_DELAY: Duration = Duration::from_millis(250);
+pub(super) const REFUSAL_DELAY: Duration = Duration::from_millis(250);
 
 /// What a browser may do with the page: load its own two files and talk to the
 /// server it came from. Nothing inline, nothing from elsewhere, no framing.
@@ -177,7 +177,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-fn authorised(headers: &HeaderMap, token: &str) -> bool {
+pub(super) fn authorised(headers: &HeaderMap, token: &str) -> bool {
     headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -220,7 +220,11 @@ pub async fn serve(listener: TcpListener, hub: Arc<Hub>, token: String) -> Infal
     }
 }
 
-fn respond(status: StatusCode, content_type: &str, body: impl Into<Bytes>) -> Response<Body> {
+pub(super) fn respond(
+    status: StatusCode,
+    content_type: &str,
+    body: impl Into<Bytes>,
+) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, content_type)
@@ -233,7 +237,7 @@ fn respond(status: StatusCode, content_type: &str, body: impl Into<Bytes>) -> Re
         .expect("fixed headers are valid")
 }
 
-fn status(code: StatusCode) -> Response<Body> {
+pub(super) fn status(code: StatusCode) -> Response<Body> {
     respond(
         code,
         "text/plain; charset=utf-8",
@@ -241,7 +245,7 @@ fn status(code: StatusCode) -> Response<Body> {
     )
 }
 
-fn json(code: StatusCode, value: &serde_json::Value) -> Response<Body> {
+pub(super) fn json(code: StatusCode, value: &serde_json::Value) -> Response<Body> {
     respond(code, "application/json", value.to_string())
 }
 

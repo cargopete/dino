@@ -49,6 +49,7 @@ fn meta() -> SessionMeta {
         approval_mode: "read-only (mutations are refused)".into(),
         sandbox: "workspace (seatbelt: writes confined, network denied)".into(),
         max_model_turns: 32,
+        pid: None,
     }
 }
 

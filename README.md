@@ -633,7 +633,10 @@ Inside a session: `/help`, `/status`, `/log`, `/exit` (or a bare `exit` or
 new conversation, since history does not move between models; add `--default`
 to start later sessions on it too), `/resume [id]` to list or continue a
 saved one, `/diff` for the working tree, `/schedules` for the workspace's
-schedules and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
+schedules, `/serve [port]` to drive the session from a page as well (as
+`dino serve` does, on the Tailscale or loopback address; `/serve stop` ends it;
+a turn a page starts asks its approvals there, one you start asks at the
+terminal) and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost
 when it ends, along with today's total in UTC, which every session appends to
 `$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).

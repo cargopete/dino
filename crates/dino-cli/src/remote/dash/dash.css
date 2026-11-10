@@ -1,0 +1,35 @@
+:root { color-scheme: dark light; --bg: #14121a; --fg: #e8e4f0; --muted: #8b86a0; --line: #2c2838; --ember: #ff8a4c; --ok: #6fcf97; --warn: #f2c94c; --bad: #eb5757; }
+@media (prefers-color-scheme: light) { :root { --bg: #fbfaf8; --fg: #1d1a24; --muted: #6a657a; --line: #dedad2; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+header { display: flex; gap: .75rem; align-items: baseline; padding: .6rem 1rem; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
+header strong { color: var(--ember); }
+#summary { color: var(--muted); }
+#summary.bad { color: var(--bad); }
+main { display: grid; grid-template-columns: repeat(auto-fill, minmax(26rem, 1fr)); gap: .75rem; padding: .75rem 1rem; }
+.card { border: 1px solid var(--line); border-left-width: 4px; border-radius: 6px; padding: .6rem .8rem; min-width: 0; }
+.card.stuck, .card.failed { border-left-color: var(--bad); }
+.card.needs_you { border-left-color: var(--warn); }
+.card.working { border-left-color: var(--ok); }
+.card.idle, .card.done { border-left-color: var(--line); opacity: .8; }
+.card.gone { border-left-color: var(--bad); opacity: .8; }
+.top { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+.pill { font-weight: bold; text-transform: uppercase; font-size: .8em; letter-spacing: .04em; }
+.stuck .pill, .failed .pill, .gone .pill { color: var(--bad); }
+.needs_you .pill { color: var(--warn); }
+.working .pill { color: var(--ok); }
+.idle .pill, .done .pill { color: var(--muted); }
+.where { color: var(--ember); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.age { color: var(--muted); }
+.doing { margin: .35rem 0; overflow-wrap: anywhere; }
+.task { color: var(--muted); overflow-wrap: anywhere; }
+.problem { color: var(--bad); margin: .2rem 0; }
+.meter { height: 3px; background: var(--line); margin: .5rem 0 .25rem; }
+.meter div { height: 100%; background: var(--ember); }
+.facts { color: var(--muted); font-size: .9em; }
+.steps { margin: .4rem 0 0; padding: 0; list-style: none; font-size: .9em; color: var(--muted); }
+.steps li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.steps .err { color: var(--bad); }
+.notes { margin-top: .3rem; font-style: italic; color: var(--muted); font-size: .9em; }
+#blurb { margin: 0; padding: .6rem 1rem; color: var(--muted); font-style: italic; border-bottom: 1px solid var(--line); }
+.empty { color: var(--muted); padding: 1rem; }

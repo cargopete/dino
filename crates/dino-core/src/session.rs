@@ -136,6 +136,11 @@ pub struct SessionMeta {
     /// tell from the log that they did.
     pub sandbox: String,
     pub max_model_turns: u32,
+    /// The process writing the log, so a reader can tell a session that is
+    /// quiet from one that is gone. Absent in older logs and in logs written
+    /// by something other than a session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +333,7 @@ mod tests {
             approval_mode: "ask".into(),
             sandbox: "none".into(),
             max_model_turns: 1,
+            pid: None,
         }
     }
 
