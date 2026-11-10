@@ -12,6 +12,7 @@ const form = document.getElementById('form');
 const text = document.getElementById('text');
 const cancel = document.getElementById('cancel');
 const sessionsPanel = document.getElementById('sessions');
+const contextPanel = document.getElementById('context');
 const workspacesPanel = document.getElementById('workspaces');
 const tracePanel = document.getElementById('trace');
 const viewButtons = document.querySelectorAll('#views button');
@@ -294,6 +295,7 @@ function showView(name) {
   log.hidden = name !== 'chat';
   form.hidden = name !== 'chat';
   sessionsPanel.hidden = name !== 'sessions';
+  contextPanel.hidden = name !== 'context';
   workspacesPanel.hidden = name !== 'workspaces';
   tracePanel.hidden = name !== 'trace';
   refreshView();
@@ -301,6 +303,7 @@ function showView(name) {
 
 function refreshView() {
   if (view === 'sessions') loadSessions();
+  if (view === 'context') loadContext();
   if (view === 'workspaces') loadWorkspaces();
 }
 
@@ -344,6 +347,40 @@ async function loadSessions() {
   }
   if (!listed.length) rows.push(el('div', 'hint', 'no sessions saved in this workspace'));
   sessionsPanel.replaceChildren(...rows);
+}
+
+function tokens(n) {
+  if (n < 1000) return String(n);
+  if (n < 1000000) return (n / 1000).toFixed(1) + 'k';
+  return (n / 1000000).toFixed(1) + 'M';
+}
+
+async function loadContext() {
+  let report;
+  try {
+    report = await get('/api/context');
+  } catch (error) {
+    contextPanel.replaceChildren(el('div', 'err', 'could not read the context: ' + error.message));
+    return;
+  }
+  const estimated = report.groups.flatMap((group) => group.rows).reduce((sum, row) => sum + row.tokens, 0);
+  const used = report.reported == null ? estimated : report.reported;
+  let headline = report.reported == null ? 'about ' + tokens(estimated) + ' tokens, estimated' : tokens(report.reported) + ' tokens, as the provider counted the last request';
+  if (report.window) headline += ' · window ' + tokens(report.window) + ' · free ' + tokens(Math.max(0, report.window - used));
+  const rows = [el('div', 'hint', headline)];
+  for (const group of report.groups) {
+    rows.push(el('div', 'sub', group.name));
+    for (const row of group.rows) {
+      const item = el('div', 'row-item');
+      item.append(el('span', 'what', row.label));
+      const figure = row.tokens || row.note ? tokens(row.tokens) : '';
+      item.append(el('span', 'meta', [figure, row.note].filter(Boolean).join(' · ')));
+      rows.push(item);
+    }
+  }
+  if (report.marks.length) rows.push(el('div', 'hint', report.marks.join(' · ')));
+  rows.push(el('div', 'hint', 'Each part is estimated at 4 bytes a token. Updated when a submission ends.'));
+  contextPanel.replaceChildren(...rows);
 }
 
 async function loadWorkspaces() {

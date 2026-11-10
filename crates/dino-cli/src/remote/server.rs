@@ -277,6 +277,10 @@ async fn route(request: Request<Incoming>, shared: &Shared, peer: SocketAddr) ->
         ),
         (Method::POST, "/api/approve") => approve(request, hub).await,
         (Method::GET, "/api/sessions") => sessions(hub),
+        (Method::GET, "/api/context") => match hub.context() {
+            Some(report) => json(StatusCode::OK, &report),
+            None => status(StatusCode::NOT_FOUND),
+        },
         (Method::GET, "/api/workspaces") => json(
             StatusCode::OK,
             &serde_json::json!({ "workspaces": hub.workspaces() }),
@@ -287,7 +291,7 @@ async fn route(request: Request<Incoming>, shared: &Shared, peer: SocketAddr) ->
         (
             _,
             "/api/events" | "/api/prompt" | "/api/cancel" | "/api/approve" | "/api/sessions"
-            | "/api/workspaces" | "/api/trace" | "/api/resume" | "/api/workspace",
+            | "/api/context" | "/api/workspaces" | "/api/trace" | "/api/resume" | "/api/workspace",
         ) => status(StatusCode::METHOD_NOT_ALLOWED),
         _ => status(StatusCode::NOT_FOUND),
     }
@@ -636,6 +640,22 @@ mod tests {
         assert_eq!(call(&server, "GET", "/api/nothing", token, "").await.0, 404);
         assert_eq!(call(&server, "GET", "/api/prompt", token, "").await.0, 405);
         assert_eq!(call(&server, "POST", "/", None, "").await.0, 404);
+    }
+
+    #[tokio::test]
+    async fn the_context_is_served_once_the_session_has_reported_it() {
+        let server = running().await;
+        let token = Some(server.token.as_str());
+        assert_eq!(call(&server, "GET", "/api/context", token, "").await.0, 404);
+
+        server
+            .hub
+            .set_context(serde_json::json!({ "window": 200_000, "groups": [] }));
+        let (code, _, body) = call(&server, "GET", "/api/context", token, "").await;
+
+        assert_eq!(code, 200);
+        assert!(body.contains(r#""window":200000"#), "{body}");
+        assert_eq!(call(&server, "GET", "/api/context", None, "").await.0, 401);
     }
 
     #[tokio::test]

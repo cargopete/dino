@@ -2,11 +2,15 @@
 
 mod approve;
 mod calls;
+mod commands;
 mod config;
+mod context;
 mod diff;
 mod evals;
+mod expand;
 mod greeting;
 mod handover;
+mod keys;
 mod listen;
 mod markdown;
 mod plugin;
@@ -18,6 +22,7 @@ mod render;
 mod replay;
 mod session;
 mod settings;
+mod shell;
 mod spend;
 mod spinner;
 mod style;
@@ -96,7 +101,7 @@ enum Command {
         json: bool,
     },
     /// Print the system prompt a run would send, so its cost is inspectable.
-    Prompt(PromptArgs),
+    Prompt(PrintPromptArgs),
     /// Run one request and exit. For scripts, CI and evals.
     Run(RunArgs),
     /// Review uncommitted changes, or a branch against a base, without editing.
@@ -205,6 +210,16 @@ struct PromptArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct PrintPromptArgs {
+    #[command(flatten)]
+    args: PromptArgs,
+    /// Print an estimate of the tokens each part and each tool's schema takes
+    /// instead of the prompt.
+    #[arg(long)]
+    tokens: bool,
+}
+
+#[derive(Debug, clap::Args)]
 struct RunArgs {
     /// The request. Read from standard input when omitted.
     prompt: Option<String>,
@@ -278,8 +293,8 @@ fn dispatch() -> Result<ExitCode> {
             list_models(json)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Command::Prompt(args)) => {
-            print_prompt(&args)?;
+        Some(Command::Prompt(PrintPromptArgs { args, tokens })) => {
+            print_prompt(&args, tokens)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Run(args)) => on_runtime(run(args)),
@@ -361,7 +376,7 @@ fn models_table(profiles: &[dino_protocol::ModelProfile]) -> String {
     out
 }
 
-fn print_prompt(args: &PromptArgs) -> Result<()> {
+fn print_prompt(args: &PromptArgs, tokens: bool) -> Result<()> {
     let workspace = config::resolve_workspace(args.workspace.as_deref())?;
     // Resolve the model and preset the layered way a session does, so the
     // printed prompt is the one a run would send, not a default.
@@ -396,6 +411,16 @@ fn print_prompt(args: &PromptArgs) -> Result<()> {
         preset.name(),
         prompt.len()
     );
+    if tokens {
+        let parts = dino_core::prompt::prompt_parts(&context);
+        let report = context::Report {
+            window: profile.context_window_tokens,
+            groups: context::fixed(&parts, &tools.definitions()),
+            ..context::Report::default()
+        };
+        print!("{}", report.render());
+        return Ok(());
+    }
     println!("{prompt}");
     Ok(())
 }
@@ -609,6 +634,36 @@ fn skills(workspace: &Path) -> Vec<dino_core::skills::Skill> {
         found.push(skill);
     }
     found
+}
+
+/// The plugins' commands, then yours, then the workspace's, each shadowing
+/// the last; at a terminal, says what was shadowed or left out.
+fn custom_commands(workspace: &Path, announce: bool) -> commands::Commands {
+    let mut dirs: Vec<(commands::Source, PathBuf)> = plugin::active()
+        .iter()
+        .map(|plugin| {
+            (
+                commands::Source::Plugin(plugin.name().to_owned()),
+                plugin.commands_dir(),
+            )
+        })
+        .collect();
+    dirs.extend(settings::user_dir().map(|dir| (commands::Source::User, dir.join("commands"))));
+    dirs.push((
+        commands::Source::Workspace,
+        workspace.join(".dino").join("commands"),
+    ));
+    let loaded = commands::load(&dirs, session::is_builtin);
+    if announce {
+        for note in &loaded.notes {
+            eprintln!(
+                "{}",
+                style::paint(style::WARN, &format!("commands: {note}"))
+            );
+        }
+    }
+    loaded.commands.register();
+    loaded.commands
 }
 
 /// The user's memory file and this workspace's, beside the user config.
@@ -1067,6 +1122,30 @@ fn schedules(common: &CommonArgs) -> Result<(session::Due, Box<dyn ToolRuntime>)
 
 /// Runs one session, and returns the workspace a page asked to move to, if one
 /// did. A move starts a new session there, with that workspace's schedules.
+/// Builds the model session for a new conversation on another model, or the
+/// same one afresh.
+fn session_factory(prepared: &Prepared) -> session::SessionFactory<Box<dyn ModelSession>> {
+    let base = prepared.settings.clone();
+    let context = prepared.context.clone();
+    let definitions = prepared.definitions.clone();
+    let spending = prepared.spending.clone();
+    Box::new(move |key| {
+        let mut settings = base.clone();
+        settings.profile = config::resolve_profile(Some(key))?;
+        // Switching to a model without the configured effort is not a refusal.
+        settings.reasoning_effort = settings
+            .reasoning_effort
+            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
+        let name = settings.profile.display_name.clone();
+        // The prompt names the model, so a new conversation gets its own.
+        let mut context = context.clone();
+        context.model = Some(key.to_owned());
+        let prompt = system_prompt(&context);
+        let model = metered(&settings, prompt, definitions.clone(), &spending)?;
+        Ok((model, name))
+    })
+}
+
 async fn drive(
     common: CommonArgs,
     remote: Option<&mut Remote>,
@@ -1092,28 +1171,11 @@ async fn drive(
             )
         );
     }
-    let base = prepared.settings.clone();
-    let context = prepared.context.clone();
-    let definitions = prepared.definitions.clone();
-    let spending = prepared.spending.clone();
-    let factory: session::SessionFactory<Box<dyn ModelSession>> = Box::new(move |key| {
-        let mut settings = base.clone();
-        settings.profile = config::resolve_profile(Some(key))?;
-        // Switching to a model without the configured effort is not a refusal.
-        settings.reasoning_effort = settings
-            .reasoning_effort
-            .filter(|effort| config::check_effort(&settings.profile, *effort).is_ok());
-        let name = settings.profile.display_name.clone();
-        // The prompt names the model, so a new conversation gets its own.
-        let mut context = context.clone();
-        context.model = Some(key.to_owned());
-        let prompt = system_prompt(&context);
-        let model = metered(&settings, prompt, definitions.clone(), &spending)?;
-        Ok((model, name))
-    });
+    let factory = session_factory(&prepared);
     let inbox = hub
         .as_ref()
         .map_or_else(dino_core::Inbox::default, |hub| hub.inbox());
+    let commands = custom_commands(&prepared.settings.workspace, hub.is_none());
     let mut session = Session {
         agent: prepared.agent.with_inbox(std::sync::Arc::clone(&inbox)),
         inbox,
@@ -1155,6 +1217,9 @@ async fn drive(
         ),
         remote: hub,
         schedules,
+        commands,
+        prompt: prepared.context,
+        ran: Vec::new(),
     };
     session.note_conversation();
     let moving = if let Some(remote) = remote {
