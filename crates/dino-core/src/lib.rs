@@ -7,6 +7,7 @@
 
 pub mod approval;
 pub mod blocker;
+pub mod checkpoint;
 pub mod git;
 pub mod loops;
 pub mod memory;

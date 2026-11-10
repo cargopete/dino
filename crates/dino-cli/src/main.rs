@@ -16,6 +16,7 @@ mod recall;
 mod remote;
 mod render;
 mod replay;
+mod rewind;
 mod session;
 mod settings;
 mod spend;
@@ -181,6 +182,9 @@ struct CommonArgs {
     /// in this workspace.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
+    /// With --resume, carry on in a copy and leave the original as it was.
+    #[arg(long, requires = "resume")]
+    fork: bool,
     /// The tools offered and the limits started under: standard, minimal or
     /// review. Default standard.
     #[arg(long, value_enum)]
@@ -823,20 +827,7 @@ fn prepare(
     };
     let log = JsonlSessionLog::create(&settings.log_path, meta.clone())?;
 
-    // Restoring before the first turn, so the conversation continues rather than
-    // starting. A mismatch refuses here rather than confusing the provider later.
-    let state_path = match resume_from(common.resume.as_deref(), &settings.workspace)? {
-        Some((id, path)) => {
-            let state = resume::load(&path)?;
-            model.restore_state(&state)?;
-            eprintln!(
-                "{}",
-                style::paint(style::FAINT, &format!("resumed session {id}"))
-            );
-            path
-        }
-        None => resume::state_path(&settings.workspace, session_id.as_str()),
-    };
+    let state_path = conversation(common, &settings.workspace, &session_id, model.as_mut())?;
 
     let renderer = Renderer::new(settings.show_reasoning);
     let usage = renderer.usage_handle();
@@ -1147,6 +1138,7 @@ async fn drive(
         name: resume::label(&prepared.state_path)
             .ok()
             .and_then(|label| label.name),
+        rewinding: None,
         state_path: prepared.state_path,
         greeting: greeting::shows(
             prepared.settings.greeting,
@@ -1442,6 +1434,39 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
         StopReason::Cancelled => ExitCode::from(130),
         _ => ExitCode::FAILURE,
     })
+}
+
+/// Where this session's conversation is saved, after restoring the one
+/// `--resume` names, or a copy of it with `--fork`.
+///
+/// Restoring before the first turn, so the conversation continues rather than
+/// starting. A mismatch refuses here rather than confusing the provider later.
+fn conversation(
+    common: &CommonArgs,
+    workspace: &Path,
+    session_id: &SessionId,
+    model: &mut dyn ModelSession,
+) -> Result<PathBuf> {
+    let _ = dino_core::checkpoint::prune(workspace, dino_core::checkpoint::KEPT_FOR);
+    let Some((id, path)) = resume_from(common.resume.as_deref(), workspace)? else {
+        return Ok(resume::state_path(workspace, session_id.as_str()));
+    };
+    let state = resume::load(&path)?;
+    model.restore_state(&state)?;
+    if !common.fork {
+        eprintln!(
+            "{}",
+            style::paint(style::FAINT, &format!("resumed session {id}"))
+        );
+        return Ok(path);
+    }
+    let child = session_id.as_str();
+    resume::fork(workspace, &id, child, &state, None)?;
+    eprintln!(
+        "{}",
+        style::paint(style::FAINT, &format!("forked session {id} as {child}"))
+    );
+    Ok(resume::state_path(workspace, child))
 }
 
 /// Resolves `--resume`, bare or named, into a state file.
