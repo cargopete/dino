@@ -30,6 +30,9 @@ pub struct Landlock {
     chosen: usize,
     /// Extra writable paths and outbound HTTPS, for fetching dependencies.
     fetch_writable: Vec<PathBuf>,
+    /// A linked worktree's git directories, and a target directory outside it.
+    outside_writable: Vec<PathBuf>,
+    target_dir: Option<PathBuf>,
     /// Credential paths that exist under the home directory, denied to reads.
     deny_read: Vec<PathBuf>,
     fetching: bool,
@@ -58,6 +61,23 @@ impl Landlock {
     /// As [`Landlock::new`], and [`SandboxError::Profile`] for a protected
     /// path that is absolute or climbs out with `..`.
     pub fn protecting(workspace: &Path, protected: &[PathBuf]) -> Result<Self, SandboxError> {
+        Self::building_in(workspace, protected, None)
+    }
+
+    /// As [`Landlock::protecting`], with Cargo building in `target_dir`, an
+    /// existing canonical directory that processes may then write.
+    ///
+    /// A linked worktree's `config.worktree` is writable here, where Seatbelt
+    /// denies it: Landlock cannot carve it out, and it is not restored.
+    ///
+    /// # Errors
+    ///
+    /// As [`Landlock::protecting`].
+    pub fn building_in(
+        workspace: &Path,
+        protected: &[PathBuf],
+        target_dir: Option<PathBuf>,
+    ) -> Result<Self, SandboxError> {
         let chosen = protected.len();
         let protected = restore::checked(&crate::with_executable_config(protected))?;
         let helper = find_helper()?;
@@ -75,6 +95,10 @@ impl Landlock {
             ))
         })?;
         let loopback = loopback_available(&helper);
+        let mut outside_writable = crate::LinkedWorktree::find(&writable)
+            .map(|linked| linked.writable())
+            .unwrap_or_default();
+        outside_writable.extend(target_dir.clone());
         Ok(Self {
             helper,
             writable,
@@ -82,6 +106,8 @@ impl Landlock {
             protected,
             chosen,
             fetch_writable: Vec::new(),
+            outside_writable,
+            target_dir,
             deny_read: credential_paths(),
             fetching: false,
             loopback,
@@ -155,16 +181,20 @@ impl Sandbox for Landlock {
         Some(&self.temp_dir)
     }
 
+    fn target_dir(&self) -> Option<&Path> {
+        self.target_dir.as_deref()
+    }
+
     fn wrap(&self, program: &str, arguments: &[String]) -> Result<WrappedCommand, SandboxError> {
         let writable = self
             .writable
             .to_str()
             .ok_or_else(|| SandboxError::Profile("workspace path is not valid UTF-8".to_owned()))?;
         let mut wrapped = vec!["--allow-write".to_owned(), writable.to_owned()];
-        for path in &self.fetch_writable {
-            let path = path
-                .to_str()
-                .ok_or_else(|| SandboxError::Profile("fetch path is not valid UTF-8".to_owned()))?;
+        for path in self.outside_writable.iter().chain(&self.fetch_writable) {
+            let path = path.to_str().ok_or_else(|| {
+                SandboxError::Profile("writable path is not valid UTF-8".to_owned())
+            })?;
             wrapped.extend(["--allow-write".to_owned(), path.to_owned()]);
         }
         if self.fetching {

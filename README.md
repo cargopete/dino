@@ -56,7 +56,7 @@ CI and evals.
   suite proves is that the adapters agree, not that a provider accepts what they
   send. The Qwen adapter has since been driven against vLLM serving Qwen3.8 27B;
   see below.
-- **Fourteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
+- **Fifteen tools.** `read` returns bounded, numbered, fingerprinted ranges.
   `search` is literal and ignore-aware with explicit totals, over the workspace,
   a directory or one file. `list` shows what is in the workspace through the
   same ignore rules, with `all` to see what those rules hide. `apply_patch` replaces one exact occurrence and refuses an
@@ -84,7 +84,24 @@ CI and evals.
   and CI (`pr_checks`, `checks_wait` until no check is pending, `run_list`,
   `run_view` with `log_failed`) through a fixed set of read-only `gh` commands,
   run by `dino` rather than by a confined process, and is offered only where
-  `gh` is installed. `web_fetch` reads one URL as text, HTML rendered, and asks per
+  `gh` is installed. `code` asks rust-analyzer for a definition, the
+  references, the hover text (type, signature and docs), the implementations,
+  or the workspace's items matching a name, given a path, a line and the
+  identifier on it. It answers as `search` does, `path:line:col` with the
+  line's text, at most 100 locations and the total, and unlike `search` it
+  follows re-exports and trait methods and tells two items of one name apart.
+  One rust-analyzer is started on the first call, inside the sandbox with
+  `checkOnSave` off, and killed when the session ends; a call waits up to 90
+  seconds for it to finish indexing and says so when it had not. Its own file
+  watcher reports an edit some time after it lands, so each call first sends it
+  every Rust file changed since the last. It is classed read-only, but loading
+  a workspace runs its build scripts and procedural macros, confined as
+  `cargo check` is. It is offered only where rust-analyzer runs: through rustup
+  under the channel a `rust-toolchain.toml` pins, or the first on PATH that
+  answers `--version`, since the rustup proxy is on PATH whether or not the
+  component is installed. It has run under Seatbelt, not yet under Landlock.
+  Evals leave it out unless asked for with `dino eval --code`, and whether it
+  saves reads on the hard corpus has not been measured. `web_fetch` reads one URL as text, HTML rendered, and asks per
   host, because a URL can carry workspace text out; a redirect to another host
   is refused rather than followed past that approval.
 - **Approval enforced below the model.** Every call is classified read-only,
@@ -113,7 +130,7 @@ CI and evals.
   what the agent did an hour ago and where selection and copying still work.
   Each call is one line, `✓ $ cargo test · 7 passed`: an icon for its kind, a
   mark for running, done, failed or refused (by you, or blocked by policy), and
-  a run of reads, lists and searches folded into one `explored` line. The line
+  a run of reads, lists, searches and `code` lookups folded into one `explored` line. The line
   is redrawn in place only while it is still the last one written. Beneath it,
   while a turn runs, one status row gives the model, the context used, the
   submission's tokens with the cached share, the session's cost at list price,
@@ -126,6 +143,20 @@ CI and evals.
   that no tool result came after is sent when the turn ends, and anything typed
   but not entered starts the next prompt. A command entered during a turn, and
   anything after it, waits for the turn to end and then runs on its own.
+- **A status line of your own.** `status_line = ["sh", "-c", "..."]` in the
+  user file runs a command with the session as JSON on standard input: the
+  model, the workspace, its git branch (read from `HEAD`), the context used and
+  the window, the submission's tokens, the session's cost, what the turn is
+  doing and for how long, and how many messages are queued. Nothing typed or
+  said is in it. Its first line, with escape sequences and control characters
+  taken out and cut to the terminal's width, takes the place of the built-in
+  row while a turn runs, refreshed at most once a second on a task of its own,
+  and is printed above each prompt, which a slow one holds back by up to half a
+  second. A run that fails, prints nothing or takes
+  more than 500 ms leaves the built-in row in place, and prints nothing at the
+  prompt. It runs outside the sandbox, which is why only the user file may set
+  it, and under `--plain` it does not run. Tested with `sh` scripts standing in
+  for one; not yet tried in a live session.
 - **Resumable sessions.** `dino --resume` continues the most recent conversation
   in the workspace, or a named one. What is persisted is the adapter's own native
   history rather than the session log, because the log holds normalised events
@@ -200,6 +231,27 @@ CI and evals.
   harness builds: the task, the record, why the last session ended, `git status`
   and the current `cargo check`. RFC-0018; not yet measured against the plain
   loop.
+- **Subagents.** `agent` hands a bounded job to a fresh session in the same
+  process and returns only its final message, with a line giving its turns,
+  tokens, cost at list price, model and session, so a sweep of forty files
+  costs the conversation one result rather than forty reads. The child gets the
+  system prompt and instructions, none of the conversation, and no `agent` tool
+  of its own. Its `preset` is `review` unless the call says otherwise: reading
+  only, and read-only whatever the session allows. A `minimal` or `standard`
+  child is asked about first, as an edit is, and runs under the session's
+  approval mode and plan mode with none of its session grants, so it asks again
+  for what it needs, one child at a time. `explore_model` in the user file puts
+  a `review` child on a cheaper model, since #200 found reading held up on one;
+  a call may name another model only from those configured (`model`,
+  `explore_model`, `review_model`, `fallback`). Turns default to the preset's
+  and never pass the session's. Consecutive `agent` calls in one response run
+  at once, and the status row gives each child's turn. A child starts no MCP
+  server, has no schedules or finish checks, and is priced into the session's
+  meter and budget. Its log is `.dino/sessions/<parent>/<parent>.<n>.jsonl`,
+  named in the result; `dino trace` shows `↳ dino trace <id>` under the call,
+  and that id traces the child. Only `standard` offers the tool, and evals never
+  do. Tested against scripted models only: not yet driven against a live one,
+  and not measured on the corpus.
 - **Driving a session from another device.** `dino serve` runs a session with
   no terminal and serves a small page: watch the stream, send a prompt, stop the
   run and answer approvals from a phone. It listens only on loopback or a
@@ -210,6 +262,24 @@ CI and evals.
   the session to another workspace, but only one listed under `workspaces` in
   the user file or recently used. RFC-0020; the page has not been run in a
   browser.
+- **A session in a worktree of its own.** `dino --worktree [name]`, or `dino
+  run --worktree`, makes `.dino/worktrees/<name>` in the main checkout on a new
+  branch `dino/<name>` (`branch_prefix` in the user file changes the prefix)
+  from the commit the session started at, and runs there, in the same
+  subdirectory if it started in one; without a name it gets a generated one.
+  The banner says which worktree. `/worktree [name]` makes one and moves the
+  session into it, as a page's workspace move does: a new conversation there,
+  with the old one resumable where it was. When Dino exits, a worktree with no
+  change and no commit is removed with its branch, and its `.dino` with it, the
+  session log included; one with either is kept and its branch printed. A
+  worktree left by a killed process stays until `git worktree remove`. Cargo
+  builds in the main checkout's `target`, or in `CARGO_TARGET_DIR` if Dino's
+  own environment sets one, so a new worktree does not rebuild everything; two
+  sessions building at once wait on Cargo's lock. Approval rules and memory are
+  the main checkout's, for any linked worktree, since both are one repository.
+  `dino serve` and `dino review` refuse the flag. The worktree bookkeeping is
+  tested against real repositories; an interactive session in one, and
+  `/worktree`, have not been driven against a model.
 - **Reviews from GitHub.** `dino webhook` takes signed `pull_request`
   deliveries and reviews a pull request when it is marked ready, or opened
   ready, in a checkout of its head beside a clone you name, read-only, with the
@@ -264,9 +334,10 @@ CI and evals.
 - **Configuration, split by who wrote it.** `~/.config/dino/config.toml` for your
   defaults, `<workspace>/.dino/config.toml` for a project's. The second arrives
   with the repository, so it may set preferences and may **not** set `approvals`,
-  `sandbox`, `api_base`, `hooks` or `mcp`: two weaken a boundary, one redirects
-  where a credential is sent and two run commands. A project file that tries is an
-  error naming the file and the key. No file holds a credential at any layer.
+  `sandbox`, `api_base`, `hooks`, `mcp` or `status_line`: two weaken a boundary,
+  one redirects where a credential is sent and three run commands. A project
+  file that tries is an error naming the file and the key. No file holds a
+  credential at any layer.
 - **MCP, stdio only.** `[mcp.<name>]` in the user file starts a local server
   (`command`, plus `pass_env` naming variables to pass through, so no token is
   written into the file). Its tools appear as `mcp__<name>__<tool>` and ask like
@@ -307,6 +378,28 @@ CI and evals.
   a hook that exits 0 ran, which is not proof the message arrived, and a
   process killed before its task ends sends none. For Discord:
   `command = ["curl", "-sS", "--form-string", "content={message}", "https://discord.com/api/webhooks/ID/TOKEN"]`.
+- **Hooks around calls and messages.** A `before_call` hook runs once a call
+  is classified and before anyone is asked, with `{"call": ..., "action": ...}`
+  on standard input. `tool` limits it to one tool, and `program` to an `exec`
+  of that program, matched by file name, or a `shell` line whose first word it
+  is; `cd x && rm -rf y` starts with `cd`, so to police `shell`, match the tool
+  and read the line. Exit 0 hands the call on to the approval policy, exit 2
+  refuses it with what the hook printed as the reason the model is given, and
+  any other exit refuses it too, naming only the program. It can only refuse:
+  a call that would have asked still asks, and `--dangerously-allow-all` does
+  not get round it. An `after_call` hook gets the call and its result, and
+  what it prints is added to the result under `after_call`. A `prompt_submit`
+  hook gets `{"message": ...}` for each message sent, typed, from a page, from
+  a schedule or to `dino run`; what it prints goes to the model after the
+  message, exit 2 refuses the message with the hook's output shown to the
+  person, and any other failure is reported and the message goes anyway. These
+  three run inside the sandbox, for at most 60 seconds each. An
+  `awaiting_approval` hook runs outside the sandbox, as `task_end` does, once a
+  question has gone `ping_after_seconds` unanswered, with `{tool}` and
+  `{message}` in its arguments and `DINO_TOOL` and `DINO_MESSAGE`; the message
+  names the workspace and the tool, never the call's arguments, and the
+  question goes on waiting. It fires once per question. All four are tested
+  against stand-in tools, policies and approvers, not yet in a live session.
 - **Schedules.** In a session, `schedule_create`, `schedule_list`,
   `schedule_update` and `schedule_delete` set a message to be sent into this
   conversation later: once after a `delay` (`20m`, `1h30m`), once `at` a time
@@ -390,7 +483,9 @@ CI and evals.
   how the log's sufficiency gets tested. A case may carry hidden tests, laid
   over the workspace only after the run, and protected paths the model may not
   change. `--without <tool>` hides a tool as completely as if it had never been
-  built, which is how several of the findings below were obtained.
+  built, which is how several of the findings below were obtained. `--code`
+  adds the `code` tool, which evals otherwise leave out, and records that it
+  was asked for.
   `scripts/bench.sh` runs cases through `dino` on a self-hosted model and
   through Claude Code as a baseline, and `scripts/analyse-bench.py` mines the
   logs (see [evals/README.md](evals/README.md)).
@@ -438,6 +533,16 @@ after it, removing anything added beneath them, and the tool result names what
 it restored. That undoes a write rather than preventing it: until the process
 exits, what it wrote is there. `dino` says which kind of protection is in force
 when a session starts.
+
+A linked worktree's `.git` is a file naming a directory in the main checkout's
+`.git`, where its index, objects and refs live. In one, processes may also write
+that directory and the repository's `objects`, `refs` and `logs`, which is what
+`git add` and `git commit` need, but not its `config` or `hooks`. Seatbelt also
+refuses the worktree's `config.worktree`; Landlock cannot carve it out, so on
+Linux a process may write it, and git reads it only where the repository has
+`extensions.worktreeConfig` set. The Linux side of this has not been run. A
+`.git` file is believed only when the directory it names names the checkout
+back, so a checkout cannot grant itself somewhere else.
 
 Some paths are protected from processes whatever the configuration says:
 `.git/hooks`, `.git/config`, `.cargo/config.toml`, `rust-toolchain.toml`,
@@ -657,7 +762,7 @@ new conversation, since history does not move between models; add `--default`
 to start later sessions on it too), `/resume [id]` to list or continue a
 saved one, `/fork [name]` to carry on in a copy, `/rewind [n]` to go back to
 before a message, `/diff` for the working tree, `/schedules` for the workspace's
-schedules and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
+schedules, `/worktree [name]` to carry on in a git worktree of its own and `/cost` for requests, tokens and cost. Prices are list prices kept in the model profiles (`dino models --json`),
 cached input and cache writes at their own rates. A session says what it cost
 when it ends, along with today's total in UTC, which every session appends to
 `$XDG_STATE_HOME/dino/spend/<date>.jsonl` (`~/.local/state/dino` without it).
@@ -742,8 +847,8 @@ interactive session in colour opens with a small dinosaur; `greeting = false`
 in a config file turns it off, and `dino palette` shows both in your terminal.
 
 **What lands on disk.** `.dino/` in the workspace holds the session log, the
-resumable state, the input history, and any schedules with their delivery
-records. The log records what you typed; the state
+resumable state, the input history, any schedules with their delivery
+records, and the worktrees `--worktree` made. The log records what you typed; the state
 holds the conversation, and the conversation holds your source, because tool
 results are file contents. It is git-ignored and mode 0600, and it is worth
 knowing it is there.

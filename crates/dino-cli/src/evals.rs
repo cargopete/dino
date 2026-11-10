@@ -134,6 +134,10 @@ pub struct EvalArgs {
     /// each run; off by default, so records stay comparable.
     #[arg(long)]
     pub early_stop: bool,
+    /// Offer the `code` tool, where rust-analyzer can be run, which evals
+    /// otherwise leave out. Recorded with each run.
+    #[arg(long, conflicts_with = "harness")]
+    pub code: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -338,6 +342,7 @@ fn variant(args: &EvalArgs) -> dino_eval::Variant {
         score: args.score,
         review_model: args.review_model.clone(),
         early_stop: args.early_stop,
+        code: args.code,
     }
 }
 
@@ -350,7 +355,7 @@ fn header(
     scratch: &Path,
 ) -> String {
     format!(
-        "{model}{}{} · {cases} case(s){}{} · scratch {}",
+        "{model}{}{} · {cases} case(s){}{}{} · scratch {}",
         args.effort
             .map(|effort| format!(" · {effort} effort"))
             .unwrap_or_default(),
@@ -367,6 +372,7 @@ fn header(
         } else {
             ""
         },
+        if args.code { " · with code" } else { "" },
         scratch.display()
     )
 }
@@ -569,6 +575,8 @@ fn eval_settings(
         end_turn_hooks: Vec::new(),
         start_hooks: Vec::new(),
         task_end_hooks: Vec::new(),
+        call_hooks: config::CallHooks::default(),
+        status_line: None,
         verify: None,
         task_limits: crate::task::Limits::default(),
         compaction: config::Compaction::Manual,
@@ -592,6 +600,7 @@ fn eval_settings(
         fallback: Vec::new(),
         budget: None,
         review: None,
+        explore: None,
         preset: crate::preset::Preset::Standard,
     }
 }

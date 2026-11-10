@@ -1215,7 +1215,7 @@ struct ListOutput {
 
 /// Never walked into: git's own store, and other checkouts of the repository
 /// that would repeat it whole.
-const NOT_WALKED: [&str; 2] = [".git", ".claude/worktrees"];
+const NOT_WALKED: [&str; 3] = [".git", ".claude/worktrees", ".dino/worktrees"];
 
 /// Applies every edit to `text`, each matched against the text as it was.
 fn replace_all(text: &str, edits: &[Edit]) -> Result<String, ToolError> {
@@ -1544,6 +1544,7 @@ mod tests {
         workspace.write("src/lib.rs", "one\n");
         workspace.write(".git/HEAD", "ref: refs/heads/main\n");
         workspace.write(".claude/worktrees/agent-1/src/lib.rs", "one\n");
+        workspace.write(".dino/worktrees/fix/src/lib.rs", "one\n");
         workspace.write(".claude/settings.json", "{}\n");
         let tools = workspace.tools();
 
@@ -1568,7 +1569,7 @@ mod tests {
         );
         assert_eq!(
             everything["not_walked"],
-            json!([".claude/worktrees", ".git"])
+            json!([".claude/worktrees", ".dino/worktrees", ".git"])
         );
     }
 

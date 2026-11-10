@@ -1027,6 +1027,44 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_worktree_under_dino_is_checkpointed_on_its_own_and_not_from_main() {
+        let main = repository("linked");
+        sh(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "dino/look",
+                ".dino/worktrees/look",
+            ],
+        );
+        let linked = main.join(".dino/worktrees/look");
+        let index = std::fs::read(main.join(".git/index")).unwrap();
+
+        let first = begin(&linked, "w1", "edit").unwrap();
+        put(&linked, "kept.txt", "in the worktree\n");
+        end(&linked, "w1", first).unwrap();
+        let outer = begin(&main, "m1", "elsewhere").unwrap();
+        let files = Repo::open(&main)
+            .unwrap()
+            .files(&format!("refs/dino/checkpoints/m1/{outer}"))
+            .unwrap();
+        assert!(
+            files.keys().all(|path| !path.starts_with(".dino/")),
+            "{files:?}"
+        );
+
+        let rewound = rewind_files(&linked, "w1", first).unwrap();
+        assert_eq!(rewound.plan.restore, ["kept.txt"]);
+        assert_eq!(read(&linked, "kept.txt").as_deref(), Some("kept\n"));
+        assert_eq!(std::fs::read(main.join(".git/index")).unwrap(), index);
+        assert_eq!(sh(&linked, &["status", "--porcelain"]), "");
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
     fn checkpoints_are_truncated_copied_and_pruned_with_their_conversations() {
         let root = repository("keep");
         for prompt in ["one", "two", "three"] {
