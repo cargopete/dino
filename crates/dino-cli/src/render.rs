@@ -803,6 +803,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             }
         }),
         "web_fetch" => argument_string(&call.arguments, "url"),
+        "code" => Some(calls::code_subject(&call.arguments)),
         "schedule_create" | "schedule_update" => {
             let when = ["delay", "at", "every", "daily", "weekly", "cron"]
                 .into_iter()

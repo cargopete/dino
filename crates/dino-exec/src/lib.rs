@@ -5,10 +5,12 @@
 //! three could come to differ.
 
 mod background;
+mod code;
 mod escalation;
 mod exec;
 mod github;
 mod hooks;
+mod lsp;
 mod mcp;
 mod packages;
 pub mod process;
@@ -20,6 +22,8 @@ mod verify;
 mod web;
 
 pub use crate::background::BackgroundTool;
+pub use crate::code::CodeLimits;
+pub use crate::code::CodeTool;
 pub use crate::exec::ExecLimits;
 pub use crate::exec::ExecTool;
 pub use crate::github::GithubLimits;
