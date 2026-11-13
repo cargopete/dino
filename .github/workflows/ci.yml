@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: never
   # The commands the check job runs live in yatr.toml, so `yatr ci` locally is
   # the same gate.
-  YATR_VERSION: "1.1.1"
+  YATR_VERSION: "1.2.0"
 
 jobs:
   check:
