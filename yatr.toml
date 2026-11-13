@@ -1,0 +1,54 @@
+# yatr - https://github.com/cargopete/yatr
+#
+# CI's check job calls these tasks by name, so `yatr ci` locally is the same gate.
+
+[settings]
+cache = true
+
+[tasks.fmt]
+desc = "Format the tree"
+run = ["cargo fmt --all"]
+no_cache = true
+
+[tasks.fmt-check]
+desc = "Fail if the tree is unformatted (CI: check)"
+run = ["cargo fmt --all --check"]
+sources = ["crates/**/*.rs"]
+
+[tasks.lint]
+desc = "Clippy with warnings denied (CI: check)"
+run = ["cargo clippy --workspace --all-targets -- -D warnings"]
+sources = ["crates/**", "Cargo.toml", "Cargo.lock", "clippy.toml"]
+
+[tasks.build]
+desc = "Debug build of every crate (CI: check)"
+run = ["cargo build --workspace"]
+sources = ["crates/**", "Cargo.toml", "Cargo.lock"]
+
+# The sandbox tests need dino-confine beside the test binaries, which
+# `cargo test` alone does not guarantee.
+[tasks.test]
+desc = "The test suite (CI: check)"
+depends = ["build"]
+run = ["cargo test --workspace"]
+sources = ["crates/**", "evals/**", "examples/**", "Cargo.toml", "Cargo.lock"]
+watch = ["crates/**/*.rs"]
+
+[tasks.release]
+desc = "Release build, the binary scripts/bench.sh expects"
+run = ["cargo build --workspace --release"]
+sources = ["crates/**", "Cargo.toml", "Cargo.lock"]
+
+[tasks.install-check]
+desc = "cargo install delivers both dino and dino-confine (CI: installed)"
+shell = true
+run = [
+    "cargo install --path crates/dino-cli --root target/install-check --locked --force",
+    "test -x target/install-check/bin/dino && test -x target/install-check/bin/dino-confine",
+]
+no_cache = true
+
+[tasks.ci]
+desc = "What the CI check job runs: fmt-check, lint, build, test"
+depends = ["fmt-check", "lint", "test"]
+run = []

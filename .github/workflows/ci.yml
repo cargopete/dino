@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: never
+  # The commands the check job runs live in yatr.toml, so `yatr ci` locally is
+  # the same gate.
+  YATR_VERSION: "1.1.0"
 
 jobs:
   check:
@@ -24,12 +27,24 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        # RUSTFLAGS cleared so yatr does not inherit this project's flags.
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
+      - run: yatr fmt-check
+      - run: yatr lint
       # The sandbox tests need the dino-confine helper beside the test binaries,
       # and `cargo test` does not guarantee a bin from another crate is built.
-      - run: cargo build --workspace
-      - run: cargo test --workspace
+      - run: yatr build
+      - run: yatr test
 
   # Installing is how anyone but this repository gets a `dino`, and the sandbox
   # helper has to arrive with it. It did not, once: `dino-confine` lived in its
