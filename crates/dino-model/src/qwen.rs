@@ -181,7 +181,10 @@ impl QwenSession {
             if response.status().is_success() {
                 return Ok(response);
             }
-            let error = crate::http_error("Qwen endpoint", response).await;
+            // The chat adapter serves other providers too; an outage is theirs to be named for.
+            let provider = crate::hosted_endpoint(&self.config.profile.key)
+                .map_or("Qwen endpoint", |hosted| hosted.provider);
+            let error = crate::http_error(provider, response).await;
             match error {
                 ModelError::Http { status, ref body, .. } if refuses_account(status, body) => {
                     Err(ModelError::Account(error.to_string()))
@@ -2080,6 +2083,28 @@ mod tests {
             "{error}"
         );
         assert_eq!(served, 1);
+    }
+
+    #[tokio::test]
+    async fn an_error_names_the_provider_the_profile_is_served_by() {
+        let (base, server) = serve_in_turn(vec![status(
+            "400 Bad Request",
+            r#"{"error":{"message":"invalid tool schema"}}"#,
+        )])
+        .await;
+        let kimi = crate::builtin_profile("kimi-k3.1-pro").unwrap();
+        let error = quick_retries_with(base, kimi)
+            .next(TurnInput::User {
+                content: "hi".into(),
+            })
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().starts_with("Moonshot returned 400"),
+            "{error}"
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
