@@ -485,6 +485,8 @@ pub const DEFAULT_PROFILE: &str = "kimi-k3.1-pro";
 /// do not take the Qwen endpoint, and the variable that holds its key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostedEndpoint {
+    /// Who serves it, as an error names them.
+    pub provider: &'static str,
     pub api_base: &'static str,
     /// Absent for a server on this machine, which takes no key.
     pub key_variable: Option<&'static str>,
@@ -492,13 +494,18 @@ pub struct HostedEndpoint {
 
 #[must_use]
 pub fn hosted_endpoint(key: &str) -> Option<HostedEndpoint> {
-    let (api_base, key_variable) = match key {
-        "kimi-k3.1-pro" => ("https://api.moonshot.ai/v1", Some("MOONSHOT_API_KEY")),
-        "grok-4.7" => ("https://api.x.ai/v1", Some("XAI_API_KEY")),
-        "qwen3.6-35b-a3b-abliterated" => ("http://127.0.0.1:11434/v1", None),
+    let (provider, api_base, key_variable) = match key {
+        "kimi-k3.1-pro" => (
+            "Moonshot",
+            "https://api.moonshot.ai/v1",
+            Some("MOONSHOT_API_KEY"),
+        ),
+        "grok-4.7" => ("xAI", "https://api.x.ai/v1", Some("XAI_API_KEY")),
+        "qwen3.6-35b-a3b-abliterated" => ("Ollama", "http://127.0.0.1:11434/v1", None),
         _ => return None,
     };
     Some(HostedEndpoint {
+        provider,
         api_base,
         key_variable,
     })
