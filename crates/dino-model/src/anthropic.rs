@@ -64,6 +64,9 @@ pub struct AnthropicConfig {
     pub api_base: String,
     pub api_key: Option<String>,
     pub profile: ModelProfile,
+    /// Sent ahead of `system_prompt` as its own block with a cache breakpoint
+    /// after it, so a change to `system_prompt` does not re-bill it.
+    pub system_prefix: String,
     pub system_prompt: String,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: u32,
@@ -84,6 +87,7 @@ impl AnthropicConfig {
             api_base: "https://api.anthropic.com/v1".into(),
             api_key: Some(api_key.into()),
             profile,
+            system_prefix: String::new(),
             system_prompt: String::new(),
             tools: Vec::new(),
             max_output_tokens: 32_768,
@@ -305,8 +309,8 @@ impl AnthropicSession {
         if self.config.fast {
             body.insert("speed".into(), json!("fast"));
         }
-        if !self.config.system_prompt.is_empty() {
-            body.insert("system".into(), json!(self.config.system_prompt));
+        if let Some(system) = system_value(&self.config) {
+            body.insert("system".into(), system);
         }
         let mut tools: Vec<Value> = self
             .config
@@ -338,6 +342,21 @@ impl AnthropicSession {
         }
         Ok(Value::Object(body))
     }
+}
+
+fn system_value(config: &AnthropicConfig) -> Option<Value> {
+    if config.system_prefix.is_empty() {
+        return (!config.system_prompt.is_empty()).then(|| json!(config.system_prompt));
+    }
+    let mut blocks = vec![json!({
+        "type": "text",
+        "text": config.system_prefix,
+        "cache_control": {"type": "ephemeral"},
+    })];
+    if !config.system_prompt.is_empty() {
+        blocks.push(json!({"type": "text", "text": config.system_prompt}));
+    }
+    Some(Value::Array(blocks))
 }
 
 impl ModelSession for AnthropicSession {
@@ -1595,6 +1614,42 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "high");
         assert_eq!(body["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn system_prefix_is_its_own_cached_block() {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let mut config = AnthropicConfig::new("test-key", profile);
+        config.system_prefix = "The files.".into();
+        config.system_prompt = "Today is Tuesday.".into();
+        let session = AnthropicSession::new(config).unwrap();
+        let pending = AnthropicSession::pending_message(TurnInput::User {
+            content: "hello".into(),
+        });
+        let body = session.request_body(&pending).unwrap();
+
+        assert_eq!(
+            body["system"],
+            json!([
+                {"type": "text", "text": "The files.", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Today is Tuesday."},
+            ])
+        );
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn system_without_prefix_stays_one_string() {
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let mut config = AnthropicConfig::new("test-key", profile);
+        config.system_prompt = "Work carefully.".into();
+        let session = AnthropicSession::new(config).unwrap();
+        let pending = AnthropicSession::pending_message(TurnInput::User {
+            content: "hello".into(),
+        });
+        let body = session.request_body(&pending).unwrap();
+
+        assert_eq!(body["system"], json!("Work carefully."));
     }
 
     #[test]
