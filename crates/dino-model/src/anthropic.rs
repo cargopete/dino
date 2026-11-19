@@ -196,17 +196,8 @@ impl AnthropicSession {
             TurnInput::UserWithImages { content, images } => AnthropicMessage {
                 role: Role::User,
                 content: images
-                    .into_iter()
-                    .map(|image| {
-                        json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": image.media_type,
-                                "data": image.data,
-                            },
-                        })
-                    })
+                    .iter()
+                    .map(image_block)
                     .chain(std::iter::once(json!({"type": "text", "text": content})))
                     .collect(),
             },
@@ -215,11 +206,19 @@ impl AnthropicSession {
                 content: results
                     .into_iter()
                     .map(|result| {
+                        let output = result.output;
+                        let content = if output.images.is_empty() {
+                            json!(output.content)
+                        } else {
+                            std::iter::once(json!({"type": "text", "text": output.content}))
+                                .chain(output.images.iter().map(image_block))
+                                .collect::<Value>()
+                        };
                         json!({
                             "type": "tool_result",
                             "tool_use_id": result.call_id,
-                            "content": result.output.content,
-                            "is_error": result.output.is_error,
+                            "content": content,
+                            "is_error": output.is_error,
                         })
                     })
                     // The results must come first in the message, so the note follows.
@@ -344,6 +343,17 @@ impl AnthropicSession {
     }
 }
 
+fn image_block(image: &dino_protocol::Image) -> Value {
+    json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": image.media_type,
+            "data": image.data,
+        },
+    })
+}
+
 fn system_value(config: &AnthropicConfig) -> Option<Value> {
     if config.system_prefix.is_empty() {
         return (!config.system_prompt.is_empty()).then(|| json!(config.system_prompt));
@@ -424,10 +434,20 @@ impl ModelSession for AnthropicSession {
                 if seen <= keep_recent {
                     continue;
                 }
-                let Some(content) = block.get("content").and_then(Value::as_str) else {
-                    continue;
+                let bytes = match block.get("content") {
+                    Some(Value::String(content)) => content.len(),
+                    // A result with pictures: its text and the images' data.
+                    Some(Value::Array(parts)) => parts
+                        .iter()
+                        .map(|part| {
+                            part["text"]
+                                .as_str()
+                                .or_else(|| part["source"]["data"].as_str())
+                                .map_or(0, str::len)
+                        })
+                        .sum(),
+                    _ => continue,
                 };
-                let bytes = content.len();
                 if bytes <= ELIDED_MARKER_FLOOR {
                     continue;
                 }
@@ -442,6 +462,11 @@ impl ModelSession for AnthropicSession {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
+            let input = if self.config.profile.image_input {
+                input
+            } else {
+                input.without_tool_images()
+            };
             let mut pending = Self::pending_message(input);
             self.answer_orphans(&mut pending)?;
             let body = self.request_body(&pending)?;
@@ -1585,6 +1610,39 @@ mod tests {
                 .as_str()
                 .unwrap(),
             "ok"
+        );
+    }
+
+    #[test]
+    fn a_tool_result_with_a_picture_carries_it_after_its_text() {
+        let image = dino_protocol::Image {
+            media_type: "image/png".into(),
+            data: "iVBO".repeat(200),
+        };
+        let pending = AnthropicSession::pending_message(TurnInput::ToolResults {
+            results: vec![dino_protocol::ToolResult {
+                call_id: "toolu-1".into(),
+                output: dino_protocol::ToolOutput::success("[page 3]").with_images(vec![image]),
+            }],
+            note: None,
+        });
+        assert_eq!(
+            pending.content[0]["content"],
+            json!([
+                {"type": "text", "text": "[page 3]"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO".repeat(200)}},
+            ])
+        );
+
+        let profile = crate::builtin_profile("claude-opus").unwrap();
+        let mut session = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
+        session.history.lock().unwrap().push(pending);
+        let elision = session.elide_tool_results(0).unwrap();
+        assert_eq!(elision.results_elided, 1);
+        assert!(
+            session.history.lock().unwrap()[0].content[0]["content"]
+                .as_str()
+                .is_some()
         );
     }
 

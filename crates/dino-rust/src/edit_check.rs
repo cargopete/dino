@@ -133,10 +133,7 @@ impl ToolRuntime for EditCheck {
                 }
                 _ => format!("{}\n\ncargo_check: {report}", output.content),
             };
-            Ok(ToolOutput {
-                content,
-                is_error: output.is_error,
-            })
+            Ok(ToolOutput { content, ..output })
         })
     }
 

@@ -144,6 +144,11 @@ impl OpenAiSession {
     }
 
     fn request_body(&self, input: TurnInput) -> Result<Value, ModelError> {
+        let input = if self.config.profile.image_input {
+            input
+        } else {
+            input.without_tool_images()
+        };
         let input =
             match input {
                 TurnInput::User { content } => json!([{
@@ -160,18 +165,7 @@ impl OpenAiSession {
                 TurnInput::ToolResults { results, note } => Value::Array(
                     results
                         .into_iter()
-                        .map(|result| {
-                            let output = if result.output.is_error {
-                                format!("Tool error: {}", result.output.content)
-                            } else {
-                                result.output.content
-                            };
-                            json!({
-                                "type": "function_call_output",
-                                "call_id": result.call_id,
-                                "output": output,
-                            })
-                        })
+                        .map(function_call_output)
                         .chain(note.map(|note| {
                             json!({
                                 "role": "user",
@@ -729,6 +723,33 @@ struct ResponseOutputTokenDetails {
     reasoning_tokens: u64,
 }
 
+/// A tool's result as the Responses API takes it: text, or text and pictures.
+fn function_call_output(result: dino_protocol::ToolResult) -> Value {
+    let text = if result.output.is_error {
+        format!("Tool error: {}", result.output.content)
+    } else {
+        result.output.content
+    };
+    let output = if result.output.images.is_empty() {
+        json!(text)
+    } else {
+        std::iter::once(json!({"type": "input_text", "text": text}))
+            .chain(
+                result
+                    .output
+                    .images
+                    .iter()
+                    .map(|image| json!({"type": "input_image", "image_url": image.data_url()})),
+            )
+            .collect()
+    };
+    json!({
+        "type": "function_call_output",
+        "call_id": result.call_id,
+        "output": output,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
@@ -846,6 +867,38 @@ mod tests {
             ])
         );
         assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn a_tool_output_with_a_picture_goes_as_parts_and_without_vision_as_text() {
+        let input = || TurnInput::ToolResults {
+            results: vec![dino_protocol::ToolResult {
+                call_id: "call-1".into(),
+                output: dino_protocol::ToolOutput::success("[page 3]").with_images(vec![
+                    dino_protocol::Image {
+                        media_type: "image/png".into(),
+                        data: "iVBO".into(),
+                    },
+                ]),
+            }],
+            note: None,
+        };
+        let mut profile = crate::builtin_profile("terra").unwrap();
+        let session = OpenAiSession::new(OpenAiConfig::new("key", profile.clone())).unwrap();
+        assert_eq!(
+            session.request_body(input()).unwrap()["input"][0]["output"],
+            json!([
+                {"type": "input_text", "text": "[page 3]"},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBO"},
+            ])
+        );
+
+        profile.image_input = false;
+        let session = OpenAiSession::new(OpenAiConfig::new("key", profile)).unwrap();
+        assert_eq!(
+            session.request_body(input()).unwrap()["input"][0]["output"],
+            "[page 3]"
+        );
     }
 
     #[test]

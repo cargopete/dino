@@ -222,6 +222,10 @@ pub struct ToolCall {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// Pictures the tool returns beside its text, as a page it drew. Sent only
+    /// to a profile with `image_input`; any other gets the text alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
 }
 
 impl ToolOutput {
@@ -230,6 +234,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
@@ -238,7 +243,14 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            images: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_images(mut self, images: Vec<Image>) -> Self {
+        self.images = images;
+        self
     }
 }
 
@@ -267,6 +279,23 @@ pub enum TurnInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+}
+
+impl TurnInput {
+    /// The same input with the pictures taken out of its tool results, for a
+    /// profile that cannot see them.
+    #[must_use]
+    pub fn without_tool_images(self) -> Self {
+        match self {
+            Self::ToolResults { mut results, note } => {
+                for result in &mut results {
+                    result.output.images.clear();
+                }
+                Self::ToolResults { results, note }
+            }
+            other => other,
+        }
+    }
 }
 
 /// The key a tool call's arguments are wrapped in when they were not valid
@@ -709,5 +738,34 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// Saved results from before tool images existed still read, and a result
+    /// without images is written as it was.
+    #[test]
+    fn a_tool_output_without_images_reads_and_writes_as_before() {
+        let old = r#"{"content":"ok","is_error":false}"#;
+        let output: super::ToolOutput = serde_json::from_str(old).unwrap();
+        assert_eq!(output, super::ToolOutput::success("ok"));
+        assert_eq!(serde_json::to_string(&output).unwrap(), old);
+    }
+
+    #[test]
+    fn tool_images_come_out_for_a_profile_without_vision() {
+        let image = super::Image {
+            media_type: "image/png".into(),
+            data: "iVBO".into(),
+        };
+        let input = super::TurnInput::ToolResults {
+            results: vec![super::ToolResult {
+                call_id: "c1".into(),
+                output: super::ToolOutput::success("page 3").with_images(vec![image]),
+            }],
+            note: None,
+        };
+        let super::TurnInput::ToolResults { results, .. } = input.without_tool_images() else {
+            unreachable!();
+        };
+        assert_eq!(results[0].output, super::ToolOutput::success("page 3"));
     }
 }
