@@ -146,7 +146,15 @@ fn walk(root: &Path, path: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
     while let Some(relative) = pending.pop() {
         let metadata = match fs::symlink_metadata(root.join(&relative)) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            // In a linked worktree `.git` is a file, so `.git/hooks` is not there either.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
             Err(error) => return Err(error),
         };
         if metadata.is_dir() {
@@ -347,6 +355,17 @@ mod tests {
             fs::read_to_string(root.join("tests/spec.rs")).unwrap(),
             "kept\n"
         );
+    }
+
+    /// A linked worktree, whose `.git` is a file.
+    #[test]
+    fn a_path_beneath_a_file_is_taken_as_missing() {
+        let workspace = Workspace::new("gitfile");
+        let root = &workspace.0;
+        fs::write(root.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let mut snapshot = Snapshot::take(root, &[PathBuf::from(".git/hooks")]).unwrap();
+
+        assert!(snapshot.restore().unwrap().is_empty());
     }
 
     #[test]

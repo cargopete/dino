@@ -528,11 +528,12 @@ async fn an_unconfined_run_leaves_the_sandbox() {
 #[tokio::test]
 async fn a_child_has_a_session_of_its_own_and_no_terminal() {
     let fixture = Fixture::new();
+    // A failed redirection on `exec` ends dash outright, so it runs in a subshell.
     let (mut command, _) = dino_exec::process::prepare(
         "sh",
         &[
             "-c".into(),
-            "exec 3</dev/tty 2>/dev/null || { sleep 0.2; exit 7; }".into(),
+            "(exec 3</dev/tty) 2>/dev/null || { sleep 0.2; exit 7; }".into(),
         ],
         &fixture.path,
         &Unconfined,
