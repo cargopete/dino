@@ -667,6 +667,7 @@ fn with_field(output: &ToolOutput, key: &str, report: Value) -> ToolOutput {
     ToolOutput {
         content,
         is_error: output.is_error,
+        images: output.images.clone(),
     }
 }
 

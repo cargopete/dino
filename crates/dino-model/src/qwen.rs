@@ -41,6 +41,9 @@ use crate::sse::SseDecoder;
 /// Bump when the persisted history shape changes. RFC-0014 section 3.
 pub(crate) const STATE_VERSION: u32 = 1;
 
+/// What introduces the pictures tool results returned, sent after them.
+const TOOL_IMAGES: &str = "[The pictures the tool results above returned.]";
+
 #[derive(Clone)]
 pub struct QwenConfig {
     pub api_base: String,
@@ -147,18 +150,41 @@ impl QwenSession {
                 message.images = images.iter().map(dino_protocol::Image::data_url).collect();
                 vec![message]
             }
-            TurnInput::ToolResults { results, note } => results
-                .into_iter()
-                .map(|result| {
-                    let content = if result.output.is_error {
-                        format!("Tool error: {}", result.output.content)
-                    } else {
-                        result.output.content
-                    };
-                    ChatMessage::tool(result.call_id, content)
-                })
-                .chain(note.map(ChatMessage::user))
-                .collect(),
+            TurnInput::ToolResults { results, note } => {
+                let mut images = Vec::new();
+                let mut messages: Vec<ChatMessage> = results
+                    .into_iter()
+                    .map(|result| {
+                        images.extend(
+                            result
+                                .output
+                                .images
+                                .iter()
+                                .map(dino_protocol::Image::data_url),
+                        );
+                        let content = if result.output.is_error {
+                            format!("Tool error: {}", result.output.content)
+                        } else {
+                            result.output.content
+                        };
+                        ChatMessage::tool(result.call_id, content)
+                    })
+                    .collect();
+                // Chat Completions takes only text in a tool message, so the
+                // pictures follow in a user message, with the note if there is one.
+                if images.is_empty() {
+                    messages.extend(note.map(ChatMessage::user));
+                } else {
+                    let text = note.map_or_else(
+                        || TOOL_IMAGES.to_owned(),
+                        |note| format!("{TOOL_IMAGES}\n\n{note}"),
+                    );
+                    let mut message = ChatMessage::user(text);
+                    message.images = images;
+                    messages.push(message);
+                }
+                messages
+            }
         }
     }
 
@@ -513,6 +539,11 @@ impl ModelSession for QwenSession {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
+            let input = if self.config.profile.image_input {
+                input
+            } else {
+                input.without_tool_images()
+            };
             let mut pending = Self::pending_messages(input);
             {
                 let history = self
@@ -1503,6 +1534,38 @@ mod tests {
             ])
         );
         assert!(body["messages"][0].get("images").is_none());
+    }
+
+    #[test]
+    fn pictures_from_a_tool_follow_its_result_in_a_user_message() {
+        let profile = crate::builtin_profile("qwen3.7-plus").unwrap();
+        let session =
+            QwenSession::new(QwenConfig::new("http://127.0.0.1:8000/v1", profile)).unwrap();
+        let pending = QwenSession::pending_messages(TurnInput::ToolResults {
+            results: vec![dino_protocol::ToolResult {
+                call_id: "call-1".into(),
+                output: dino_protocol::ToolOutput::success("[page 3]").with_images(vec![
+                    dino_protocol::Image {
+                        media_type: "image/png".into(),
+                        data: "iVBORw0K".into(),
+                    },
+                ]),
+            }],
+            note: Some("[dino: verified]".into()),
+        });
+
+        let body = session.request_body(&pending).unwrap();
+
+        assert_eq!(body["messages"][0]["role"], "tool");
+        assert_eq!(body["messages"][0]["content"], "[page 3]");
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([
+                {"type": "text", "text": format!("{TOOL_IMAGES}\n\n[dino: verified]")},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0K"}}
+            ])
+        );
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
 
     #[test]
