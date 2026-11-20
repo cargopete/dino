@@ -357,6 +357,7 @@ async fn start(
         dino_version: env!("CARGO_PKG_VERSION").to_owned(),
         model_key: job.profile.key.clone(),
         provider: job.profile.provider,
+        chat_server: job.profile.chat_server_used(),
         workspace_root: settings.workspace.display().to_string(),
         approval_mode: mode.label().to_owned(),
         sandbox: kit.sandbox.label(),

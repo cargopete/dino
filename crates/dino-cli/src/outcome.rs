@@ -168,6 +168,7 @@ mod tests {
                 output_tokens: 200,
                 ..TokenUsage::default()
             },
+            last_usd: 0.25,
         }
     }
 

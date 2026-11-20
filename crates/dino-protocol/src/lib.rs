@@ -110,6 +110,15 @@ pub enum ProfileStatus {
     Development,
 }
 
+impl ModelProfile {
+    /// Which server a Chat Completions profile talks to. `provider` names
+    /// only the adapter, which is `qwen` for every such model, Kimi included.
+    #[must_use]
+    pub fn chat_server_used(&self) -> Option<ChatServer> {
+        (self.provider == ProviderKind::Qwen).then_some(self.chat_server)
+    }
+}
+
 /// Whose extensions a Chat Completions request may carry. They overlap only in
 /// the standard fields; each puts thinking controls somewhere the other ignores.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -295,11 +295,13 @@ impl Task {
     }
 
     /// Lets the next request go, or says which limit stopped the task.
+    /// `next` is what one request is expected to cost: the dollar limit stops
+    /// the task while there is still room for that request's wrap-up.
     ///
     /// # Errors
     ///
     /// Returns the sentence the task ends with when a limit is reached.
-    pub fn admit(&self, spent: f64) -> Result<(), String> {
+    pub fn admit(&self, spent: f64, next: f64) -> Result<(), String> {
         let Ok(mut state) = self.state.lock() else {
             return Ok(());
         };
@@ -311,6 +313,12 @@ impl Task {
         let reason = match (running.limits.usd, running.limits.wall) {
             (Some(cap), _) if used >= cap => Some(format!(
                 "the task has spent {} of its {} budget at list price",
+                usd(used),
+                usd(cap)
+            )),
+            (Some(cap), _) if used + 2.0 * next > cap => Some(format!(
+                "the task has spent {} of its {} budget at list price, and another request \
+                 and the wrap-up would pass it",
                 usd(used),
                 usd(cap)
             )),
@@ -633,6 +641,16 @@ mod tests {
     }
 
     #[test]
+    fn a_task_stops_while_there_is_room_for_its_wrap_up() {
+        let task = Task::new(Limits::default().capped_at(3.0));
+        task.begin("go", 0.0);
+
+        assert_eq!(task.admit(1.0, 0.9), Ok(()));
+        let stopped = task.admit(1.5, 0.9).unwrap_err();
+        assert!(stopped.contains("the wrap-up would pass it"), "{stopped}");
+    }
+
+    #[test]
     fn a_message_cannot_lift_the_ceiling() {
         let task = Task::new(Limits::default().capped_at(3.0));
         for message in ["fix X, max 1 hour", "fix X, max $50", "fix X"] {
@@ -648,8 +666,8 @@ mod tests {
         let task = Task::new(Limits::default());
         task.begin("max $5", 100.0);
 
-        assert_eq!(task.admit(104.0), Ok(()));
-        let stopped = task.admit(105.5).unwrap_err();
+        assert_eq!(task.admit(104.0, 0.0), Ok(()));
+        let stopped = task.admit(105.5, 0.0).unwrap_err();
 
         assert!(stopped.contains("spent $5.50 of its $5.00"), "{stopped}");
         assert_eq!(task.stopped().as_deref(), stopped.strip_prefix("stopped: "));
@@ -664,13 +682,13 @@ mod tests {
         });
         task.begin("go", 0.0);
 
-        let stopped = task.admit(0.0).unwrap_err();
+        let stopped = task.admit(0.0, 0.0).unwrap_err();
         assert!(stopped.contains("limit"), "{stopped}");
 
         task.lift();
-        assert_eq!(task.admit(0.0), Ok(()));
+        assert_eq!(task.admit(0.0, 0.0), Ok(()));
         assert!(task.end().is_some());
-        assert_eq!(task.admit(1e9), Ok(()), "no task, no limit");
+        assert_eq!(task.admit(1e9, 0.0), Ok(()), "no task, no limit");
     }
 
     #[test]

@@ -93,7 +93,10 @@ Each record has `record`, `seq` (from 0, unbroken) and `unix_millis`:
 
 - `{"record": "started", "session": {...}}` comes first. `session` holds
   `session_id`, `dino_version`, `model_key`, `provider`, `workspace_root`,
-  `approval_mode`, `sandbox` and `max_model_turns`.
+  `approval_mode`, `sandbox` and `max_model_turns`. `provider` is the adapter:
+  `qwen` is the Chat Completions one, used by every OpenAI-compatible model
+  whoever serves it, and for those `chat_server` names the server (`vllm`,
+  `dash_scope`, `moonshot` or `ollama`).
 - `{"record": "event", "event": {...}}`, one per agent event. `event.type` says
   which. The ones most readers want:
   - `submitted`: `text`, the request.
