@@ -56,7 +56,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install --path crates/dino-cli --root "$RUNNER_TEMP/install" --locked
+      # A yanked crate in Cargo.lock only warns, and the README's install prints it.
+      - shell: bash
+        run: |
+          cargo install --path crates/dino-cli --root "$RUNNER_TEMP/install" --locked 2>&1 \
+            | tee "$RUNNER_TEMP/install.log"
+          ! grep 'is yanked' "$RUNNER_TEMP/install.log"
       - name: Both binaries installed
         run: |
           ls -1 "$RUNNER_TEMP/install/bin"
