@@ -819,7 +819,10 @@ hour`, `max 90 minutes`. Naming one leaves the other open; naming none uses
 `task_usd` and `task_minutes` from `[budget]` (20 and 240 unless set). Dollars are
 list price since the task began, and both are checked before each request. At a
 limit the task is asked once, with changes refused, what is done and what is
-left, and a `dino run --handover` chain starts no further session. A message that
+left, and a `dino run --handover` chain starts no further session. `--max-cost 3`
+sets the dollar limit from a script as a ceiling: a message may lower it, but
+cannot raise it or, by naming only a time, remove it. A run stopped at a limit
+exits 1. A message that
 names a limit or says to see it through ("keep going", "until it's done",
 "finish the ...") also sends the model back when it ends its turn after working,
 until a turn does no work or it calls `report_blocker`; and such a task fetches

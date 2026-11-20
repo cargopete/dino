@@ -30,6 +30,10 @@ use crate::spend::usd;
 pub struct Limits {
     pub usd: Option<f64>,
     pub wall: Option<Duration>,
+    /// Dollars no message can raise or remove, from `--max-cost`. A brief
+    /// piped in from a file may say "max 1 hour", which would otherwise drop
+    /// the dollar limit altogether.
+    pub ceiling: Option<f64>,
 }
 
 impl Default for Limits {
@@ -37,13 +41,30 @@ impl Default for Limits {
         Self {
             usd: Some(20.0),
             wall: Some(Duration::from_secs(4 * 3_600)),
+            ceiling: None,
         }
     }
 }
 
 impl Limits {
+    /// These limits with `ceiling` as both the dollar limit and its ceiling.
+    #[must_use]
+    pub fn capped_at(self, ceiling: f64) -> Self {
+        Self {
+            usd: Some(ceiling),
+            ceiling: Some(ceiling),
+            ..self
+        }
+    }
+
     #[must_use]
     pub fn describe(&self) -> String {
+        if let Some(ceiling) = self.ceiling {
+            let wall = self
+                .wall
+                .map_or_else(|| "no time limit".to_owned(), duration_text);
+            return format!("{} however the message asks, and {wall}", usd(ceiling));
+        }
         match (self.usd, self.wall) {
             (Some(dollars), Some(wall)) => format!("{} and {}", usd(dollars), duration_text(wall)),
             (Some(dollars), None) => format!("{}, no time limit", usd(dollars)),
@@ -99,7 +120,11 @@ pub fn named(message: &str) -> Option<Limits> {
             _ => {}
         }
     }
-    (dollars.is_some() || wall.is_some()).then_some(Limits { usd: dollars, wall })
+    (dollars.is_some() || wall.is_some()).then_some(Limits {
+        usd: dollars,
+        wall,
+        ceiling: None,
+    })
 }
 
 fn is_punctuation(c: char) -> bool {
@@ -252,7 +277,11 @@ impl Task {
     /// Says whether the message named them.
     pub fn begin(&self, message: &str, spent: f64) -> (Limits, bool) {
         let named = named(message);
-        let limits = named.unwrap_or(self.defaults);
+        let mut limits = named.unwrap_or(self.defaults);
+        if let Some(ceiling) = self.defaults.ceiling {
+            limits.usd = Some(limits.usd.map_or(ceiling, |asked| asked.min(ceiling)));
+            limits.ceiling = Some(ceiling);
+        }
         if let Ok(mut state) = self.state.lock() {
             *state = Some(Running {
                 started: Instant::now(),
@@ -548,14 +577,16 @@ mod tests {
             limits("finish this RFC, however long it takes, max $50"),
             Some(Limits {
                 usd: Some(50.0),
-                wall: None
+                wall: None,
+                ceiling: None,
             })
         );
         assert_eq!(
             limits("fix X, max 1 hour, max $10."),
             Some(Limits {
                 usd: Some(10.0),
-                wall: Some(Duration::from_secs(3_600))
+                wall: Some(Duration::from_secs(3_600)),
+                ceiling: None,
             })
         );
         assert_eq!(
@@ -602,6 +633,17 @@ mod tests {
     }
 
     #[test]
+    fn a_message_cannot_lift_the_ceiling() {
+        let task = Task::new(Limits::default().capped_at(3.0));
+        for message in ["fix X, max 1 hour", "fix X, max $50", "fix X"] {
+            let (found, _) = task.begin(message, 0.0);
+            assert_eq!(found.usd, Some(3.0), "{message}");
+        }
+        let (found, _) = task.begin("fix X, max $1", 0.0);
+        assert_eq!(found.usd, Some(1.0), "a lower limit still applies");
+    }
+
+    #[test]
     fn a_task_is_stopped_by_dollars_spent_since_it_began() {
         let task = Task::new(Limits::default());
         task.begin("max $5", 100.0);
@@ -618,6 +660,7 @@ mod tests {
         let task = Task::new(Limits {
             usd: None,
             wall: Some(Duration::ZERO),
+            ceiling: None,
         });
         task.begin("go", 0.0);
 

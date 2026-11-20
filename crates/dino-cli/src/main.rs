@@ -157,6 +157,11 @@ struct CommonArgs {
     /// Safety limit on model turns in one submission. Default 100.
     #[arg(long)]
     max_turns: Option<NonZeroU32>,
+    /// Stop a task once it has spent this many dollars at list price, and ask
+    /// it what is done. Unlike `budget.task_usd`, a "max" in the message cannot
+    /// raise it.
+    #[arg(long, value_name = "USD", value_parser = dollars)]
+    max_cost: Option<f64>,
     /// Refuse every mutation and every process instead of asking.
     #[arg(long, conflicts_with = "dangerously_allow_all")]
     read_only: bool,
@@ -1853,6 +1858,13 @@ async fn run_in(args: RunArgs) -> Result<ExitCode> {
     })
 }
 
+fn dollars(text: &str) -> Result<f64, String> {
+    match text.trim_start_matches('$').parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => Ok(value),
+        _ => Err(format!("{text} is not a number of dollars above zero")),
+    }
+}
+
 /// Resolves `--resume`, bare or named, into a state file.
 ///
 /// Bare means the most recent in this workspace. A named session that does not
@@ -2154,7 +2166,10 @@ fn resolve_layers(args: &CommonArgs, layers: Layers) -> Result<Resolved> {
         verify: layers
             .pick(|file| file.verify.clone())
             .filter(|(command, _)| !command.is_empty()),
-        task_limits: layers.task_limits()?,
+        task_limits: match args.max_cost {
+            Some(ceiling) => layers.task_limits()?.capped_at(ceiling),
+            None => layers.task_limits()?,
+        },
         mcp: mcp_servers(&layers),
         search: search_settings(&layers),
         preset,
@@ -2453,13 +2468,7 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
                 "dino/  (default)",
             ),
         ),
-        (
-            "task budget",
-            format!(
-                "{}  (when a message names none)",
-                resolved.task_limits.describe()
-            ),
-        ),
+        ("task budget", task_budget_row(&resolved.task_limits)),
         (
             "project file",
             file_named(resolved.layers.project_path.as_ref()),
@@ -2482,6 +2491,15 @@ fn settings(args: &CommonArgs, session_id: &SessionId) -> Result<RunSettings> {
         &workspace,
     );
     run_settings(args, workspace, resolved, verify, session_id)
+}
+
+fn task_budget_row(limits: &task::Limits) -> String {
+    let source = if limits.ceiling.is_some() {
+        "--max-cost"
+    } else {
+        "when a message names none"
+    };
+    format!("{}  ({source})", limits.describe())
 }
 
 fn search_row(resolved: &Resolved) -> String {
