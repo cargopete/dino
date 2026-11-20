@@ -229,6 +229,15 @@ impl<A> Interactive<A> {
         self
     }
 
+    /// Starts as if [`ApprovalReply::AllProcesses`] had been answered: every
+    /// sandboxed process proceeds. A call asking to run unconfined still asks.
+    #[must_use]
+    pub fn accepting_processes(self) -> Self {
+        self.all_processes
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
     /// Edits beneath these workspace-relative paths ask every time, whatever
     /// [`ApprovalReply::AllEdits`] covers.
     #[must_use]
@@ -642,6 +651,27 @@ mod tests {
         assert!(allowed(&policy, &edit("1", "src/lib.rs")).await);
         assert!(!allowed(&policy, &edit("2", ".git/hooks/pre-commit")).await);
         assert!(!allowed(&policy, &exec("3", "cargo test")).await);
+        assert_eq!(policy.approver.asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn accepting_processes_still_asks_for_guarded_paths_and_unconfined_calls() {
+        let policy = Interactive::new(Script::new(vec![]))
+            .accepting_edits()
+            .accepting_processes()
+            .guarding(vec![".git/hooks".into()]);
+        assert!(allowed(&policy, &edit("1", "src/lib.rs")).await);
+        assert!(allowed(&policy, &exec("2", "cargo test")).await);
+        assert!(!allowed(&policy, &edit("3", ".git/hooks/pre-commit")).await);
+        let push = (
+            ToolCall {
+                id: "4".into(),
+                name: "exec".into(),
+                arguments: serde_json::Value::Null,
+            },
+            ToolAction::unconfined_process("git push", "publish the branch"),
+        );
+        assert!(!allowed(&policy, &push).await);
         assert_eq!(policy.approver.asked.lock().unwrap().len(), 2);
     }
 

@@ -168,6 +168,10 @@ struct CommonArgs {
     /// Make edits to workspace files without asking; processes still ask.
     #[arg(long, conflicts_with_all = ["dangerously_allow_all", "read_only"])]
     accept_edits: bool,
+    /// As --accept-edits, and run every sandboxed process without asking.
+    /// Nothing may run outside the sandbox.
+    #[arg(long, conflicts_with_all = ["dangerously_allow_all", "read_only", "accept_edits"])]
+    accept_sandboxed: bool,
     /// Approve everything without asking. Consider this carefully. Also
     /// spelled --dangerously-skip-permissions.
     #[arg(long, alias = "dangerously-skip-permissions")]
@@ -555,6 +559,7 @@ fn session_tool_set(
         Arc::clone(sandbox),
         &dino_eval::ToolOptions {
             after_call: settings.call_hooks.after_call.clone(),
+            escalation: settings.offer_unconfined,
             ..interactive_options(
                 &settings.workspace,
                 settings.protected.clone(),
@@ -577,6 +582,7 @@ fn child_tools(settings: &RunSettings, sandbox: &Arc<dyn Sandbox>) -> Result<Too
         Arc::clone(sandbox),
         &dino_eval::ToolOptions {
             after_call: settings.call_hooks.after_call.clone(),
+            escalation: settings.offer_unconfined,
             ..interactive_options(
                 &settings.workspace,
                 settings.protected.clone(),
@@ -662,6 +668,30 @@ fn prompt_context(
 }
 
 /// The tools a person's own session gets, as opposed to an eval's.
+fn sandbox_for(settings: &RunSettings) -> Result<Arc<dyn Sandbox>> {
+    let sandbox =
+        config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
+    if settings.mode == ApprovalMode::AcceptSandboxed && !sandbox.confines_writes() {
+        bail!(
+            "accept-sandboxed approves processes because the sandbox confines them, and \
+             --sandbox none confines nothing; use --accept-edits instead"
+        );
+    }
+    Ok(sandbox)
+}
+
+/// A run with nobody at the terminal cannot answer the unconfined prompt, and
+/// accept-sandboxed and read-only refuse it whatever is answered.
+fn offers_unconfined(mode: ApprovalMode, unattended: bool) -> bool {
+    match mode {
+        ApprovalMode::ReadOnly | ApprovalMode::AcceptSandboxed => false,
+        ApprovalMode::AllowAll => true,
+        ApprovalMode::Interactive | ApprovalMode::AcceptEdits => {
+            !unattended || stdin().is_terminal()
+        }
+    }
+}
+
 fn interactive_options(
     workspace: &Path,
     protected: Vec<PathBuf>,
@@ -993,13 +1023,13 @@ fn prepare(
     json: bool,
 ) -> Result<Prepared> {
     let session_id = SessionId::generate();
-    let settings = settings(common, &session_id)?;
+    let mut settings = settings(common, &session_id)?;
+    settings.offer_unconfined = offers_unconfined(settings.mode, unattended);
     // After resolution rather than before, so a config file can ask for plain
     // output as well as the flag.
     style::enable(settings.plain);
 
-    let sandbox =
-        config::build_sandbox(settings.sandbox, &settings.workspace, &settings.protected)?;
+    let sandbox = sandbox_for(&settings)?;
     let sandbox_label = sandbox.label();
     warn_unprotected(&settings, sandbox.as_ref());
     let late = remote::Late::new(remote.map(Arc::clone));
@@ -2097,6 +2127,8 @@ fn resolve_layers(args: &CommonArgs, layers: Layers) -> Result<Resolved> {
         (ApprovalMode::ReadOnly, Source::Flag)
     } else if args.accept_edits {
         (ApprovalMode::AcceptEdits, Source::Flag)
+    } else if args.accept_sandboxed {
+        (ApprovalMode::AcceptSandboxed, Source::Flag)
     } else if let Some(found) = layers.pick_user_only(|file| file.approvals) {
         found
     } else {
@@ -2597,6 +2629,7 @@ fn run_settings(
         review,
         explore,
         preset: resolved.preset.0,
+        offer_unconfined: true,
     })
 }
 
@@ -2605,7 +2638,7 @@ fn run_settings(
 fn interactive_policy<A: Approver + 'static>(
     approver: A,
     workspace: &Path,
-    accept_edits: bool,
+    mode: ApprovalMode,
 ) -> Box<dyn ApprovalPolicy> {
     let guarded = dino_sandbox::EXECUTABLE_CONFIG
         .iter()
@@ -2613,10 +2646,10 @@ fn interactive_policy<A: Approver + 'static>(
         .map(PathBuf::from)
         .collect();
     let interactive = Interactive::new(approver).guarding(guarded);
-    let interactive = if accept_edits {
-        interactive.accepting_edits()
-    } else {
-        interactive
+    let interactive = match mode {
+        ApprovalMode::AcceptEdits => interactive.accepting_edits(),
+        ApprovalMode::AcceptSandboxed => interactive.accepting_edits().accepting_processes(),
+        _ => interactive,
     };
     match settings::user_dir() {
         Some(dir) => Box::new(
@@ -2665,16 +2698,18 @@ fn policy(
     waiting: &config::CallHooks,
 ) -> Box<dyn ApprovalPolicy> {
     match mode {
-        ApprovalMode::Interactive | ApprovalMode::AcceptEdits => interactive_policy(
-            hooks::Pinging::new(
-                remote::Routed::new(TerminalApprover::new(sandbox, workspace), late.clone()),
-                waiting.awaiting_approval.clone(),
-                workspace.to_path_buf(),
-                waiting.ping_after,
-            ),
-            workspace,
-            mode == ApprovalMode::AcceptEdits,
-        ),
+        ApprovalMode::Interactive | ApprovalMode::AcceptEdits | ApprovalMode::AcceptSandboxed => {
+            interactive_policy(
+                hooks::Pinging::new(
+                    remote::Routed::new(TerminalApprover::new(sandbox, workspace), late.clone()),
+                    waiting.awaiting_approval.clone(),
+                    workspace.to_path_buf(),
+                    waiting.ping_after,
+                ),
+                workspace,
+                mode,
+            )
+        }
         ApprovalMode::ReadOnly => Box::new(ReadOnly),
         ApprovalMode::AllowAll => Box::new(AllowAll),
     }
@@ -2698,7 +2733,9 @@ fn child_policy(
     let turn = Arc::new(tokio::sync::Mutex::new(()));
     Box::new(move |mode| {
         let inner = match mode {
-            ApprovalMode::Interactive | ApprovalMode::AcceptEdits => interactive_policy(
+            ApprovalMode::Interactive
+            | ApprovalMode::AcceptEdits
+            | ApprovalMode::AcceptSandboxed => interactive_policy(
                 hooks::Pinging::new(
                     subagent::Asking::new(
                         remote::Routed::new(
@@ -2713,7 +2750,7 @@ fn child_policy(
                     calls.ping_after,
                 ),
                 &workspace,
-                mode == ApprovalMode::AcceptEdits,
+                mode,
             ),
             ApprovalMode::ReadOnly | ApprovalMode::AllowAll => {
                 policy(mode, &sandbox, &workspace, &late, &calls)
@@ -2753,6 +2790,18 @@ mod tests {
 
     fn parsed(arguments: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(["dino"].into_iter().chain(arguments.iter().copied()))
+    }
+
+    #[test]
+    fn only_a_run_that_could_answer_or_has_approved_everything_is_offered_unconfined() {
+        assert!(offers_unconfined(ApprovalMode::Interactive, false));
+        assert!(offers_unconfined(ApprovalMode::AllowAll, true));
+        assert!(!offers_unconfined(ApprovalMode::AcceptSandboxed, false));
+        assert!(!offers_unconfined(ApprovalMode::ReadOnly, false));
+        // Under `cargo test` standard input is not a terminal.
+        if !stdin().is_terminal() {
+            assert!(!offers_unconfined(ApprovalMode::AcceptEdits, true));
+        }
     }
 
     #[test]

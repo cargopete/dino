@@ -59,6 +59,9 @@ pub enum ApprovalMode {
     /// As interactive, but edits to workspace files proceed, except those to
     /// files that change what other programs run.
     AcceptEdits,
+    /// As accept-edits, and every sandboxed process proceeds too. Nothing may
+    /// run unconfined. For an unattended run that has to build and test.
+    AcceptSandboxed,
     /// Mutations are refused without asking.
     ReadOnly,
     /// Everything proceeds without asking. Explicitly requested only.
@@ -70,6 +73,9 @@ impl ApprovalMode {
         match self {
             Self::Interactive => "interactive (mutations require approval)",
             Self::AcceptEdits => "accept-edits (workspace edits proceed; the rest asks)",
+            Self::AcceptSandboxed => {
+                "accept-sandboxed (workspace edits and sandboxed processes proceed; the rest asks)"
+            }
             Self::ReadOnly => "read-only (mutations are refused)",
             Self::AllowAll => "allow-all (nothing is asked)",
         }
@@ -178,6 +184,9 @@ pub struct RunSettings {
     pub explore: Option<ModelProfile>,
     /// The tools offered and the limits started under.
     pub preset: crate::preset::Preset,
+    /// Whether `exec` may ask to run one command outside the sandbox. Off
+    /// where nobody could answer, so the model does not spend turns asking.
+    pub offer_unconfined: bool,
     /// How the session searches the web, if it does.
     pub web_search: crate::search::WebSearch,
 }
@@ -524,6 +533,7 @@ mod tests {
             review: None,
             explore: None,
             preset: crate::preset::Preset::Standard,
+            offer_unconfined: false,
             web_search: crate::search::WebSearch::Off,
         }
     }

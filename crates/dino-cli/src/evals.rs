@@ -602,6 +602,7 @@ fn eval_settings(
         review: None,
         explore: None,
         preset: crate::preset::Preset::Standard,
+        offer_unconfined: false,
         web_search: crate::search::WebSearch::Off,
     }
 }

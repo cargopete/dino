@@ -754,6 +754,8 @@ mod tests {
         let parsed: FileConfig = toml::from_str("approvals = \"accept-edits\"\n").unwrap();
 
         assert_eq!(parsed.approvals, Some(ApprovalMode::AcceptEdits));
+        let parsed: FileConfig = toml::from_str("approvals = \"accept-sandboxed\"\n").unwrap();
+        assert_eq!(parsed.approvals, Some(ApprovalMode::AcceptSandboxed));
     }
 
     #[test]
