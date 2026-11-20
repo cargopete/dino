@@ -972,6 +972,7 @@ The command is `dino`; Dino is the project.
 - [RFC-0018: Handing a long task to a fresh session](docs/rfcs/RFC-0018-handover.md)
 - [RFC-0019: A 1 to 100 score for comparing models](docs/rfcs/RFC-0019-scoring.md)
 - [RFC-0020: Driving a session from another device](docs/rfcs/RFC-0020-remote-control.md)
+- [RFC-0021: A per-run list of hosts the sandbox may reach](docs/rfcs/RFC-0021-network-allowlist.md)
 
 The RFCs are part of the project. Findings are labelled as measured, observed in
 source, documented by a provider, or inferred. Quantitative claims carry a date
