@@ -603,6 +603,7 @@ fn eval_settings(
         explore: None,
         preset: crate::preset::Preset::Standard,
         offer_unconfined: false,
+        allow_net: Vec::new(),
         web_search: crate::search::WebSearch::Off,
     }
 }

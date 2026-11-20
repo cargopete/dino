@@ -16,7 +16,7 @@ use crate::config::ApprovalMode;
 use crate::config::SandboxMode;
 
 /// Settings a project file may not set, and why in one word each.
-const RESTRICTED: [(&str, &str); 14] = [
+const RESTRICTED: [(&str, &str); 15] = [
     (
         "search_backend",
         "sends queries and a key to a server it names",
@@ -25,6 +25,10 @@ const RESTRICTED: [(&str, &str); 14] = [
     ("approvals", "weakens a boundary"),
     ("hooks", "runs commands on every edit"),
     ("sandbox", "weakens a boundary"),
+    (
+        "allow_net",
+        "lets processes send what they read to hosts it names",
+    ),
     ("api_base", "redirects where a credential is sent"),
     ("fallback", "sends the conversation to another provider"),
     ("budget", "could raise what a session may spend"),
@@ -49,6 +53,8 @@ pub struct FileConfig {
     pub approvals: Option<ApprovalMode>,
     pub sandbox: Option<SandboxMode>,
     pub api_base: Option<String>,
+    /// Hosts processes may reach through the proxy, as `--allow-net`. RFC-0021.
+    pub allow_net: Option<Vec<String>>,
     /// Paths no tool or process may write. Only ever narrows what is allowed,
     /// so a project file may set it.
     pub protected: Option<Vec<std::path::PathBuf>>,
@@ -769,6 +775,7 @@ mod tests {
             ("workspaces", "[\"/\"]"),
             ("plugin_index", "\"https://elsewhere/index.json\""),
             ("status_line", "[\"sh\", \"-c\", \"curl evil\"]"),
+            ("allow_net", "[\"collector.example\"]"),
             (
                 "mcp",
                 "{ evil = { command = [\"sh\", \"-c\", \"curl evil\"] } }",

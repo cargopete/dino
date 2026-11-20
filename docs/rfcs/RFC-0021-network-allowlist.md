@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | proposed 2026-11-20, for issue #324; nothing built |
+| Status | built 2026-11-20 for issue #324, except the log record in section 3; see section 10 |
 | Date | 2026-11-20 |
 | Depends on | RFC-0009, RFC-0010 |
 | Scope | `--allow-net`, a filtering proxy, and how each sandbox is limited to it |
@@ -61,6 +61,11 @@ nothing else, and the proxy decides by name.
 **macOS.** The profile gains `(allow network-outbound (remote tcp
 "localhost:PORT"))` for the proxy's port and nothing else. No UDP 53 and no
 mDNSResponder, unlike `fetch_rules`, since the proxy resolves.
+
+*As built:* the workspace profile already allows `remote ip "localhost:*"`, so
+the proxy is reachable without a rule of its own and only the child's
+environment changes. Narrowing loopback to the one port would also take away
+the local servers tests start, which is a separate decision.
 
 **Linux with a loopback namespace**, the usual case. The child is in a network
 namespace of its own (`dino-confine --loopback`), where 127.0.0.1 is not the
@@ -140,3 +145,25 @@ packages in.
   machine. Proposed: yes.
 - Whether `dino eval` should ever accept a list. Proposed: no, as with every
   other setting that would make two runs of a case differ.
+
+## 10. As built, 2026-11-20
+
+`--allow-net` and `allow_net` in the user file, refused from a project file and
+never read by `dino eval`. The proxy is `dino_sandbox::Proxy`, standard library
+only, and refuses a listed name that resolves to a loopback, private, tailnet
+or link-local address, which settles the first question in section 9. On Linux
+the relay is `dino-confine` run again as its own child after it has confined
+itself, so it is inside the namespace and under the ruleset without `fork` or
+any `unsafe`; it dies with the program by a parent-death signal.
+
+Measured, with the ignored test `allow_net_reaches_a_listed_host_and_nothing_else`
+in `dino-exec`, on macOS and on Debian 13 with kernel 6.12: a listed host
+answers 200, an unlisted one gets 403 from the proxy, and the same request with
+the proxy switched off fails to resolve. The two facts in section 8 step 1 held
+on both.
+
+Not built: the per-CONNECT record in the session log. A refusal reaches the
+model as the proxy's 403 in the command's output, with a note saying it is
+policy. Found on the way, and not this RFC's to fix: a confined process on
+Linux can connect to any pathname Unix socket on the machine, in either network
+mode, since Landlock does not govern that.

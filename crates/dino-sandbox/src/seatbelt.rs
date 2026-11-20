@@ -26,6 +26,7 @@ pub struct Seatbelt {
     credentials_denied: bool,
     fetching: bool,
     target_dir: Option<PathBuf>,
+    proxy: Option<std::sync::Arc<crate::Proxy>>,
 }
 
 impl Seatbelt {
@@ -114,6 +115,7 @@ impl Seatbelt {
             credentials_denied: home.is_some(),
             fetching: false,
             target_dir: None,
+            proxy: None,
         })
     }
 
@@ -141,9 +143,13 @@ impl Sandbox for Seatbelt {
                  protected{credentials}, fetching: HTTPS out and writes to Cargo's cache)"
             );
         }
+        let network = match &self.proxy {
+            Some(proxy) => crate::proxy::describe(proxy),
+            None => "network denied except loopback".to_owned(),
+        };
         format!(
             "workspace (seatbelt: writes confined{protected}, executable config \
-             protected{credentials}, network denied except loopback)"
+             protected{credentials}, {network})"
         )
     }
 
@@ -165,6 +171,21 @@ impl Sandbox for Seatbelt {
 
     fn target_dir(&self) -> Option<&Path> {
         self.target_dir.as_deref()
+    }
+
+    /// The profile already allows loopback, where the proxy listens, and
+    /// nothing else, so only the child's environment changes.
+    fn through_proxy(
+        &self,
+        proxy: &std::sync::Arc<crate::Proxy>,
+    ) -> Result<Box<dyn Sandbox>, SandboxError> {
+        let mut proxied = self.clone();
+        proxied.proxy = Some(std::sync::Arc::clone(proxy));
+        Ok(Box::new(proxied))
+    }
+
+    fn proxy_port(&self) -> Option<u16> {
+        self.proxy.as_ref().map(|proxy| proxy.port())
     }
 
     fn for_fetching(&self, writable: &[PathBuf]) -> Option<Box<dyn Sandbox>> {

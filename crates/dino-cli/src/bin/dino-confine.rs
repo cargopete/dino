@@ -10,19 +10,36 @@
 //!
 //! ```text
 //! dino-confine --allow-write <path>... [--allow-connect <port>]... [--deny-read <path>]...
-//!     [--loopback] -- <program> [args]...
+//!     [--loopback [--proxy <socket> --proxy-port <port>]] -- <program> [args]...
 //! dino-confine --check-loopback
 //! ```
 //!
 //! `--loopback` gives the process a network namespace of its own with only
 //! `lo` up, so servers can bind and connect on 127.0.0.1 while nothing reaches
 //! another host, over TCP or anything else. `--check-loopback` says whether this
-//! machine allows that, by trying it.
+//! machine allows that, by trying it. `--proxy` starts a relay inside that
+//! namespace, on 127.0.0.1 at the given port, to the session's `--allow-net`
+//! proxy on its Unix socket, which no network namespace scopes. RFC-0021.
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, socket, port] = arguments.as_slice()
+        && flag == RELAY
+    {
+        return match port
+            .parse()
+            .map_err(|_| format!("bad port {port}"))
+            .and_then(|port| relay(socket, port))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("dino-confine: relay: {message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if arguments == ["--check-loopback"] {
         return match isolate_loopback() {
             Ok(()) => ExitCode::SUCCESS,
@@ -49,6 +66,9 @@ fn main() -> ExitCode {
     }
 }
 
+/// Not for people: how this binary starts its own relay, already confined.
+const RELAY: &str = "--relay";
+
 #[derive(Debug)]
 struct Request {
     writable: Vec<String>,
@@ -58,6 +78,8 @@ struct Request {
     deny_read: Vec<String>,
     /// A network namespace with only loopback, in place of denying TCP.
     loopback: bool,
+    /// The proxy's Unix socket, and the port to relay it on inside the namespace.
+    proxy: Option<(String, u16)>,
     program: String,
     arguments: Vec<String>,
 }
@@ -68,6 +90,7 @@ impl Request {
         let mut connect = Vec::new();
         let mut deny_read = Vec::new();
         let mut loopback = false;
+        let (mut socket, mut port) = (None, None);
         let mut rest = arguments.iter();
         loop {
             match rest.next()?.as_str() {
@@ -75,16 +98,24 @@ impl Request {
                 "--allow-connect" => connect.push(rest.next()?.parse().ok()?),
                 "--deny-read" => deny_read.push(rest.next()?.clone()),
                 "--loopback" => loopback = true,
+                "--proxy" => socket = Some(rest.next()?.clone()),
+                "--proxy-port" => port = Some(rest.next()?.parse().ok()?),
                 "--" => break,
                 _ => return None,
             }
         }
+        let proxy = match (socket, port) {
+            (Some(socket), Some(port)) if loopback => Some((socket, port)),
+            (None, None) => None,
+            _ => return None,
+        };
         let program = rest.next()?.clone();
         Some(Self {
             writable,
             connect,
             deny_read,
             loopback,
+            proxy,
             program,
             arguments: rest.cloned().collect(),
         })
@@ -195,6 +226,9 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
             status.ruleset, abi as i32
         ));
     }
+    if let Some((socket, port)) = &request.proxy {
+        start_relay(socket, *port)?;
+    }
 
     Err(format!(
         "cannot run {}: {}",
@@ -203,6 +237,78 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
             .args(&request.arguments)
             .exec()
     ))
+}
+
+/// Starts the relay as a copy of this binary, so it is in the namespace and
+/// under the ruleset already, and waits until it is listening.
+#[cfg(target_os = "linux")]
+fn start_relay(socket: &str, port: u16) -> Result<(), String> {
+    use std::io::Read as _;
+    let helper = std::env::current_exe().map_err(|error| format!("cannot find itself: {error}"))?;
+    let mut child = std::process::Command::new(helper)
+        .args([RELAY, socket, &port.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot start the proxy relay: {error}"))?;
+    let mut ready = [0_u8; 1];
+    let started = child
+        .stdout
+        .take()
+        .is_some_and(|mut out| out.read_exact(&mut ready).is_ok());
+    if !started {
+        let _ = child.kill();
+        return Err("the proxy relay did not start".to_owned());
+    }
+    Ok(())
+}
+
+/// Copies each connection on 127.0.0.1:`port` to the proxy's Unix socket,
+/// until the program it was started for exits.
+#[cfg(target_os = "linux")]
+fn relay(socket: &str, port: u16) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+    nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
+        .map_err(|error| format!("cannot follow its parent: {error}"))?;
+    // The parent may have gone before the line above.
+    if nix::unistd::getppid() == nix::unistd::Pid::from_raw(1) {
+        return Ok(());
+    }
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+        .map_err(|error| format!("cannot listen on {port}: {error}"))?;
+    let mut out = std::io::stdout();
+    out.write_all(b"1")
+        .and_then(|()| out.flush())
+        .map_err(|error| format!("cannot say it is ready: {error}"))?;
+    for client in listener.incoming().flatten() {
+        let Ok(upstream) = UnixStream::connect(socket) else {
+            continue;
+        };
+        std::thread::spawn(move || copy_both(client, upstream));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn copy_both(client: std::net::TcpStream, upstream: std::os::unix::net::UnixStream) {
+    let (Ok(mut client_read), Ok(mut upstream_write)) = (client.try_clone(), upstream.try_clone())
+    else {
+        return;
+    };
+    let forward = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
+    });
+    let (mut upstream_read, mut client_write) = (upstream, client);
+    let _ = std::io::copy(&mut upstream_read, &mut client_write);
+    let _ = client_write.shutdown(std::net::Shutdown::Write);
+    let _ = forward.join();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn relay(_socket: &str, _port: u16) -> Result<(), String> {
+    Err(format!("there is no relay on {}", std::env::consts::OS))
 }
 
 /// What to grant read access to so that everything beneath `root` is readable
@@ -353,13 +459,18 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
         .join(" ");
     Err(format!(
         "there is no Landlock on {}, so `{command}` was not run and {} write path(s), {} \
-         port(s), {} read denial(s) and loopback isolation ({}) were not applied; dino-confine \
+         port(s), {} read denial(s), loopback isolation ({}) and the proxy relay ({}) were not applied; dino-confine \
          is a Linux binary",
         std::env::consts::OS,
         request.writable.len(),
         request.connect.len(),
         request.deny_read.len(),
         if request.loopback {
+            "asked for"
+        } else {
+            "not asked for"
+        },
+        if request.proxy.is_some() {
             "asked for"
         } else {
             "not asked for"
@@ -370,6 +481,29 @@ fn confine_and_exec(request: &Request) -> Result<std::convert::Infallible, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proxy_needs_the_loopback_namespace_and_both_its_halves() {
+        let parse = |line: &str| {
+            Request::parse(
+                &line
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let request =
+            parse("--allow-write /w --loopback --proxy /s --proxy-port 7 -- true").unwrap();
+        assert_eq!(request.proxy, Some(("/s".to_owned(), 7)));
+        assert!(parse("--allow-write /w --proxy /s --proxy-port 7 -- true").is_none());
+        assert!(parse("--allow-write /w --loopback --proxy /s -- true").is_none());
+        assert!(
+            parse("--allow-write /w --loopback -- true")
+                .unwrap()
+                .proxy
+                .is_none()
+        );
+    }
 
     #[test]
     fn reads_are_granted_around_a_denied_path_and_not_through_a_symlink() {
