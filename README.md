@@ -818,9 +818,12 @@ and with nobody at the terminal the run stops. Evals ignore it; `dino eval
 A submission is a task, and a message can set its limits: `max $50`, `max 1
 hour`, `max 90 minutes`. Naming one leaves the other open; naming none uses
 `task_usd` and `task_minutes` from `[budget]` (20 and 240 unless set). Dollars are
-list price since the task began, and both are checked before each request. At a
+list price since the task began, and both are checked before each request. The
+dollar limit stops a task while there is still room for another request and the
+wrap-up, each estimated at the last request's cost, so the wrap-up lands inside
+it; a limit smaller than one request cannot be kept. At a
 limit the task is asked once, with changes refused, what is done and what is
-left, and a `dino run --handover` chain starts no further session. `--max-cost 3`
+left, with the results of the calls it last made, and a `dino run --handover` chain starts no further session. `--max-cost 3`
 sets the dollar limit from a script as a ceiling: a message may lower it, but
 cannot raise it or, by naming only a time, remove it. A run stopped at a limit
 exits 1. A message that

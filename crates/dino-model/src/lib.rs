@@ -279,6 +279,10 @@ pub enum ModelError {
     /// authorised. Retrying will not help; another provider might.
     #[error("the provider refused the account: {0}")]
     Account(String),
+    /// A spending limit of Dino's own stopped the request before it was sent.
+    /// Not the provider's doing, so no fallback takes it up.
+    #[error("{0}")]
+    Budget(String),
     /// Nothing accepted the connection at a local endpoint: the server is not
     /// running, and no amount of waiting starts it. Fails at once rather than
     /// as a network outage.
@@ -299,9 +303,11 @@ impl ModelError {
                 matches!(status, 408 | 429 | 500..=599)
                     || (*status == 404 && body.trim().is_empty())
             }
-            Self::Protocol(_) | Self::Configuration(_) | Self::Account(_) | Self::Offline(_) => {
-                false
-            }
+            Self::Protocol(_)
+            | Self::Configuration(_)
+            | Self::Account(_)
+            | Self::Budget(_)
+            | Self::Offline(_) => false,
         }
     }
 

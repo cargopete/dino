@@ -45,6 +45,8 @@ pub struct Spent {
     /// Responses from a model without a list price, which `usd` leaves out.
     pub unpriced: u64,
     pub tokens: TokenUsage,
+    /// The latest priced response, the estimate of what the next will cost.
+    pub last_usd: f64,
 }
 
 impl Meter {
@@ -78,7 +80,10 @@ impl Meter {
         let usd = price.map(|price| price.cost(usage));
         if let Ok(mut spent) = self.spent.lock() {
             match usd {
-                Some(usd) => spent.usd += usd,
+                Some(usd) => {
+                    spent.usd += usd;
+                    spent.last_usd = usd;
+                }
                 None => spent.unpriced += 1,
             }
             let tokens = &mut spent.tokens;
@@ -355,6 +360,10 @@ pub struct Metered<S> {
     inner: S,
     meter: Arc<Meter>,
     cap: Option<Arc<Cap>>,
+    /// Tool results a refused request would have carried, for the next one.
+    /// Without them the wrap-up sees a call with no result and reports work
+    /// that succeeded as failed.
+    held: Option<TurnInput>,
 }
 
 impl<S> Metered<S> {
@@ -363,6 +372,27 @@ impl<S> Metered<S> {
             inner,
             meter: Arc::clone(&spending.meter),
             cap: spending.cap.clone(),
+            held: None,
+        }
+    }
+
+    /// `input`, preceded by any results a refused request held back.
+    fn with_held(&mut self, input: TurnInput) -> TurnInput {
+        match (self.held.take(), input) {
+            (Some(TurnInput::ToolResults { results, note }), TurnInput::User { content }) => {
+                let held = "[dino: a spending limit stopped the request that would have carried \
+                            these results.]";
+                TurnInput::ToolResults {
+                    results,
+                    note: Some(
+                        note.into_iter()
+                            .chain([held.to_owned(), content])
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    ),
+                }
+            }
+            (_, input) => input,
         }
     }
 }
@@ -374,18 +404,25 @@ impl<S: ModelSession> ModelSession for Metered<S> {
 
     fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
         Box::pin(async move {
-            let (task, meter) = (Arc::clone(&self.meter), Arc::clone(&self.meter));
-            task.task()
-                .admit(meter.spent().usd)
-                .map_err(ModelError::Account)?;
-            if let Some(cap) = &self.cap {
+            let spent = self.meter.spent();
+            let mut refused = self.meter.task().admit(spent.usd, spent.last_usd).err();
+            if refused.is_none()
+                && let Some(cap) = &self.cap
+            {
                 let (cap, meter) = (Arc::clone(cap), Arc::clone(&self.meter));
                 // The person may be asked, which blocks on the terminal.
-                tokio::task::spawn_blocking(move || cap.admit(&meter))
+                refused = tokio::task::spawn_blocking(move || cap.admit(&meter))
                     .await
                     .map_err(|error| ModelError::Configuration(error.to_string()))?
-                    .map_err(ModelError::Account)?;
+                    .err();
             }
+            if let Some(reason) = refused {
+                if matches!(input, TurnInput::ToolResults { .. }) {
+                    self.held = Some(input);
+                }
+                return Err(ModelError::Budget(reason));
+            }
+            let input = self.with_held(input);
             let stream = self.inner.next(input).await?;
             // Read after the call, which is when a fallback has chosen its model.
             let model = self.inner.profile().key.clone();
@@ -604,6 +641,7 @@ mod tests {
     struct Dollars {
         profile: ModelProfile,
         requests: Arc<std::sync::atomic::AtomicUsize>,
+        seen: Arc<Mutex<Vec<TurnInput>>>,
     }
 
     impl ModelSession for Dollars {
@@ -611,8 +649,9 @@ mod tests {
             &self.profile
         }
 
-        fn next(&mut self, _input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
+        fn next(&mut self, input: TurnInput) -> ModelFuture<'_, ModelEventStream> {
             self.requests.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().unwrap().push(input);
             let event = ModelEvent::Usage {
                 usage: usage(500_000, 0, 0),
             };
@@ -641,6 +680,7 @@ mod tests {
             Dollars {
                 profile: dino_model::builtin_profile("kimi-k3.1-pro").unwrap(),
                 requests: Arc::clone(&requests),
+                seen: Arc::default(),
             },
             &spending,
         );
@@ -656,7 +696,7 @@ mod tests {
             panic!("the budget is spent");
         };
 
-        assert!(matches!(error, ModelError::Account(_)), "{error}");
+        assert!(matches!(error, ModelError::Budget(_)), "{error}");
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert!((spending.meter.spent().usd - 2.0).abs() < 1e-9);
     }
@@ -673,6 +713,7 @@ mod tests {
             Dollars {
                 profile: dino_model::builtin_profile("kimi-k3.1-pro").unwrap(),
                 requests: Arc::clone(&requests),
+                seen: Arc::default(),
             },
             &spending,
         );
@@ -680,23 +721,86 @@ mod tests {
             content: "go on".into(),
         };
 
-        for _ in 0..2 {
-            let stream = session.next(ask()).await.unwrap();
-            let _: Vec<_> = stream.collect().await;
-        }
+        let stream = session.next(ask()).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+        // $1 spent, and another $1 request plus a $1 wrap-up would pass $2.
         let Err(error) = session.next(ask()).await else {
-            panic!("the task budget is spent");
+            panic!("no room for another request and the wrap-up");
         };
+        assert!(matches!(error, ModelError::Budget(_)), "{error}");
         assert!(
-            error.to_string().contains("the task has spent $2.00"),
+            error
+                .to_string()
+                .starts_with("stopped: the task has spent $1.00"),
             "{error}"
         );
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert!(spending.meter.task().stopped().is_some());
 
         spending.meter.task().lift();
-        assert!(session.next(ask()).await.is_ok());
-        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        let stream = session.next(ask()).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(
+            (spending.meter.spent().usd - 2.0).abs() < 1e-9,
+            "the wrap-up fitted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn results_a_stopped_request_would_have_carried_reach_the_wrap_up() {
+        let seen: Arc<Mutex<Vec<TurnInput>>> = Arc::default();
+        let spending = Spending {
+            meter: Arc::new(Meter::new(None)),
+            cap: None,
+        };
+        spending.meter.begin_task("fix it, max $2");
+        let mut session = Metered::new(
+            Dollars {
+                profile: dino_model::builtin_profile("kimi-k3.1-pro").unwrap(),
+                requests: Arc::default(),
+                seen: Arc::clone(&seen),
+            },
+            &spending,
+        );
+        let stream = session
+            .next(TurnInput::User {
+                content: "read it".into(),
+            })
+            .await
+            .unwrap();
+        let _: Vec<_> = stream.collect().await;
+        let results = vec![dino_protocol::ToolResult {
+            call_id: "read-1".into(),
+            output: dino_protocol::ToolOutput::success("lines 1-200"),
+        }];
+        assert!(
+            session
+                .next(TurnInput::ToolResults {
+                    results: results.clone(),
+                    note: None,
+                })
+                .await
+                .is_err()
+        );
+
+        spending.meter.task().lift();
+        let _ = session
+            .next(TurnInput::User {
+                content: "say what is done".into(),
+            })
+            .await
+            .unwrap();
+        let wrap_up = seen.lock().unwrap().last().cloned().unwrap();
+        let TurnInput::ToolResults {
+            results: sent,
+            note,
+        } = wrap_up
+        else {
+            panic!("the wrap-up carries the held results: {wrap_up:?}");
+        };
+        assert_eq!(sent, results);
+        assert!(note.unwrap().ends_with("say what is done"));
     }
 
     /// Answers with two searches the provider ran, one of which failed.

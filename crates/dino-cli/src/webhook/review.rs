@@ -206,6 +206,7 @@ async fn run_session(
             dino_version: env!("CARGO_PKG_VERSION").to_owned(),
             model_key: settings.profile.key.clone(),
             provider: settings.profile.provider,
+            chat_server: settings.profile.chat_server_used(),
             workspace_root: checkout.display().to_string(),
             approval_mode: ApprovalMode::ReadOnly.label().to_owned(),
             sandbox: "none needed: no tool runs a process".to_owned(),

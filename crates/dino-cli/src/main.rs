@@ -1075,17 +1075,7 @@ fn prepare(
     };
     let mut model = metered(&settings, prompt.clone(), definitions.clone(), &spending)?;
 
-    let meta = SessionMeta {
-        session_id: session_id.clone(),
-        dino_version: env!("CARGO_PKG_VERSION").to_owned(),
-        model_key: settings.profile.key.clone(),
-        provider: settings.profile.provider,
-        workspace_root: settings.workspace.display().to_string(),
-        approval_mode: settings.mode.label().to_owned(),
-        sandbox: sandbox_label.clone(),
-        max_model_turns: settings.max_turns.get(),
-        pid: Some(std::process::id()),
-    };
+    let meta = session_meta(&settings, &session_id, &sandbox_label);
     let log = JsonlSessionLog::create(&settings.log_path, meta.clone())?;
 
     let state_path = restore(common, &settings, &session_id, model.as_mut())?;
@@ -1142,6 +1132,21 @@ fn prepare(
     };
     let _ = kit.set(subagent_kit(&prepared, hold));
     Ok(prepared)
+}
+
+fn session_meta(settings: &RunSettings, session_id: &SessionId, sandbox: &str) -> SessionMeta {
+    SessionMeta {
+        session_id: session_id.clone(),
+        dino_version: env!("CARGO_PKG_VERSION").to_owned(),
+        model_key: settings.profile.key.clone(),
+        provider: settings.profile.provider,
+        chat_server: settings.profile.chat_server_used(),
+        workspace_root: settings.workspace.display().to_string(),
+        approval_mode: settings.mode.label().to_owned(),
+        sandbox: sandbox.to_owned(),
+        max_model_turns: settings.max_turns.get(),
+        pid: Some(std::process::id()),
+    }
 }
 
 /// What the session's `agent` tool builds children from.

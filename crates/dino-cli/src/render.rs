@@ -649,6 +649,8 @@ impl EventSink for Renderer {
             (Some(error), _) if error.starts_with("model-turn limit reached") => {
                 format!("stopped: {error} · reply to carry on where it left off")
             }
+            // A limit of Dino's own, which `conclude_run` wraps up after.
+            (Some(error), _) if error.starts_with("stopped: ") => error.clone(),
             (Some(error), _) => format!("failed: {error}"),
             (None, Some(reason)) => stop_reason_label(reason).to_owned(),
             (None, None) => "ended without a stop reason".to_owned(),

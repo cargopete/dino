@@ -738,6 +738,7 @@ fn case_log(
             dino_version: env!("CARGO_PKG_VERSION").to_owned(),
             model_key: "eval".to_owned(),
             provider: dino_protocol::ProviderKind::Qwen,
+            chat_server: None,
             workspace_root: workspace.display().to_string(),
             approval_mode: "eval (unattended, everything allowed)".to_owned(),
             sandbox: sandbox.label(),

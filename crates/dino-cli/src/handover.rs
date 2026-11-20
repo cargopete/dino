@@ -139,7 +139,8 @@ pub async fn run(
 
         // No slice is started that the budget cannot pay for.
         let spent = prepared.spending.meter.spent().usd;
-        if let Err(reason) = prepared.spending.meter.task().admit(spent) {
+        let next = prepared.spending.meter.spent().last_usd;
+        if let Err(reason) = prepared.spending.meter.task().admit(spent, next) {
             return Ok(Ended::OverBudget(reason));
         }
 

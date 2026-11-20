@@ -135,7 +135,12 @@ pub struct SessionMeta {
     #[serde(alias = "gyrfalcon_version")]
     pub dino_version: String,
     pub model_key: String,
+    /// The adapter: `qwen` is the Chat Completions one every self-served or
+    /// OpenAI-compatible model uses, whoever serves it.
     pub provider: ProviderKind,
+    /// The server behind a Chat Completions profile, such as `moonshot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_server: Option<dino_protocol::ChatServer>,
     /// The canonical workspace root. Credentials are never recorded.
     pub workspace_root: String,
     pub approval_mode: String,
@@ -340,6 +345,7 @@ mod tests {
             approval_mode: "ask".into(),
             sandbox: "none".into(),
             max_model_turns: 1,
+            chat_server: None,
             pid: None,
         }
     }
