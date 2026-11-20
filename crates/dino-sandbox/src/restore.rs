@@ -58,18 +58,18 @@ pub(crate) fn checked(protected: &[PathBuf]) -> Result<Vec<PathBuf>, SandboxErro
 impl Snapshot {
     /// # Errors
     ///
-    /// Returns the I/O error when a protected path cannot be read.
+    /// Returns the I/O error, naming the path, when a protected path cannot be read.
     pub fn take(root: &Path, protected: &[PathBuf]) -> io::Result<Self> {
         let mut entries = BTreeMap::new();
         for path in protected {
             for (relative, metadata) in walk(root, path)? {
                 let full = root.join(&relative);
                 let entry = if metadata.is_symlink() {
-                    Entry::Symlink(fs::read_link(&full)?)
+                    Entry::Symlink(fs::read_link(&full).map_err(at(&full))?)
                 } else if metadata.is_dir() {
                     Entry::Dir(metadata.permissions())
                 } else {
-                    Entry::File(fs::read(&full)?, metadata.permissions())
+                    Entry::File(fs::read(&full).map_err(at(&full))?, metadata.permissions())
                 };
                 entries.insert(relative, entry);
             }
@@ -144,7 +144,8 @@ fn walk(root: &Path, path: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
     let mut found = Vec::new();
     let mut pending = vec![path.to_path_buf()];
     while let Some(relative) = pending.pop() {
-        let metadata = match fs::symlink_metadata(root.join(&relative)) {
+        let full = root.join(&relative);
+        let metadata = match fs::symlink_metadata(&full) {
             Ok(metadata) => metadata,
             // In a linked worktree `.git` is a file, so `.git/hooks` is not there either.
             Err(error)
@@ -155,17 +156,22 @@ fn walk(root: &Path, path: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
             {
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(at(&full)(error)),
         };
         if metadata.is_dir() {
-            for child in fs::read_dir(root.join(&relative))? {
-                pending.push(relative.join(child?.file_name()));
+            for child in fs::read_dir(&full).map_err(at(&full))? {
+                pending.push(relative.join(child.map_err(at(&full))?.file_name()));
             }
         }
         found.push((relative, metadata));
     }
     found.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(found)
+}
+
+/// Puts the path into an I/O error, which otherwise does not say what it was about.
+fn at(path: &Path) -> impl Fn(io::Error) -> io::Error + '_ {
+    move |error| io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
 
 fn remove(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
@@ -366,6 +372,26 @@ mod tests {
         let mut snapshot = Snapshot::take(root, &[PathBuf::from(".git/hooks")]).unwrap();
 
         assert!(snapshot.restore().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_path_is_named_in_the_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let workspace = Workspace::new("unreadable");
+        let root = &workspace.0;
+        let secret = root.join("tests/fixtures/input.txt");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads it regardless, and then there is no error to look at.
+        let readable = fs::read(&secret).is_ok();
+        let result = Snapshot::take(root, &protected());
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
+        if readable {
+            return;
+        }
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("tests/fixtures/input.txt"), "{error}");
     }
 
     #[test]
