@@ -701,7 +701,7 @@ mod tests {
         };
         let spent = Spent {
             usd: 3.1,
-            unpriced: 0,
+            ..Spent::default()
         };
 
         let line = ping_message(

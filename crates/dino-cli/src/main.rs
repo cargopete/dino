@@ -15,6 +15,7 @@ mod hooks;
 mod keys;
 mod listen;
 mod markdown;
+mod outcome;
 mod plugin;
 mod preset;
 mod probe;
@@ -251,6 +252,10 @@ struct RunArgs {
     /// records, in place of the transcript. The protocol in docs/sdk.md.
     #[arg(long)]
     json: bool,
+    /// Write how the run ended to this file as one JSON object: status, exit
+    /// code, the model's last message, turns, tokens and cost.
+    #[arg(long, value_name = "FILE")]
+    result: Option<PathBuf>,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -1628,6 +1633,7 @@ async fn review(mut args: ReviewArgs) -> Result<ExitCode> {
         // Read only with --handover, which a review never uses.
         session_turns: 0,
         json: false,
+        result: None,
         common: args.common,
     })
     .await
@@ -1768,7 +1774,7 @@ async fn run_in(args: RunArgs) -> Result<ExitCode> {
         .map(|progress| Box::new(progress.clone()) as Box<dyn ToolRuntime>)
         .collect();
     let mut prepared = prepare(&args.common, true, extra, None, args.json)?;
-    let request = request_text(args.prompt)?;
+    let request = request_text(args.prompt.clone())?;
     eprintln!(
         "{}",
         style::paint(
@@ -1793,44 +1799,7 @@ async fn run_in(args: RunArgs) -> Result<ExitCode> {
 
     let request = begin_task(&mut prepared, request).await?;
     if let Some(progress) = &progress {
-        let ended = handover::run(
-            &mut prepared,
-            progress,
-            &request,
-            args.session_turns,
-            &cancel,
-        )
-        .await;
-        conclude_handover(&prepared, &ended).await;
-        eprintln!(
-            "{}",
-            style::paint(
-                style::FAINT,
-                &format!("  {}", prepared.spending.meter.closing())
-            )
-        );
-        return Ok(match ended? {
-            handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
-            handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
-            handover::Ended::Stalled => {
-                eprintln!(
-                    "{}",
-                    style::paint(
-                        style::FAINT,
-                        "  stopped: two sessions in a row ended with the plan unfinished"
-                    )
-                );
-                ExitCode::FAILURE
-            }
-            handover::Ended::OverBudget(reason) => {
-                eprintln!(
-                    "{}",
-                    style::paint(style::WARN, &format!("  stopped: {reason}"))
-                );
-                ExitCode::FAILURE
-            }
-            _ => ExitCode::FAILURE,
-        });
+        return run_chain(&mut prepared, progress, &request, &args, &cancel).await;
     }
     let result = prepared.agent.run_cancellable(request, &cancel).await;
     let (result, stopped) = conclude_run(&mut prepared, result, &cancel).await;
@@ -1841,14 +1810,70 @@ async fn run_in(args: RunArgs) -> Result<ExitCode> {
             &format!("  {}", prepared.spending.meter.closing())
         )
     );
+    if let Some(path) = &args.result {
+        outcome::Outcome::of_run(
+            &result,
+            stopped.as_deref(),
+            prepared.spending.meter.spent(),
+            prepared.session_id.as_str(),
+            &prepared.settings.log_path,
+        )
+        .write(path)?;
+    }
     let result = result?;
     save_state(&prepared.agent, &prepared.state_path)?;
     if stopped.is_some() {
         return Ok(ExitCode::FAILURE);
     }
-    Ok(match result.stop_reason {
-        StopReason::EndTurn => ExitCode::SUCCESS,
-        StopReason::Cancelled => ExitCode::from(130),
+    Ok(ExitCode::from(outcome::exit_code(result.stop_reason)))
+}
+
+/// A `--handover` chain, to its exit code.
+async fn run_chain(
+    prepared: &mut Prepared,
+    progress: &dino_core::progress::Progress,
+    request: &str,
+    args: &RunArgs,
+    cancel: &CancellationToken,
+) -> Result<ExitCode> {
+    let ended = handover::run(prepared, progress, request, args.session_turns, cancel).await;
+    conclude_handover(prepared, &ended).await;
+    eprintln!(
+        "{}",
+        style::paint(
+            style::FAINT,
+            &format!("  {}", prepared.spending.meter.closing())
+        )
+    );
+    if let Some(path) = &args.result {
+        outcome::Outcome::of_chain(
+            &ended,
+            prepared.spending.meter.spent(),
+            prepared.session_id.as_str(),
+            &prepared.settings.log_path,
+        )
+        .write(path)?;
+    }
+    Ok(match ended? {
+        handover::Ended::Stopped(StopReason::EndTurn) => ExitCode::SUCCESS,
+        handover::Ended::Stopped(StopReason::Cancelled) => ExitCode::from(130),
+        handover::Ended::Stalled => {
+            eprintln!(
+                "{}",
+                style::paint(
+                    style::FAINT,
+                    "  stopped: two sessions in a row ended with the plan unfinished"
+                )
+            );
+            ExitCode::FAILURE
+        }
+        handover::Ended::OverBudget(reason) => {
+            eprintln!(
+                "{}",
+                style::paint(style::WARN, &format!("  stopped: {reason}"))
+            );
+            ExitCode::FAILURE
+        }
         _ => ExitCode::FAILURE,
     })
 }
