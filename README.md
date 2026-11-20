@@ -142,7 +142,8 @@ CI and evals.
   arguments (`p`, for `exec` and `cargo` but never a `shell` line), and every
   process this session (`s`, still sandboxed), and every edit in the workspace
   this session (`e`); `approvals = "accept-edits"` in the user file, or
-  `--accept-edits`, starts there. Edits to files that change what other programs
+  `--accept-edits`, starts there, and `accept-sandboxed` starts at both `e`
+  and `s`. Edits to files that change what other programs
   run, such as `.cargo/config.toml` or `.git/hooks`, still ask. An edit's prompt shows its diff
   before it is applied, numbered from the file with two lines of context and the
   changed words picked out. Answering `r` keeps the rule for the
@@ -884,9 +885,15 @@ ignored, and a built-in name cannot be taken. A `!` line in a body is sent as
 text and never run, where Claude Code would run it.
 
 Mutations and processes ask before they happen. `--accept-edits` lets workspace
-edits through and asks about the rest; `--read-only` refuses both
-instead; `--dangerously-allow-all` (or `--dangerously-skip-permissions`) does not ask,
-which is a decision worth making deliberately. A sandboxed run has no network, so Cargo runs `--offline` and
+edits through and asks about the rest; `--accept-sandboxed` (`approvals =
+"accept-sandboxed"`) also runs every process without asking, inside the sandbox,
+which is what an unattended run that builds and tests wants; `--read-only` refuses
+both instead; `--dangerously-allow-all` (or `--dangerously-skip-permissions`) does
+not ask, which is a decision worth making deliberately. Its processes are still
+sandboxed, but it also approves, unasked, a command the model sends to run
+outside the sandbox. Under `--accept-sandboxed` and `--read-only` the model
+cannot ask for that, and nor can it in a `dino run` whose standard input is not
+a terminal, since nobody could answer. A sandboxed run has no network, so Cargo runs `--offline` and
 cannot fetch a dependency that is not already in the local registry cache: adding
 a crate is a job for a person, or for `--sandbox none`.
 
