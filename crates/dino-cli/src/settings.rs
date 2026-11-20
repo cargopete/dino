@@ -192,6 +192,7 @@ impl BudgetConfig {
                 .task_minutes
                 .map(|minutes| std::time::Duration::from_secs(minutes * 60))
                 .or(default.wall),
+            ceiling: None,
         })
     }
 }
