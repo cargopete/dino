@@ -184,6 +184,8 @@ pub struct RunSettings {
     pub explore: Option<ModelProfile>,
     /// The tools offered and the limits started under.
     pub preset: crate::preset::Preset,
+    /// Hosts processes may reach through the `--allow-net` proxy. RFC-0021.
+    pub allow_net: Vec<dino_sandbox::AllowedHost>,
     /// Whether `exec` may ask to run one command outside the sandbox. Off
     /// where nobody could answer, so the model does not spend turns asking.
     pub offer_unconfined: bool,
@@ -449,6 +451,29 @@ fn require_env(
     }
 }
 
+/// The sandbox with processes limited to `hosts` through a proxy of the
+/// session's own, which lives as long as the sandbox does. RFC-0021.
+pub fn proxied(
+    sandbox: &Arc<dyn Sandbox>,
+    mode: SandboxMode,
+    hosts: &[dino_sandbox::AllowedHost],
+) -> Result<Arc<dyn Sandbox>> {
+    static STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if mode == SandboxMode::None {
+        bail!("--allow-net limits the sandbox, and --sandbox none has no network limit to lift");
+    }
+    // Short and outside the workspace: a Unix socket path is capped near 100 bytes.
+    let socket = cfg!(target_os = "linux").then(|| {
+        std::env::temp_dir().join(format!(
+            "dino-proxy-{}-{}.sock",
+            std::process::id(),
+            STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    });
+    let proxy = dino_sandbox::Proxy::start(hosts.to_vec(), socket.as_deref())?;
+    Ok(Arc::from(sandbox.through_proxy(&proxy)?))
+}
+
 /// Builds the containment for a run, refusing to pretend where there is none.
 ///
 /// A platform without an implementation does not quietly fall through to
@@ -534,6 +559,7 @@ mod tests {
             explore: None,
             preset: crate::preset::Preset::Standard,
             offer_unconfined: false,
+            allow_net: Vec::new(),
             web_search: crate::search::WebSearch::Off,
         }
     }

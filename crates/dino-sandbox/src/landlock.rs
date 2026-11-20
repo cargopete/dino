@@ -39,6 +39,8 @@ pub struct Landlock {
     /// Whether this machine lets a process have a network namespace of its
     /// own, so processes get loopback rather than no TCP at all.
     loopback: bool,
+    /// Reached from inside the namespace through a relay to its Unix socket.
+    proxy: Option<std::sync::Arc<crate::Proxy>>,
 }
 
 impl Landlock {
@@ -111,6 +113,7 @@ impl Landlock {
             deny_read: credential_paths(),
             fetching: false,
             loopback,
+            proxy: None,
         })
     }
 }
@@ -130,11 +133,13 @@ impl Sandbox for Landlock {
         // Landlock grants by allow-list, so it cannot carve credentials out of a
         // readable home. Said here rather than implied by Seatbelt's label.
         let network = if self.fetching {
-            "fetching: TCP 443 out and writes to Cargo's cache"
+            "fetching: TCP 443 out and writes to Cargo's cache".to_owned()
+        } else if let Some(proxy) = &self.proxy {
+            crate::proxy::describe(proxy)
         } else if self.loopback {
-            "network: loopback only, in a namespace of its own"
+            "network: loopback only, in a namespace of its own".to_owned()
         } else {
-            "TCP denied, loopback included: user namespaces are unavailable"
+            "TCP denied, loopback included: user namespaces are unavailable".to_owned()
         };
         let credentials = if self.deny_read.is_empty() {
             "no credential paths found to deny"
@@ -149,6 +154,33 @@ impl Sandbox for Landlock {
 
     fn confines_writes(&self) -> bool {
         true
+    }
+
+    /// Only with a namespace of its own: without one, Landlock could allow the
+    /// proxy's port only on every address, which is not a list of hosts.
+    fn through_proxy(
+        &self,
+        proxy: &std::sync::Arc<crate::Proxy>,
+    ) -> Result<Box<dyn Sandbox>, SandboxError> {
+        if !self.loopback {
+            return Err(SandboxError::Unavailable(
+                "--allow-net needs unprivileged user namespaces on Linux, which this machine \
+                 does not allow; without one a process could reach any host on the proxy's port"
+                    .to_owned(),
+            ));
+        }
+        if proxy.socket().is_none() {
+            return Err(SandboxError::Profile(
+                "the --allow-net proxy has no Unix socket to relay to".to_owned(),
+            ));
+        }
+        let mut proxied = self.clone();
+        proxied.proxy = Some(std::sync::Arc::clone(proxy));
+        Ok(Box::new(proxied))
+    }
+
+    fn proxy_port(&self) -> Option<u16> {
+        self.proxy.as_ref().map(|proxy| proxy.port())
     }
 
     fn for_fetching(&self, writable: &[PathBuf]) -> Option<Box<dyn Sandbox>> {
@@ -201,6 +233,16 @@ impl Sandbox for Landlock {
             wrapped.extend(["--allow-connect".to_owned(), "443".to_owned()]);
         } else if self.loopback {
             wrapped.push("--loopback".to_owned());
+            if let Some(proxy) = &self.proxy
+                && let Some(socket) = proxy.socket().and_then(Path::to_str)
+            {
+                wrapped.extend([
+                    "--proxy".to_owned(),
+                    socket.to_owned(),
+                    "--proxy-port".to_owned(),
+                    proxy.port().to_string(),
+                ]);
+            }
         }
         for path in &self.deny_read {
             let path = path.to_str().ok_or_else(|| {

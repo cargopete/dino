@@ -58,7 +58,14 @@ fn child_environment(sandbox: &dyn Sandbox) -> BTreeMap<&'static str, String> {
     }
     // With the network denied, package managers otherwise retry DNS for minutes
     // and then fail in words that read as an outage rather than as policy.
-    if sandbox.denies_network() {
+    if let Some(port) = sandbox.proxy_port() {
+        let proxy = format!("http://127.0.0.1:{port}");
+        for name in PROXY_VARIABLES {
+            environment.insert(name, proxy.clone());
+        }
+        // Cargo still runs offline: its fetches have their own path.
+        environment.insert("CARGO_NET_OFFLINE", "true".to_owned());
+    } else if sandbox.denies_network() {
         for (name, value) in OFFLINE {
             environment.insert(name, (*value).to_owned());
         }
@@ -77,6 +84,15 @@ const CACHES: &[(&str, &str)] = &[
 ];
 
 /// Each package manager's own switch for working from its cache alone.
+/// Every spelling the common clients read a proxy from.
+const PROXY_VARIABLES: [&str; 5] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+];
+
 const OFFLINE: &[(&str, &str)] = &[
     ("CARGO_NET_OFFLINE", "true"),
     ("npm_config_offline", "true"),
@@ -91,6 +107,12 @@ pub const NETWORK_DENIED: &str = "The network is denied in this sandbox. This is
      registry settings will not get round it. Rust dependencies: declare them in Cargo.toml \
      and use the cargo tool's `fetch`, or its `add`, which may reach crates.io. npm, pnpm and Go \
      dependencies: the packages tool's `install` or `add`.";
+
+/// The note under `--allow-net`, where the network is a list of hosts.
+pub const NETWORK_PROXIED: &str = "Processes here reach the network only through dino's proxy \
+     in HTTPS_PROXY, and only to the hosts the person listed with --allow-net; the sandbox \
+     label names them. A host not on the list gets 403 from the proxy, and a program that \
+     ignores HTTPS_PROXY reaches nothing. This is policy, not an outage.";
 
 /// The note for a failed command whose output shows it reaching for the
 /// network, when the sandbox is what stopped it.
@@ -110,15 +132,22 @@ pub fn network_note(sandbox: &dyn Sandbox, execution: &Execution) -> Option<&'st
         "module lookup disabled",
         "network is unreachable",
         "spurious network error",
+        "is not in --allow-net",
+        "tunnel failed",
     ];
     if !sandbox.denies_network() || execution.exit_code == Some(0) {
         return None;
     }
     let output = format!("{}\n{}", execution.stdout, execution.stderr).to_lowercase();
+    let note = if sandbox.proxy_port().is_some() {
+        NETWORK_PROXIED
+    } else {
+        NETWORK_DENIED
+    };
     SIGNS
         .iter()
         .any(|sign| output.contains(sign))
-        .then_some(NETWORK_DENIED)
+        .then_some(note)
 }
 
 /// Runs a program to completion, or kills it when the clock or the caller says

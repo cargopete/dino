@@ -636,3 +636,69 @@ async fn a_confined_command_in_a_linked_worktree_can_commit_and_build_in_the_sha
         .unwrap();
     assert!(String::from_utf8_lossy(&log.stdout).contains("two"));
 }
+
+/// RFC-0021's escape test. Needs the internet, so it runs only when asked:
+/// `cargo test -p dino-exec --test exec_tool -- --ignored allow_net`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+#[ignore = "reaches the internet"]
+async fn allow_net_reaches_a_listed_host_and_nothing_else() {
+    let fixture = Fixture::new();
+    let sandbox: Arc<dyn Sandbox> =
+        Arc::from(dino_sandbox::detect(&fixture.path).expect("a sandbox on this platform"));
+    let socket = cfg!(target_os = "linux").then(|| {
+        std::env::temp_dir().join(format!("dino-allow-net-test-{}.sock", std::process::id()))
+    });
+    let proxy = dino_sandbox::Proxy::start(
+        vec![dino_sandbox::AllowedHost::parse("index.crates.io").unwrap()],
+        socket.as_deref(),
+    )
+    .unwrap();
+    let tool = fixture.tool_with(
+        ExecLimits::default(),
+        Arc::from(sandbox.through_proxy(&proxy).unwrap()),
+    );
+    let curl = |arguments: &[&str]| {
+        let mut command = vec![
+            "curl",
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "15",
+        ];
+        command.extend_from_slice(arguments);
+        call(json!({ "command": command }))
+    };
+
+    let listed = parse(
+        &tool
+            .execute(&curl(&["https://index.crates.io/config.json"]))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(listed["exit_code"], 0, "{listed}");
+    assert_eq!(listed["stdout"], "200", "{listed}");
+
+    let unlisted = parse(
+        &tool
+            .execute(&curl(&["https://example.com/"]))
+            .await
+            .unwrap(),
+    );
+    assert_ne!(unlisted["exit_code"], 0, "{unlisted}");
+    assert!(
+        unlisted["stderr"].as_str().unwrap().contains("403"),
+        "the proxy refused it: {unlisted}"
+    );
+
+    let around = parse(
+        &tool
+            .execute(&curl(&["--noproxy", "*", "https://example.com/"]))
+            .await
+            .unwrap(),
+    );
+    assert_ne!(around["exit_code"], 0, "going round the proxy: {around}");
+}

@@ -177,6 +177,11 @@ struct CommonArgs {
     /// spelled --dangerously-skip-permissions.
     #[arg(long, alias = "dangerously-skip-permissions")]
     dangerously_allow_all: bool,
+    /// Hosts processes may reach over HTTPS, through a proxy of Dino's, such as
+    /// registry.npmjs.org,*.crates.io. Each is a place a process can send what
+    /// it read. RFC-0021.
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    allow_net: Vec<String>,
     /// Operating-system containment for processes this run starts. Default
     /// workspace.
     #[arg(long, value_enum)]
@@ -682,7 +687,10 @@ fn sandbox_for(settings: &RunSettings) -> Result<Arc<dyn Sandbox>> {
              --sandbox none confines nothing; use --accept-edits instead"
         );
     }
-    Ok(sandbox)
+    if settings.allow_net.is_empty() {
+        return Ok(sandbox);
+    }
+    config::proxied(&sandbox, settings.sandbox, &settings.allow_net)
 }
 
 /// A run with nobody at the terminal cannot answer the unconfined prompt, and
@@ -1965,6 +1973,7 @@ pub(crate) fn save_state<S: ModelSession, T: dino_core::ToolRuntime>(
 /// Everything a run needs, with each value's origin, for `dino config`.
 struct Resolved {
     model: (Option<String>, Source),
+    allow_net: (Vec<String>, Source),
     preset: (preset::Preset, Source),
     max_turns: (NonZeroU32, Source),
     approvals: (ApprovalMode, Source),
@@ -2195,6 +2204,7 @@ fn resolve_layers(args: &CommonArgs, layers: Layers) -> Result<Resolved> {
         protected: layers
             .pick(|file| file.protected.clone())
             .unwrap_or((Vec::new(), Source::Default)),
+        allow_net: allow_net(args, &layers),
         max_diagnostics: layers
             .pick(|file| file.max_diagnostics.map(Some))
             .unwrap_or((None, Source::Default)),
@@ -2382,6 +2392,25 @@ fn budget_row(budget: Option<spend::Budget>) -> String {
     )
 }
 
+/// The flag, else the user file; a project file may not name hosts.
+fn allow_net(args: &CommonArgs, layers: &Layers) -> (Vec<String>, Source) {
+    if args.allow_net.is_empty() {
+        layers
+            .pick_user_only(|file| file.allow_net.clone())
+            .unwrap_or((Vec::new(), Source::Default))
+    } else {
+        (args.allow_net.clone(), Source::Flag)
+    }
+}
+
+fn hosts_listed(hosts: &[String]) -> String {
+    if hosts.is_empty() {
+        "nothing".to_owned()
+    } else {
+        hosts.join(", ")
+    }
+}
+
 fn listed(paths: &[PathBuf]) -> String {
     if paths.is_empty() {
         return "nothing".to_owned();
@@ -2483,6 +2512,10 @@ fn config_rows(resolved: &Resolved, workspace: &Path) -> Vec<(&'static str, Stri
         (
             "protected",
             show(listed(&resolved.protected.0), resolved.protected.1),
+        ),
+        (
+            "allow net",
+            show(hosts_listed(&resolved.allow_net.0), resolved.allow_net.1),
         ),
         (
             "api base",
@@ -2624,6 +2657,12 @@ fn run_settings(
         mode,
         sandbox: resolved.sandbox.0,
         protected: resolved.protected.0,
+        allow_net: resolved
+            .allow_net
+            .0
+            .iter()
+            .map(|entry| dino_sandbox::AllowedHost::parse(entry))
+            .collect::<Result<_, _>>()?,
         max_diagnostics: resolved.max_diagnostics.0,
         hooks: resolved.hooks.0,
         end_turn_hooks: resolved.end_turn_hooks,

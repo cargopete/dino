@@ -900,6 +900,16 @@ a terminal, since nobody could answer. A sandboxed run has no network, so Cargo 
 cannot fetch a dependency that is not already in the local registry cache: adding
 a crate is a job for a person, or for `--sandbox none`.
 
+`--allow-net registry.npmjs.org,*.example.com` (or `allow_net = [...]` in the
+user file, never a project file) lets processes reach those hosts over HTTPS
+through a proxy of Dino's, and still nothing else: a host not on the list gets
+403, and a program that ignores `HTTPS_PROXY` reaches nothing at all. Each host
+listed is a place a process can send what it read, so list registries, not a
+forge you would not want a build script writing to. It does not make `git push`
+work, since credential reads stay denied, and SSH cannot pass it. Cargo stays
+offline. On Linux it needs unprivileged user namespaces, and is refused without
+them. RFC-0021.
+
 For a script, CI or an eval, one submission and an exit code:
 
 ```console

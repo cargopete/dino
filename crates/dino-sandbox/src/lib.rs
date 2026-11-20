@@ -11,6 +11,7 @@
 //! 2 explains why a general read allow-list was rejected.
 
 mod landlock;
+mod proxy;
 mod restore;
 mod seatbelt;
 mod worktree;
@@ -21,6 +22,8 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use crate::landlock::Landlock;
+pub use crate::proxy::AllowedHost;
+pub use crate::proxy::Proxy;
 pub use crate::restore::Snapshot;
 pub use crate::seatbelt::Seatbelt;
 pub use crate::worktree::LinkedWorktree;
@@ -139,6 +142,27 @@ pub trait Sandbox: Send + Sync + Debug {
     /// The same confinement plus outbound HTTPS and writes beneath `writable`,
     /// for fetching dependencies. `None` where this sandbox cannot express it.
     fn for_fetching(&self, _writable: &[std::path::PathBuf]) -> Option<Box<dyn Sandbox>> {
+        None
+    }
+
+    /// The same confinement, with processes able to reach the hosts `proxy`
+    /// admits through it, and no other. RFC-0021.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Unavailable`] where this sandbox cannot be
+    /// limited to the proxy, rather than giving the flag a weaker meaning.
+    fn through_proxy(
+        &self,
+        _proxy: &std::sync::Arc<Proxy>,
+    ) -> Result<Box<dyn Sandbox>, SandboxError> {
+        Err(SandboxError::Unavailable(
+            "this sandbox cannot limit processes to the --allow-net proxy".to_owned(),
+        ))
+    }
+
+    /// The proxy's port on 127.0.0.1, for a child's `HTTPS_PROXY`.
+    fn proxy_port(&self) -> Option<u16> {
         None
     }
 
