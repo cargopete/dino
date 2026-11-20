@@ -906,6 +906,16 @@ For a script, CI or an eval, one submission and an exit code:
 dino run --model claude-sonnet "what does dino-core::Agent::run guarantee?"
 ```
 
+It exits 0 when the model ends its turn, 130 when interrupted, and 1 for
+anything else: out of turns, blocked, stopped at a task limit, or failed. A
+model can end its turn well with every call refused, so exit 0 says only that it
+finished speaking. `--result out.json` writes how the run ended as one JSON
+object for the script to read: `status` (`finished`, `stopped`, `blocked`,
+`unfinished`, `cancelled` or `failed`), `exit_code`, `stop_reason`, `reason`,
+`message` (the model's last message), `model_turns`, `refused_calls`, `tokens`,
+`cost_list_usd`, `unpriced_responses`, `session_id` and `log`. A `--handover`
+chain leaves `message`, `model_turns` and `refused_calls` null.
+
 Against a local endpoint:
 
 ```console

@@ -44,6 +44,7 @@ pub struct Spent {
     pub usd: f64,
     /// Responses from a model without a list price, which `usd` leaves out.
     pub unpriced: u64,
+    pub tokens: TokenUsage,
 }
 
 impl Meter {
@@ -80,6 +81,12 @@ impl Meter {
                 Some(usd) => spent.usd += usd,
                 None => spent.unpriced += 1,
             }
+            let tokens = &mut spent.tokens;
+            tokens.input_tokens += usage.input_tokens;
+            tokens.cached_input_tokens += usage.cached_input_tokens;
+            tokens.cache_write_input_tokens += usage.cache_write_input_tokens;
+            tokens.output_tokens += usage.output_tokens;
+            tokens.reasoning_tokens += usage.reasoning_tokens;
         }
         if let Some(ledger) = &self.ledger {
             ledger.append(model, usd, usage);
