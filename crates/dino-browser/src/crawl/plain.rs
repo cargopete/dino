@@ -29,6 +29,102 @@ fn text_of(element: ElementRef<'_>) -> String {
         .join(" ")
 }
 
+/// Class or id words that mark a menu, a banner or other furniture.
+const FURNITURE: &[&str] = &[
+    "nav",
+    "menu",
+    "sidebar",
+    "breadcrumb",
+    "cookie",
+    "consent",
+    "gdpr",
+    "banner",
+    "share",
+    "social",
+    "related",
+    "newsletter",
+    "modal",
+    "popup",
+    "footer",
+    "header",
+];
+
+fn is_furniture(element: ElementRef<'_>, whole_body: bool) -> bool {
+    let value = element.value();
+    let tag = value.name();
+    if matches!(
+        tag,
+        "nav" | "aside" | "script" | "style" | "noscript" | "template" | "svg" | "form" | "iframe"
+    ) {
+        return true;
+    }
+    // A header or footer inside an article is the article's own; on the whole body it is the site's.
+    if whole_body && matches!(tag, "header" | "footer") {
+        return true;
+    }
+    let role = value.attr("role").unwrap_or_default();
+    if matches!(role, "navigation" | "banner" | "contentinfo" | "dialog") {
+        return true;
+    }
+    let names = format!(
+        "{} {}",
+        value.id().unwrap_or_default(),
+        value.attr("class").unwrap_or_default()
+    );
+    if words(&names).any(|word| FURNITURE.contains(&word.as_str()))
+        && text_of(element).len() < 3_000
+    {
+        return true;
+    }
+    // Unlabelled menus: many links, and little text that is not a link.
+    if matches!(tag, "ul" | "ol" | "div" | "section" | "table") {
+        let links = element.select(&select("a")).count();
+        if links >= 15 {
+            let text = text_of(element).len().max(1);
+            let linked: usize = element.select(&select("a")).map(|a| text_of(a).len()).sum();
+            return linked * 10 >= text * 7;
+        }
+    }
+    false
+}
+
+/// The words of an id or class, split at punctuation and at capitals: `statsMenu` is `stats` and `menu`.
+fn words(names: &str) -> impl Iterator<Item = String> + '_ {
+    let mut spaced = String::with_capacity(names.len() + 8);
+    let mut previous_lower = false;
+    for c in names.chars() {
+        if c.is_ascii_uppercase() && previous_lower {
+            spaced.push(' ');
+        }
+        previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        spaced.push(if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            ' '
+        });
+    }
+    spaced
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+/// `root`'s HTML with menus, banners and the like cut out.
+fn without_furniture(root: ElementRef<'_>, whole_body: bool) -> String {
+    let mut out = root.html();
+    for node in root.descendants().skip(1) {
+        let Some(element) = ElementRef::wrap(node) else {
+            continue;
+        };
+        if is_furniture(element, whole_body) {
+            // An ancestor already cut takes this with it, and the replace finds nothing.
+            out = out.replacen(&element.html(), "", 1);
+        }
+    }
+    out
+}
+
 /// The reading, and whether the page looks as though it needs a browser to draw it.
 #[must_use]
 pub fn read(url: &Url, status: u16, html: &str) -> (Reading, bool) {
@@ -91,13 +187,28 @@ pub fn read(url: &Url, status: u16, html: &str) -> (Reading, bool) {
         .iter()
         .filter_map(|selector| first(selector))
         .find(|element| text_of(*element).len() > 400);
-    let source = main.map_or_else(
-        || first("body").map_or_else(|| html.to_owned(), |body| body.html()),
-        |el| el.html(),
-    );
-    let markdown = html2text::from_read(source.as_bytes(), TEXT_WIDTH).unwrap_or_default();
+    // Footnotes would list every link a second time; the links are kept apart anyway.
+    let convert = |source: &str| {
+        html2text::config::plain()
+            .link_footnotes(false)
+            .string_from_read(source.as_bytes(), TEXT_WIDTH)
+            .unwrap_or_default()
+    };
+    let markdown = match main.or_else(|| first("body")) {
+        Some(root) => {
+            let cut = convert(&without_furniture(root, main.is_none()));
+            // A page that is nothing but a list of links keeps its list.
+            if cut.trim().len() < 200 && text_of(root).len() > 1_000 {
+                convert(&root.html())
+            } else {
+                cut
+            }
+        }
+        None => convert(html),
+    };
 
-    let visible = markdown.split_whitespace().map(str::len).sum::<usize>();
+    // Counted before the furniture is cut, or an index page of links would look like a shell.
+    let visible = first("body").map_or(0, |body| text_of(body).len());
     let says_script = html.contains("enable JavaScript") || html.contains("requires JavaScript");
     let shell = visible < SHELL_TEXT
         || (links.len() < 3 && visible < 2_000)
@@ -160,6 +271,57 @@ mod tests {
             !reading.markdown.contains("Home"),
             "the article is chosen over the nav"
         );
+    }
+
+    #[test]
+    fn a_page_without_an_article_loses_its_menus_not_its_text() {
+        let body = "<p>Inflation was 3.2% in October. </p>".repeat(20);
+        let menu = (0..200).fold(String::new(), |mut menu, n| {
+            use std::fmt::Write as _;
+            let _ = write!(menu, r#"<li><a href="/s/{n}">Section {n}</a></li>"#);
+            menu
+        });
+        let html = format!(
+            r#"<html><body><header><a href="/">NSI</a></header><div class="main-menu"><ul>{menu}</ul></div>
+            <div class="page"><h1>Inflation</h1>{body}</div><footer>Address, phone</footer></body></html>"#
+        );
+        let (reading, _) = read(&url(), 200, &html);
+        assert!(reading.markdown.contains("Inflation was 3.2%"));
+        assert!(
+            !reading.markdown.contains("Section 7"),
+            "{}",
+            &reading.markdown[..300]
+        );
+        assert!(!reading.markdown.contains("Address, phone"));
+        assert!(!reading.markdown.contains("[1]:"), "no link footnotes");
+        assert_eq!(reading.links.len(), 201, "the links are still all kept");
+    }
+
+    #[test]
+    fn camel_case_and_unlabelled_menus_are_furniture() {
+        assert_eq!(
+            words("tree1 statsMenu").collect::<Vec<_>>(),
+            ["tree1", "stats", "menu"]
+        );
+        let items = (0..20).fold(String::new(), |mut list, n| {
+            use std::fmt::Write as _;
+            let _ = write!(list, r#"<li><a href="/x/{n}">Dataset number {n}</a></li>"#);
+            list
+        });
+        let body = "<p>Employment rose by 1.4% in the third quarter. </p>".repeat(20);
+        let html = format!(
+            r#"<html><body><ul id="tree1">{items}</ul><div class="row">{body}</div></body></html>"#
+        );
+        let (reading, shell) = read(&url(), 200, &html);
+        assert!(!reading.markdown.contains("Dataset number 3"));
+        assert!(reading.markdown.contains("Employment rose"));
+        assert!(!shell);
+        let index = format!(
+            "<html><body><h1>Datasets</h1><ul>{}</ul></body></html>",
+            items.repeat(3)
+        );
+        let (_, shell) = read(&url(), 200, &index);
+        assert!(!shell, "an index of links is a page, not a shell");
     }
 
     #[test]
