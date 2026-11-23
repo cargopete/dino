@@ -70,12 +70,44 @@ fn is_furniture(element: ElementRef<'_>, whole_body: bool) -> bool {
         "{} {}",
         value.id().unwrap_or_default(),
         value.attr("class").unwrap_or_default()
-    )
-    .to_ascii_lowercase();
-    let marked = names
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| FURNITURE.contains(&word));
-    marked && text_of(element).len() < 3_000
+    );
+    if words(&names).any(|word| FURNITURE.contains(&word.as_str()))
+        && text_of(element).len() < 3_000
+    {
+        return true;
+    }
+    // Unlabelled menus: many links, and little text that is not a link.
+    if matches!(tag, "ul" | "ol" | "div" | "section" | "table") {
+        let links = element.select(&select("a")).count();
+        if links >= 15 {
+            let text = text_of(element).len().max(1);
+            let linked: usize = element.select(&select("a")).map(|a| text_of(a).len()).sum();
+            return linked * 10 >= text * 7;
+        }
+    }
+    false
+}
+
+/// The words of an id or class, split at punctuation and at capitals: `statsMenu` is `stats` and `menu`.
+fn words(names: &str) -> impl Iterator<Item = String> + '_ {
+    let mut spaced = String::with_capacity(names.len() + 8);
+    let mut previous_lower = false;
+    for c in names.chars() {
+        if c.is_ascii_uppercase() && previous_lower {
+            spaced.push(' ');
+        }
+        previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        spaced.push(if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            ' '
+        });
+    }
+    spaced
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 /// `root`'s HTML with menus, banners and the like cut out.
@@ -155,17 +187,28 @@ pub fn read(url: &Url, status: u16, html: &str) -> (Reading, bool) {
         .iter()
         .filter_map(|selector| first(selector))
         .find(|element| text_of(*element).len() > 400);
-    let source = match main.or_else(|| first("body")) {
-        Some(root) => without_furniture(root, main.is_none()),
-        None => html.to_owned(),
-    };
     // Footnotes would list every link a second time; the links are kept apart anyway.
-    let markdown = html2text::config::plain()
-        .link_footnotes(false)
-        .string_from_read(source.as_bytes(), TEXT_WIDTH)
-        .unwrap_or_default();
+    let convert = |source: &str| {
+        html2text::config::plain()
+            .link_footnotes(false)
+            .string_from_read(source.as_bytes(), TEXT_WIDTH)
+            .unwrap_or_default()
+    };
+    let markdown = match main.or_else(|| first("body")) {
+        Some(root) => {
+            let cut = convert(&without_furniture(root, main.is_none()));
+            // A page that is nothing but a list of links keeps its list.
+            if cut.trim().len() < 200 && text_of(root).len() > 1_000 {
+                convert(&root.html())
+            } else {
+                cut
+            }
+        }
+        None => convert(html),
+    };
 
-    let visible = markdown.split_whitespace().map(str::len).sum::<usize>();
+    // Counted before the furniture is cut, or an index page of links would look like a shell.
+    let visible = first("body").map_or(0, |body| text_of(body).len());
     let says_script = html.contains("enable JavaScript") || html.contains("requires JavaScript");
     let shell = visible < SHELL_TEXT
         || (links.len() < 3 && visible < 2_000)
@@ -252,6 +295,33 @@ mod tests {
         assert!(!reading.markdown.contains("Address, phone"));
         assert!(!reading.markdown.contains("[1]:"), "no link footnotes");
         assert_eq!(reading.links.len(), 201, "the links are still all kept");
+    }
+
+    #[test]
+    fn camel_case_and_unlabelled_menus_are_furniture() {
+        assert_eq!(
+            words("tree1 statsMenu").collect::<Vec<_>>(),
+            ["tree1", "stats", "menu"]
+        );
+        let items = (0..20).fold(String::new(), |mut list, n| {
+            use std::fmt::Write as _;
+            let _ = write!(list, r#"<li><a href="/x/{n}">Dataset number {n}</a></li>"#);
+            list
+        });
+        let body = "<p>Employment rose by 1.4% in the third quarter. </p>".repeat(20);
+        let html = format!(
+            r#"<html><body><ul id="tree1">{items}</ul><div class="row">{body}</div></body></html>"#
+        );
+        let (reading, shell) = read(&url(), 200, &html);
+        assert!(!reading.markdown.contains("Dataset number 3"));
+        assert!(reading.markdown.contains("Employment rose"));
+        assert!(!shell);
+        let index = format!(
+            "<html><body><h1>Datasets</h1><ul>{}</ul></body></html>",
+            items.repeat(3)
+        );
+        let (_, shell) = read(&url(), 200, &index);
+        assert!(!shell, "an index of links is a page, not a shell");
     }
 
     #[test]
