@@ -72,6 +72,7 @@ impl Store {
                  error TEXT
              );
              CREATE INDEX IF NOT EXISTS frontier_next ON frontier (state, depth, not_before);
+             CREATE INDEX IF NOT EXISTS frontier_host ON frontier (state, host, depth);
              CREATE TABLE IF NOT EXISTS pages (
                  url TEXT PRIMARY KEY,
                  final_url TEXT NOT NULL,
@@ -171,28 +172,44 @@ impl Store {
         &self,
         ready: impl Fn(&str) -> bool,
     ) -> rusqlite::Result<Option<(String, String, u32)>> {
+        // The host first, then its shallowest page: taking the shallowest pages
+        // overall starved every host but the one whose sitemap filled the queue.
         let db = self.db();
-        let mut query = db.prepare_cached(
-            "SELECT url, host, depth FROM frontier WHERE state = 'queued' AND not_before <= ?1 \
-             ORDER BY depth, rowid LIMIT 200",
+        let at = now();
+        let mut hosts = db.prepare_cached(
+            "SELECT host FROM frontier WHERE state = 'queued' AND not_before <= ?1 \
+             GROUP BY host ORDER BY min(depth)",
         )?;
-        let rows = query
-            .query_map(params![now()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, u32>(2)?,
-                ))
-            })?
+        let hosts = hosts
+            .query_map(params![at], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let Some(next) = rows.into_iter().find(|(_, host, _)| ready(host)) else {
+        let Some(host) = hosts.into_iter().find(|host| ready(host)) else {
             return Ok(None);
         };
+        let next = db.query_row(
+            "SELECT url, host, depth FROM frontier WHERE state = 'queued' AND not_before <= ?1 AND host = ?2 \
+             ORDER BY depth, rowid LIMIT 1",
+            params![at, host],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?)),
+        )?;
         db.execute(
             "UPDATE frontier SET state = 'taken' WHERE url = ?1",
             params![next.0],
         )?;
         Ok(Some(next))
+    }
+
+    /// Gives up every page of `host` still waiting, when the host has made
+    /// plain it will not be read. Returns how many.
+    ///
+    /// # Errors
+    ///
+    /// Fails when SQLite does.
+    pub fn skip_host(&self, host: &str, why: &str) -> rusqlite::Result<usize> {
+        self.db().execute(
+            "UPDATE frontier SET state = 'skipped', error = ?2 WHERE host = ?1 AND state = 'queued'",
+            params![host, why],
+        )
     }
 
     /// # Errors
@@ -458,6 +475,31 @@ mod tests {
         let mut out = Vec::new();
         store.export(&mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn one_host_filling_the_queue_does_not_starve_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("c.sqlite")).unwrap();
+        for n in 0..500 {
+            store
+                .add(&format!("https://a.test/{n}"), "a.test", 1, None)
+                .unwrap();
+        }
+        store.add("https://b.test/1", "b.test", 1, None).unwrap();
+        let taken = store.take(|host| host != "a.test").unwrap().unwrap();
+        assert_eq!(taken.0, "https://b.test/1");
+    }
+
+    #[test]
+    fn a_refusing_host_is_given_up_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("c.sqlite")).unwrap();
+        store.add("https://a.test/1", "a.test", 1, None).unwrap();
+        store.add("https://a.test/2", "a.test", 1, None).unwrap();
+        store.add("https://b.test/1", "b.test", 1, None).unwrap();
+        assert_eq!(store.skip_host("a.test", "refused").unwrap(), 2);
+        assert_eq!(store.counts().unwrap().queued, 1);
     }
 
     #[test]

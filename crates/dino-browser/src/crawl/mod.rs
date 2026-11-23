@@ -161,6 +161,26 @@ fn files_dir(db: &std::path::Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// A host that refuses this many pages in a row is given up whole.
+const REFUSALS: u32 = 3;
+
+/// A page that redirected to the site's own "not found" page, with a 200.
+fn soft_404(requested: &str, landed: &str) -> bool {
+    let path = |url: &str| {
+        Url::parse(url)
+            .map(|u| u.path().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    let (asked, got) = (path(requested), path(landed));
+    let missing = |p: &str| {
+        p.split('/').any(|part| part == "404")
+            || ["not-found", "notfound", "page-not-found", "error404"]
+                .iter()
+                .any(|word| p.contains(word))
+    };
+    asked != got && missing(&got) && !missing(&asked)
+}
+
 /// What a plain GET found.
 enum Plain {
     Page { reading: Reading, shell: bool },
@@ -198,6 +218,8 @@ impl Pool {
 #[derive(Debug, Default)]
 struct Hosts {
     next: Mutex<HashMap<String, Instant>>,
+    /// Refusals in a row, per host.
+    refusals: Mutex<HashMap<String, u32>>,
     robots: tokio::sync::Mutex<HashMap<String, Arc<Robots>>>,
 }
 
@@ -403,48 +425,77 @@ impl Crawl {
             let started = Instant::now();
             let outcome = self.fetch(&mut page, &url, depth).await?;
             let took = started.elapsed().as_secs_f32();
-            let counts = self.store.counts()?;
-            let tally = format!(
-                "{} kept, {} to go",
-                counts.done,
-                counts.queued + counts.waiting + counts.taken
-            );
-            match outcome {
-                Outcome::Kept {
-                    status,
-                    links,
-                    duplicate,
-                    drawn,
-                } => {
-                    let status = status.map_or_else(|| "---".to_owned(), |s| s.to_string());
-                    let same = if duplicate {
-                        " (same text as a page already kept)"
-                    } else {
-                        ""
-                    };
-                    let how = if drawn { " drawn" } else { "" };
-                    eprintln!(
-                        "[{worker}] {status}{how} {url} {took:.1}s, {links} new links{same} · {tally}"
-                    );
-                }
-                Outcome::Saved { bytes } => {
-                    eprintln!(
-                        "[{worker}] file {url} {took:.1}s, {} KB · {tally}",
-                        bytes / 1024
-                    );
-                }
-                Outcome::Skipped { why } => {
-                    self.store.set_skipped(&url, &why)?;
-                    eprintln!("[{worker}] skipped {url}: {why} · {tally}");
-                }
-                Outcome::Failed { why, retry } => {
-                    self.store.fail(&url, &why, retry)?;
-                    eprintln!("[{worker}] failed {url} {took:.1}s: {why} · {tally}");
-                }
-            }
+            self.report(worker, &url, &host, took, outcome)?;
         }
         if let Some(page) = page {
             let _ = tokio::time::timeout(Duration::from_secs(5), page.close()).await;
+        }
+        Ok(())
+    }
+
+    /// Records what became of one URL, says so, and gives up a host that keeps refusing.
+    fn report(
+        &self,
+        worker: usize,
+        url: &str,
+        host: &str,
+        took: f32,
+        outcome: Outcome,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let counts = self.store.counts()?;
+        let tally = format!(
+            "{} kept, {} to go",
+            counts.done,
+            counts.queued + counts.waiting + counts.taken
+        );
+        if matches!(outcome, Outcome::Kept { .. } | Outcome::Saved { .. }) {
+            self.hosts.refusals.lock().expect("hosts lock").remove(host);
+        }
+        match outcome {
+            Outcome::Kept {
+                status,
+                links,
+                duplicate,
+                drawn,
+            } => {
+                let status = status.map_or_else(|| "---".to_owned(), |s| s.to_string());
+                let same = if duplicate {
+                    " (same text as a page already kept)"
+                } else {
+                    ""
+                };
+                let how = if drawn { " drawn" } else { "" };
+                eprintln!(
+                    "[{worker}] {status}{how} {url} {took:.1}s, {links} new links{same} · {tally}"
+                );
+            }
+            Outcome::Saved { bytes } => {
+                eprintln!(
+                    "[{worker}] file {url} {took:.1}s, {} KB · {tally}",
+                    bytes / 1024
+                );
+            }
+            Outcome::Skipped { why } => {
+                self.store.set_skipped(url, &why)?;
+                eprintln!("[{worker}] skipped {url}: {why} · {tally}");
+            }
+            Outcome::Failed { why, retry } => {
+                self.store.fail(url, &why, retry)?;
+                eprintln!("[{worker}] failed {url} {took:.1}s: {why} · {tally}");
+                if why.starts_with("refused") {
+                    let mut refusals = self.hosts.refusals.lock().expect("hosts lock");
+                    let count = refusals.entry(host.to_owned()).or_default();
+                    *count += 1;
+                    if *count >= REFUSALS {
+                        let dropped = self
+                            .store
+                            .skip_host(host, "the host refuses automated reading")?;
+                        eprintln!(
+                            "{host} refused {count} pages in a row; giving up its other {dropped}"
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -687,6 +738,12 @@ impl Crawl {
         reading: &Reading,
         drawn: bool,
     ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
+        if soft_404(url, &reading.url) {
+            return Ok(Outcome::Failed {
+                why: format!("gone (sent on to {})", reading.url),
+                retry: false,
+            });
+        }
         match reading.status {
             Some(status @ (401 | 403)) => {
                 return Ok(Outcome::Failed {
@@ -805,6 +862,24 @@ mod tests {
             "a dot in a directory is not an extension"
         );
         assert_eq!(media_kind("https://bnb.bg/logo.PNG"), Some("png"));
+    }
+
+    #[test]
+    fn a_redirect_to_the_sites_404_page_is_gone() {
+        assert!(soft_404(
+            "https://parliament.bg/bg/MP/3264",
+            "https://parliament.bg/bg/404"
+        ));
+        assert!(soft_404(
+            "https://a.test/x",
+            "https://a.test/page-not-found?from=x"
+        ));
+        assert!(!soft_404("https://a.test/x", "https://a.test/x/"));
+        assert!(!soft_404(
+            "https://a.test/errors/404",
+            "https://a.test/errors/404"
+        ));
+        assert!(!soft_404("https://a.test/x", "https://a.test/y/4040"));
     }
 
     #[test]
