@@ -7,6 +7,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64.workspace = true
+dino-browser.workspace = true
 dino-core.workspace = true
 dino-protocol.workspace = true
 dino-sandbox.workspace = true
@@ -19,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
+url = "2.5.7"
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true

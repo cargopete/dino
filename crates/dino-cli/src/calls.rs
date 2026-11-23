@@ -18,7 +18,7 @@ pub fn icon(tool: &str) -> char {
         "ask" => '?',
         "apply_patch" | "write_file" => '←',
         "exec" | "shell" | "gate" | "cargo" | "background" | "packages" | "github" => '$',
-        "web_fetch" => '%',
+        "web_fetch" | "browse" => '%',
         "todo" => '#',
         _ => '•',
     }

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/dino-browser",
     "crates/dino-cli",
     "crates/dino-core",
     "crates/dino-eval",
@@ -29,6 +30,7 @@ base64 = "0.22.1"
 bytes = "1.12.1"
 futures-util = "0.3.31"
 hmac = "0.13.0"
+dino-browser = { path = "crates/dino-browser", default-features = false }
 dino-core = { path = "crates/dino-core" }
 dino-eval = { path = "crates/dino-eval" }
 dino-exec = { path = "crates/dino-exec" }

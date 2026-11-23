@@ -28,6 +28,7 @@ hmac.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+dino-browser = { workspace = true, features = ["crawl"] }
 dino-core.workspace = true
 dino-eval.workspace = true
 dino-exec.workspace = true
@@ -36,6 +37,7 @@ dino-protocol.workspace = true
 dino-rust.workspace = true
 dino-sandbox.workspace = true
 dino-tools.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 rustyline = { workspace = true, features = ["custom-bindings"] }
 semver.workspace = true
