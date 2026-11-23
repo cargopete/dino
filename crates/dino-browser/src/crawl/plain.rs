@@ -29,6 +29,70 @@ fn text_of(element: ElementRef<'_>) -> String {
         .join(" ")
 }
 
+/// Class or id words that mark a menu, a banner or other furniture.
+const FURNITURE: &[&str] = &[
+    "nav",
+    "menu",
+    "sidebar",
+    "breadcrumb",
+    "cookie",
+    "consent",
+    "gdpr",
+    "banner",
+    "share",
+    "social",
+    "related",
+    "newsletter",
+    "modal",
+    "popup",
+    "footer",
+    "header",
+];
+
+fn is_furniture(element: ElementRef<'_>, whole_body: bool) -> bool {
+    let value = element.value();
+    let tag = value.name();
+    if matches!(
+        tag,
+        "nav" | "aside" | "script" | "style" | "noscript" | "template" | "svg" | "form" | "iframe"
+    ) {
+        return true;
+    }
+    // A header or footer inside an article is the article's own; on the whole body it is the site's.
+    if whole_body && matches!(tag, "header" | "footer") {
+        return true;
+    }
+    let role = value.attr("role").unwrap_or_default();
+    if matches!(role, "navigation" | "banner" | "contentinfo" | "dialog") {
+        return true;
+    }
+    let names = format!(
+        "{} {}",
+        value.id().unwrap_or_default(),
+        value.attr("class").unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    let marked = names
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| FURNITURE.contains(&word));
+    marked && text_of(element).len() < 3_000
+}
+
+/// `root`'s HTML with menus, banners and the like cut out.
+fn without_furniture(root: ElementRef<'_>, whole_body: bool) -> String {
+    let mut out = root.html();
+    for node in root.descendants().skip(1) {
+        let Some(element) = ElementRef::wrap(node) else {
+            continue;
+        };
+        if is_furniture(element, whole_body) {
+            // An ancestor already cut takes this with it, and the replace finds nothing.
+            out = out.replacen(&element.html(), "", 1);
+        }
+    }
+    out
+}
+
 /// The reading, and whether the page looks as though it needs a browser to draw it.
 #[must_use]
 pub fn read(url: &Url, status: u16, html: &str) -> (Reading, bool) {
@@ -91,11 +155,15 @@ pub fn read(url: &Url, status: u16, html: &str) -> (Reading, bool) {
         .iter()
         .filter_map(|selector| first(selector))
         .find(|element| text_of(*element).len() > 400);
-    let source = main.map_or_else(
-        || first("body").map_or_else(|| html.to_owned(), |body| body.html()),
-        |el| el.html(),
-    );
-    let markdown = html2text::from_read(source.as_bytes(), TEXT_WIDTH).unwrap_or_default();
+    let source = match main.or_else(|| first("body")) {
+        Some(root) => without_furniture(root, main.is_none()),
+        None => html.to_owned(),
+    };
+    // Footnotes would list every link a second time; the links are kept apart anyway.
+    let markdown = html2text::config::plain()
+        .link_footnotes(false)
+        .string_from_read(source.as_bytes(), TEXT_WIDTH)
+        .unwrap_or_default();
 
     let visible = markdown.split_whitespace().map(str::len).sum::<usize>();
     let says_script = html.contains("enable JavaScript") || html.contains("requires JavaScript");
@@ -160,6 +228,30 @@ mod tests {
             !reading.markdown.contains("Home"),
             "the article is chosen over the nav"
         );
+    }
+
+    #[test]
+    fn a_page_without_an_article_loses_its_menus_not_its_text() {
+        let body = "<p>Inflation was 3.2% in October. </p>".repeat(20);
+        let menu = (0..200).fold(String::new(), |mut menu, n| {
+            use std::fmt::Write as _;
+            let _ = write!(menu, r#"<li><a href="/s/{n}">Section {n}</a></li>"#);
+            menu
+        });
+        let html = format!(
+            r#"<html><body><header><a href="/">NSI</a></header><div class="main-menu"><ul>{menu}</ul></div>
+            <div class="page"><h1>Inflation</h1>{body}</div><footer>Address, phone</footer></body></html>"#
+        );
+        let (reading, _) = read(&url(), 200, &html);
+        assert!(reading.markdown.contains("Inflation was 3.2%"));
+        assert!(
+            !reading.markdown.contains("Section 7"),
+            "{}",
+            &reading.markdown[..300]
+        );
+        assert!(!reading.markdown.contains("Address, phone"));
+        assert!(!reading.markdown.contains("[1]:"), "no link footnotes");
+        assert_eq!(reading.links.len(), 201, "the links are still all kept");
     }
 
     #[test]

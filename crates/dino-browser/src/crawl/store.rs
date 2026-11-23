@@ -270,7 +270,7 @@ impl Store {
                 reading.title,
                 reading.lang,
                 markdown,
-                to_json(&reading.links),
+                packed(&reading.links),
                 to_json(&reading.jsonld),
                 to_json(&reading.meta),
                 hash,
@@ -363,7 +363,7 @@ impl Store {
                 "title": row.get::<_, Option<String>>(3)?,
                 "lang": row.get::<_, Option<String>>(4)?,
                 "markdown": row.get::<_, String>(5)?,
-                "links": parse(row.get(6)?),
+                "links": unpacked(row.get_ref(6)?),
                 "jsonld": parse(row.get(7)?),
                 "meta": parse(row.get(8)?),
                 "same_as": row.get::<_, Option<String>>(9)?,
@@ -407,6 +407,26 @@ impl Store {
             .query_map(params![limit], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect()
     }
+}
+
+/// A page's links are most of a crawl's size, since every page repeats the
+/// site's menus, so they are kept gzipped: about a fifth of the room.
+fn packed(value: &impl serde::Serialize) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let _ = gz.write_all(&serde_json::to_vec(value).unwrap_or_default());
+    gz.finish().unwrap_or_default()
+}
+
+/// Packed links, or the plain JSON a crawl made before they were packed.
+fn unpacked(value: rusqlite::types::ValueRef<'_>) -> Value {
+    use rusqlite::types::ValueRef;
+    let text = match value {
+        ValueRef::Blob(bytes) => super::sitemap::text(bytes),
+        ValueRef::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        _ => return Value::Null,
+    };
+    serde_json::from_str(&text).unwrap_or(Value::Null)
 }
 
 fn to_json(value: &impl serde::Serialize) -> String {
@@ -500,6 +520,25 @@ mod tests {
         store.add("https://b.test/1", "b.test", 1, None).unwrap();
         assert_eq!(store.skip_host("a.test", "refused").unwrap(), 2);
         assert_eq!(store.counts().unwrap().queued, 1);
+    }
+
+    #[test]
+    fn links_are_packed_and_old_plain_ones_still_read() {
+        let links = serde_json::json!([{"href": "https://a.test/", "text": "Начало"}]);
+        let db = Connection::open_in_memory().unwrap();
+        let blob = packed(&links);
+        let back: Value = db
+            .query_row("SELECT ?1", params![blob], |row| {
+                Ok(unpacked(row.get_ref(0)?))
+            })
+            .unwrap();
+        assert_eq!(back, links);
+        let old: Value = db
+            .query_row("SELECT ?1", params![links.to_string()], |row| {
+                Ok(unpacked(row.get_ref(0)?))
+            })
+            .unwrap();
+        assert_eq!(old, links);
     }
 
     #[test]
