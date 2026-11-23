@@ -2,6 +2,7 @@
 
 mod approve;
 mod ask;
+mod browse;
 mod calls;
 mod commands;
 mod config;
@@ -139,6 +140,10 @@ enum Command {
     /// Install, list, create and find plugins: bundles of skills, hooks, MCP
     /// servers and instructions.
     Plugin(plugin::command::PluginArgs),
+    /// Open a page in a real browser and print what it says. RFC-0022.
+    Browse(browse::BrowseArgs),
+    /// Crawl from seed pages in a real browser; killed, it resumes. RFC-0022.
+    Crawl(browse::CrawlArgs),
 }
 
 // These are switches rather than a state machine because each one means one
@@ -374,6 +379,8 @@ fn dispatch() -> Result<ExitCode> {
         Some(Command::Dash(args)) => on_runtime(dash(args)),
         Some(Command::Webhook(args)) => on_runtime(webhook(args)),
         Some(Command::Plugin(args)) => plugin::command::run(args),
+        Some(Command::Browse(args)) => on_runtime(browse::browse(args)),
+        Some(Command::Crawl(args)) => on_runtime(browse::crawl(args)),
         Some(Command::Palette) => {
             style::enable(false);
             print!("{}", greeting::palette());

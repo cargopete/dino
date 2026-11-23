@@ -1,0 +1,35 @@
+[package]
+name = "dino-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "A real Chromium driven over CDP, headless or through the Dino extension, and a durable crawl over it. RFC-0022."
+
+[features]
+default = ["crawl"]
+# The crawl keeps its frontier in SQLite. Off for embedders that already link
+# another SQLite (sqlx), since only one crate may link it.
+crawl = ["dep:rusqlite", "dep:regex", "dep:sha2", "dep:reqwest"]
+
+[dependencies]
+base64.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["connect", "handshake"] }
+tempfile = "3.20.0"
+url = "2.5.7"
+regex = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rusqlite = { version = "0.37.0", features = ["bundled"], optional = true }
+sha2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "test-util"] }
+
+[lints]
+workspace = true

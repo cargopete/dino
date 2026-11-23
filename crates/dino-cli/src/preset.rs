@@ -38,6 +38,7 @@ const REVIEW: &[&str] = &[
     "list",
     "github",
     "web_fetch",
+    "browse",
     dino_core::skills::SKILL,
     dino_core::todo::TODO,
     dino_core::blocker::REPORT_BLOCKER,

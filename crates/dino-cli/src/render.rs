@@ -792,6 +792,21 @@ fn write_out(text: &str) -> Result<(), SinkError> {
         .map_err(|error| SinkError::new(format!("cannot write to the terminal: {error}")))
 }
 
+/// `open <url>`, `click #3`, or the op alone.
+fn browse_summary(arguments: &Value) -> Option<String> {
+    let op = argument_string(arguments, "op")?;
+    Some(
+        match (
+            argument_string(arguments, "url"),
+            argument_number(arguments, "n"),
+        ) {
+            (Some(url), _) => format!("{op} {url}"),
+            (None, Some(n)) => format!("{op} #{n}"),
+            (None, None) => op,
+        },
+    )
+}
+
 /// One readable line for a proposed call, built from its arguments rather than
 /// from a description the model supplied.
 #[must_use]
@@ -838,6 +853,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             }
         }),
         "web_fetch" => argument_string(&call.arguments, "url"),
+        "browse" => browse_summary(&call.arguments),
         "web_search" => argument_string(&call.arguments, "query").map(|query| format!("{query:?}")),
         "ask" => call
             .arguments

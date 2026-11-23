@@ -1159,6 +1159,9 @@ pub fn session_tools_with(
         runtimes.push(Box::new(
             WebFetchTool::new(WebLimits::default()).map_err(setup)?,
         ));
+        if dino_browser::find_binary().is_some() {
+            runtimes.push(Box::new(dino_exec::BrowseTool::new()));
+        }
     }
     if let Some(backend) = &options.search {
         runtimes.push(Box::new(

@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; --ink: #1d1b19; --muted: #6b645c; --ground: #faf8f5; --line: #ddd6cc; --brick: #a4442a; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #ece6dd; --muted: #a39a8f; --ground: #1a1816; --line: #3a352f; --brick: #d0694b; } }
+  body { margin: 0; width: 300px; font: 13px/1.45 ui-sans-serif, system-ui, sans-serif; background: var(--ground); color: var(--ink); }
+  main { padding: 14px 16px 16px; }
+  h1 { font: 600 12px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 10px; }
+  .state { font-family: ui-monospace, monospace; color: var(--muted); margin-bottom: 12px; }
+  .state.on { color: #2e7d32; }
+  button { width: 100%; padding: 8px; border: 1px solid var(--brick); background: var(--brick); color: #fff; border-radius: 6px; font-weight: 600; cursor: pointer; }
+  button.quiet { background: transparent; color: var(--ink); border-color: var(--line); margin-top: 8px; }
+  label { display: block; font-size: 11px; color: var(--muted); margin: 10px 0 3px; }
+  input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); font: 12px ui-monospace, monospace; }
+  details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+  summary { cursor: pointer; color: var(--muted); }
+  #note { margin-top: 8px; color: var(--muted); min-height: 1em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Dino</h1>
+  <div id="state" class="state">checking</div>
+  <button id="share">Send this tab to Dino</button>
+  <div id="note"></div>
+  <details id="setup">
+    <summary>Connection</summary>
+    <label for="port">Port</label>
+    <input id="port" inputmode="numeric">
+    <label for="token">Token (dino browse --token)</label>
+    <input id="token" type="password" autocomplete="off">
+    <button id="save" class="quiet">Save and connect</button>
+  </details>
+</main>
+<script src="popup.js"></script>
+</body>
+</html>

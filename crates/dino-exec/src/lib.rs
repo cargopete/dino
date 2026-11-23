@@ -5,6 +5,7 @@
 //! three could come to differ.
 
 mod background;
+mod browse;
 mod code;
 mod escalation;
 mod exec;
@@ -23,6 +24,7 @@ mod verify;
 mod web;
 
 pub use crate::background::BackgroundTool;
+pub use crate::browse::BrowseTool;
 pub use crate::code::CodeLimits;
 pub use crate::code::CodeTool;
 pub use crate::exec::ExecLimits;
