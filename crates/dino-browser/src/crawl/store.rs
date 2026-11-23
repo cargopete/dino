@@ -13,6 +13,17 @@ use crate::Reading;
 /// Seconds after a failure before the page is tried again; past the last, it is given up.
 pub const BACKOFF: [i64; 3] = [30, 120, 480];
 
+/// A file the crawl saved to disk.
+#[derive(Debug, Clone)]
+pub struct File {
+    pub url: String,
+    pub final_url: String,
+    pub content_type: Option<String>,
+    pub bytes: u64,
+    pub sha256: String,
+    pub path: String,
+}
+
 #[derive(Debug)]
 pub struct Store {
     db: Mutex<Connection>,
@@ -27,6 +38,8 @@ pub struct Counts {
     pub skipped: u64,
     /// Queued but waiting out a backoff.
     pub waiting: u64,
+    /// Of `done`, how many were files rather than pages.
+    pub files: u64,
 }
 
 fn now() -> i64 {
@@ -74,6 +87,15 @@ impl Store {
                  fetched_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS pages_hash ON pages (hash);
+             CREATE TABLE IF NOT EXISTS files (
+                 url TEXT PRIMARY KEY,
+                 final_url TEXT NOT NULL,
+                 content_type TEXT,
+                 bytes INTEGER NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 fetched_at INTEGER NOT NULL
+             );
              UPDATE frontier SET state = 'queued' WHERE state = 'taken';",
         )?;
         Ok(Self { db: Mutex::new(db) })
@@ -273,7 +295,27 @@ impl Store {
                 _ => counts.skipped += n,
             }
         }
+        counts.files = db.query_row("SELECT count(*) FROM files", [], |row| row.get(0))?;
         Ok(counts)
+    }
+
+    /// Records a file saved to disk at `path`, and marks its URL done.
+    ///
+    /// # Errors
+    ///
+    /// Fails when SQLite does.
+    pub fn keep_file(&self, file: &File) -> rusqlite::Result<()> {
+        let db = self.db();
+        db.execute(
+            "INSERT OR REPLACE INTO files (url, final_url, content_type, bytes, sha256, path, fetched_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![file.url, file.final_url, file.content_type, file.bytes, file.sha256, file.path, now()],
+        )?;
+        db.execute(
+            "UPDATE frontier SET state = 'done', error = NULL WHERE url = ?1",
+            params![file.url],
+        )?;
+        Ok(())
     }
 
     /// Every kept page as one JSON object per line, duplicates included by reference.
@@ -297,6 +339,7 @@ impl Store {
         };
         while let Some(row) = rows.next()? {
             let line = serde_json::json!({
+                "kind": "page",
                 "url": row.get::<_, String>(0)?,
                 "final_url": row.get::<_, String>(1)?,
                 "status": row.get::<_, Option<u16>>(2)?,
@@ -309,6 +352,26 @@ impl Store {
                 "same_as": row.get::<_, Option<String>>(9)?,
                 "fetched_at": row.get::<_, i64>(10)?,
                 "depth": row.get::<_, u32>(11)?,
+            });
+            writeln!(out, "{line}")?;
+        }
+        let mut query = db.prepare(
+            "SELECT x.url, x.final_url, x.content_type, x.bytes, x.sha256, x.path, x.fetched_at, f.depth, f.found_on \
+             FROM files x JOIN frontier f ON f.url = x.url ORDER BY f.depth, f.rowid",
+        )?;
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            let line = serde_json::json!({
+                "kind": "file",
+                "url": row.get::<_, String>(0)?,
+                "final_url": row.get::<_, String>(1)?,
+                "content_type": row.get::<_, Option<String>>(2)?,
+                "bytes": row.get::<_, i64>(3)?,
+                "sha256": row.get::<_, String>(4)?,
+                "path": row.get::<_, String>(5)?,
+                "fetched_at": row.get::<_, i64>(6)?,
+                "depth": row.get::<_, u32>(7)?,
+                "found_on": row.get::<_, Option<String>>(8)?,
             });
             writeln!(out, "{line}")?;
         }

@@ -94,7 +94,24 @@ the same command again carries on.
   that was open, and is restarted.
 - **Politeness.** `robots.txt` is read per host and obeyed; one request per
   host per `--delay` (default 1 s), whatever `--concurrency` is.
-- `dino crawl --db crawl.sqlite --export pages.jsonl` writes what was kept.
+- **Plain first.** Each page is fetched with a plain GET and read from its
+  HTML; only a page that looks like a shell a script fills in (under 500
+  characters of text, almost no links, or a "enable JavaScript" notice) is
+  drawn in the browser. `--render always` or `never` overrides that, and
+  `--scroll` implies `always`.
+- **Files.** Linked PDFs, spreadsheets, Word files, CSV, JSON and archives are
+  saved to `crawl.sqlite.files/`, named by content hash, and listed in a
+  `files` table; images, media, fonts, CSS and scripts are never fetched. A
+  response is taken for a file by its extension or its type, any non-HTML
+  text included, since bnb.bg serves spreadsheets as `text/xls`. `--no-files`
+  turns this off. There is a timeout to connect and one per read, none on the
+  whole body, because bnb.bg spends over 40 s building one export.
+- **Sitemaps.** A new crawl reads the `Sitemap:` lines of each seed's
+  robots.txt and `/sitemap.xml`, gzipped or not, following indexes, at most 200
+  sitemaps and 100,000 URLs, and adds what is in scope at depth 1.
+  `--no-sitemaps` turns this off.
+- `dino crawl --db crawl.sqlite --export pages.jsonl` writes what was kept,
+  pages and files alike, each line saying which.
 
 ## 5. What it will not do
 
