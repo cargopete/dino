@@ -108,3 +108,45 @@ async fn a_real_tab_reads_clicks_types_and_scrolls() {
     assert_eq!(&shot[1..4], b"PNG");
     page.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guarded_browser_cannot_reach_a_refused_address() {
+    if dino_browser::find_binary().is_none() {
+        eprintln!("no browser here; skipped");
+        return;
+    }
+    let url = serve().await;
+    let guard = dino_browser::Guard::start(std::sync::Arc::new(|ip: std::net::IpAddr| {
+        !ip.is_loopback()
+    }))
+    .await
+    .unwrap();
+    let browser = Chromium::launch_guarded(Some(guard)).await.unwrap();
+    let page = browser.new_page().await.unwrap();
+    let landing = page.goto(&url).await.unwrap();
+    let reading = page.read().await.unwrap();
+    assert_eq!(landing.status, Some(403), "{}", reading.markdown);
+    assert!(!reading.markdown.contains("rendered late"));
+    let fetched = page
+        .eval(&format!(
+            "fetch('{url}').then(r => r.status).catch(e => 'blocked: ' + e)"
+        ))
+        .await
+        .unwrap();
+    assert_ne!(fetched, serde_json::json!(200), "{fetched}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "reaches the internet"]
+async fn a_guarded_browser_still_reads_a_public_page() {
+    let guard = dino_browser::Guard::start(std::sync::Arc::new(|ip: std::net::IpAddr| {
+        !ip.is_loopback()
+    }))
+    .await
+    .unwrap();
+    let browser = Chromium::launch_guarded(Some(guard)).await.unwrap();
+    let page = browser.new_page().await.unwrap();
+    let landing = page.goto("https://www.ebag.bg/").await.unwrap();
+    assert_eq!(landing.status, Some(200));
+    assert!(page.read().await.unwrap().links.len() > 20);
+}

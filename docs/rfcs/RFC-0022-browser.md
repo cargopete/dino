@@ -118,6 +118,11 @@ unless `--browser extension` is given, and then still obey `robots.txt`.
   the person already has open, so a model cannot read their mail by asking for
   "the current tab". Reading the tab the person is looking at is a separate,
   explicit button in the extension's popup ("send this tab to Dino").
+- A server that browses for strangers, as Dancho does, launches with
+  `Chromium::launch_guarded`: every connection goes through a loopback proxy
+  (`Guard`) that resolves it, refuses it unless the caller allows every address,
+  and pins it to the address checked. QUIC and unproxied WebRTC are off, so
+  nothing leaves round it. A page cannot reach loopback, the LAN or a tailnet.
 - In a Dino session, `browse` is approved per host exactly as `web_fetch` is
   (RFC-0021), because a page is also a way out.
 

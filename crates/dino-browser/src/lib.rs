@@ -6,6 +6,7 @@ mod chromium;
 #[cfg(feature = "crawl")]
 pub mod crawl;
 mod page;
+mod proxy;
 mod rpc;
 pub mod urls;
 
@@ -22,6 +23,8 @@ pub use crate::page::Landing;
 pub use crate::page::Link;
 pub use crate::page::Page;
 pub use crate::page::Reading;
+pub use crate::proxy::Allow;
+pub use crate::proxy::Guard;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

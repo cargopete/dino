@@ -86,6 +86,16 @@ impl Chromium {
     /// Fails when no browser is found, or it does not print its DevTools
     /// address within 20 seconds.
     pub async fn launch() -> Result<Self, Error> {
+        Self::launch_guarded(None).await
+    }
+
+    /// As [`Self::launch`], with every connection the browser makes sent
+    /// through `guard`, websockets included, and no UDP of its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_guarded(guard: Option<crate::Guard>) -> Result<Self, Error> {
         let binary = find_binary().ok_or(Error::NoBrowser)?;
         let profile = tempfile::Builder::new().prefix("dino-browser-").tempdir()?;
         let mut command = Command::new("/bin/sh");
@@ -106,11 +116,20 @@ impl Chromium {
                 "--disable-dev-shm-usage",
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
-                "about:blank",
             ]);
+        if let Some(guard) = guard {
+            // `<-loopback>` stops Chromium sending localhost round the proxy.
+            command.args([
+                format!("--proxy-server=http://{}", guard.addr),
+                "--proxy-bypass-list=<-loopback>".to_owned(),
+                "--disable-quic".to_owned(),
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
+            ]);
+        }
         if std::env::var_os("DINO_BROWSER_NO_SANDBOX").is_some() {
             command.arg("--no-sandbox");
         }
+        command.arg("about:blank");
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
