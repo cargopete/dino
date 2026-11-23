@@ -1,6 +1,8 @@
 //! A crawl over real browser tabs, durable by construction. RFC-0022 section 4.
 
+mod plain;
 mod robots;
+mod sitemap;
 mod store;
 
 use std::collections::HashMap;
@@ -18,6 +20,7 @@ use url::Url;
 
 pub use self::robots::Robots;
 pub use self::store::Counts;
+pub use self::store::File;
 pub use self::store::Store;
 use crate::Bridge;
 use crate::Browser;
@@ -29,12 +32,35 @@ use crate::urls;
 
 /// One page, opened, settled and read, may take this long before it is a failure.
 const VISIT_LIMIT: Duration = Duration::from_secs(90);
-const FILES: &[&str] = &[
-    "pdf", "zip", "gz", "tgz", "rar", "7z", "jpg", "jpeg", "png", "gif", "webp", "svg", "ico",
-    "mp3", "mp4", "mov", "avi", "webm", "exe", "dmg", "iso", "apk", "woff", "woff2", "ttf", "css",
-    "js", "xlsx", "xls", "docx", "doc", "pptx", "csv",
+/// Never fetched: nothing in them a reader wants.
+const MEDIA: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "svg", "ico", "bmp", "tif", "tiff", "mp3", "mp4", "m4a",
+    "mov", "avi", "webm", "wav", "ogg", "exe", "dmg", "iso", "apk", "msi", "woff", "woff2", "ttf",
+    "otf", "eot", "css", "js", "mjs", "map",
 ];
+/// Saved to disk beside the crawl, when files are wanted.
+const DOCUMENTS: &[&str] = &[
+    "pdf", "xlsx", "xls", "xlsm", "csv", "tsv", "docx", "doc", "rtf", "pptx", "ppt", "odt", "ods",
+    "odp", "zip", "gz", "tgz", "7z", "rar", "json", "txt", "epub",
+];
+const MAX_FILE: u64 = 200 * 1024 * 1024;
+const MAX_PAGE: usize = 10 * 1024 * 1024;
+/// Sitemaps read at the start of a crawl, and the URLs taken from them, at most.
+const MAX_SITEMAPS: usize = 200;
+const MAX_SITEMAP_URLS: usize = 100_000;
 
+/// When a page is drawn in a browser rather than read from its HTML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Render {
+    /// Only a page whose HTML is a shell a script fills in.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+// Switches, each one flag on the command line, rather than a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct Config {
     pub seeds: Vec<String>,
@@ -52,6 +78,11 @@ pub struct Config {
     /// Scroll each page until it stops growing before reading it.
     pub scroll: bool,
     pub extension: Option<Bridge>,
+    pub render: Render,
+    /// Save linked documents (PDFs, spreadsheets, archives) to disk.
+    pub files: bool,
+    /// Add the seeds' sitemaps to the frontier at the start.
+    pub sitemaps: bool,
 }
 
 #[derive(Debug)]
@@ -72,10 +103,89 @@ impl Scope {
     }
 }
 
-fn file_kind(url: &str) -> Option<&'static str> {
+fn extension(url: &str) -> Option<String> {
     let path = Url::parse(url).ok()?.path().to_ascii_lowercase();
-    let extension = path.rsplit_once('.')?.1;
-    FILES.iter().copied().find(|kind| *kind == extension)
+    let last = path.rsplit('/').next()?;
+    last.rsplit_once('.')
+        .map(|(_, extension)| extension.to_owned())
+}
+
+fn media_kind(url: &str) -> Option<&'static str> {
+    let extension = extension(url)?;
+    MEDIA.iter().copied().find(|kind| *kind == extension)
+}
+
+fn document_kind(url: &str) -> Option<&'static str> {
+    let extension = extension(url)?;
+    DOCUMENTS.iter().copied().find(|kind| *kind == extension)
+}
+
+/// Whether a response of this type is a document to save rather than a page to read.
+fn document_type(content_type: &str) -> bool {
+    let kind = content_type.split(';').next().unwrap_or_default().trim();
+    kind == "application/pdf"
+        || kind.starts_with("application/vnd.openxmlformats")
+        || kind.starts_with("application/vnd.ms-")
+        || kind.starts_with("application/vnd.oasis.opendocument")
+        || matches!(kind, "application/msword" | "application/zip" | "application/gzip" | "application/json" | "application/rtf" | "application/epub+zip" | "application/octet-stream")
+        // bnb.bg serves spreadsheets as text/xls; any text that is not HTML is kept as a file.
+        || (kind.starts_with("text/") && kind != "text/html")
+}
+
+/// An extension for a saved file whose URL gives none.
+fn type_extension(content_type: &str) -> Option<&'static str> {
+    let kind = content_type.split(';').next().unwrap_or_default().trim();
+    Some(match kind {
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.ms-excel" | "text/xls" | "application/xls" => "xls",
+        "application/msword" => "doc",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        "application/vnd.oasis.opendocument.text" => "odt",
+        "text/csv" => "csv",
+        "application/json" => "json",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        "text/plain" => "txt",
+        "application/xml" | "text/xml" => "xml",
+        _ => return None,
+    })
+}
+
+fn files_dir(db: &std::path::Path) -> PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push(".files");
+    PathBuf::from(name)
+}
+
+/// A host that refuses this many pages in a row is given up whole.
+const REFUSALS: u32 = 3;
+
+/// A page that redirected to the site's own "not found" page, with a 200.
+fn soft_404(requested: &str, landed: &str) -> bool {
+    let path = |url: &str| {
+        Url::parse(url)
+            .map(|u| u.path().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    let (asked, got) = (path(requested), path(landed));
+    let missing = |p: &str| {
+        p.split('/').any(|part| part == "404")
+            || ["not-found", "notfound", "page-not-found", "error404"]
+                .iter()
+                .any(|word| p.contains(word))
+    };
+    asked != got && missing(&got) && !missing(&asked)
+}
+
+/// What a plain GET found.
+enum Plain {
+    Page { reading: Reading, shell: bool },
+    File(File),
+    NotAPage(String),
 }
 
 /// Starts the headless browser again when it dies, so no single crash ends a crawl.
@@ -108,6 +218,8 @@ impl Pool {
 #[derive(Debug, Default)]
 struct Hosts {
     next: Mutex<HashMap<String, Instant>>,
+    /// Refusals in a row, per host.
+    refusals: Mutex<HashMap<String, u32>>,
     robots: tokio::sync::Mutex<HashMap<String, Arc<Robots>>>,
 }
 
@@ -132,6 +244,13 @@ enum Outcome {
         status: Option<u16>,
         links: usize,
         duplicate: bool,
+        drawn: bool,
+    },
+    Saved {
+        bytes: u64,
+    },
+    Skipped {
+        why: String,
     },
     Failed {
         why: String,
@@ -159,8 +278,11 @@ impl Crawl {
         if hosts.is_empty() {
             hosts = store.seed_hosts()?;
         }
+        // No limit on the whole body: bnb.bg builds an export for over 15 s before its first byte,
+        // and a large file takes as long as it takes, provided bytes keep coming.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(90))
             .user_agent("dino-crawl (+https://github.com/cargopete/dino)")
             .build()?;
         Ok(Self {
@@ -188,6 +310,10 @@ impl Crawl {
     /// Fails only when the crawl file does; a page or browser failure is recorded and survived.
     pub async fn run(self: Arc<Self>) -> Result<Summary, Box<dyn std::error::Error + Send + Sync>> {
         let started = Instant::now();
+        if self.scope.config.sitemaps && !self.scope.config.seeds.is_empty() {
+            let added = self.seed_sitemaps().await?;
+            eprintln!("{added} URLs from sitemaps");
+        }
         let workers: Vec<_> = (0..self.scope.config.concurrency.max(1))
             .map(|worker| {
                 let crawl = self.clone();
@@ -297,52 +423,295 @@ impl Crawl {
             self.reserve(&host, gap);
 
             let started = Instant::now();
-            let outcome = match self.visit(&mut page, &url).await {
-                Ok(reading) => self.record(&url, depth, &reading)?,
-                Err(error) => {
-                    // A fresh tab next time, whatever went wrong with this one.
-                    if let Some(old) = page.take() {
-                        let _ = tokio::time::timeout(Duration::from_secs(5), old.close()).await;
-                    }
-                    Outcome::Failed {
-                        why: error.to_string(),
-                        retry: true,
-                    }
-                }
-            };
+            let outcome = self.fetch(&mut page, &url, depth).await?;
             let took = started.elapsed().as_secs_f32();
-            let counts = self.store.counts()?;
-            let tally = format!(
-                "{} kept, {} to go",
-                counts.done,
-                counts.queued + counts.waiting + counts.taken
-            );
-            match outcome {
-                Outcome::Kept {
-                    status,
-                    links,
-                    duplicate,
-                } => {
-                    let status = status.map_or_else(|| "---".to_owned(), |s| s.to_string());
-                    let same = if duplicate {
-                        " (same text as a page already kept)"
-                    } else {
-                        ""
-                    };
-                    eprintln!(
-                        "[{worker}] {status} {url} {took:.1}s, {links} new links{same} · {tally}"
-                    );
-                }
-                Outcome::Failed { why, retry } => {
-                    self.store.fail(&url, &why, retry)?;
-                    eprintln!("[{worker}] failed {url} {took:.1}s: {why} · {tally}");
-                }
-            }
+            self.report(worker, &url, &host, took, outcome)?;
         }
         if let Some(page) = page {
             let _ = tokio::time::timeout(Duration::from_secs(5), page.close()).await;
         }
         Ok(())
+    }
+
+    /// Records what became of one URL, says so, and gives up a host that keeps refusing.
+    fn report(
+        &self,
+        worker: usize,
+        url: &str,
+        host: &str,
+        took: f32,
+        outcome: Outcome,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let counts = self.store.counts()?;
+        let tally = format!(
+            "{} kept, {} to go",
+            counts.done,
+            counts.queued + counts.waiting + counts.taken
+        );
+        if matches!(outcome, Outcome::Kept { .. } | Outcome::Saved { .. }) {
+            self.hosts.refusals.lock().expect("hosts lock").remove(host);
+        }
+        match outcome {
+            Outcome::Kept {
+                status,
+                links,
+                duplicate,
+                drawn,
+            } => {
+                let status = status.map_or_else(|| "---".to_owned(), |s| s.to_string());
+                let same = if duplicate {
+                    " (same text as a page already kept)"
+                } else {
+                    ""
+                };
+                let how = if drawn { " drawn" } else { "" };
+                eprintln!(
+                    "[{worker}] {status}{how} {url} {took:.1}s, {links} new links{same} · {tally}"
+                );
+            }
+            Outcome::Saved { bytes } => {
+                eprintln!(
+                    "[{worker}] file {url} {took:.1}s, {} KB · {tally}",
+                    bytes / 1024
+                );
+            }
+            Outcome::Skipped { why } => {
+                self.store.set_skipped(url, &why)?;
+                eprintln!("[{worker}] skipped {url}: {why} · {tally}");
+            }
+            Outcome::Failed { why, retry } => {
+                self.store.fail(url, &why, retry)?;
+                eprintln!("[{worker}] failed {url} {took:.1}s: {why} · {tally}");
+                if why.starts_with("refused") {
+                    let mut refusals = self.hosts.refusals.lock().expect("hosts lock");
+                    let count = refusals.entry(host.to_owned()).or_default();
+                    *count += 1;
+                    if *count >= REFUSALS {
+                        let dropped = self
+                            .store
+                            .skip_host(host, "the host refuses automated reading")?;
+                        eprintln!(
+                            "{host} refused {count} pages in a row; giving up its other {dropped}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A plain GET first, the browser only for a page that needs it.
+    async fn fetch(
+        &self,
+        page: &mut Option<Page>,
+        url: &str,
+        depth: u32,
+    ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
+        let render = self.scope.config.render;
+        if render != Render::Always || document_kind(url).is_some() {
+            match self.plain(url).await {
+                Ok(Plain::File(file)) => {
+                    self.store.keep_file(&file)?;
+                    return Ok(Outcome::Saved { bytes: file.bytes });
+                }
+                Ok(Plain::NotAPage(why)) => return Ok(Outcome::Skipped { why }),
+                Ok(Plain::Page { reading, shell }) => {
+                    if !(shell && render == Render::Auto) {
+                        return self.record(url, depth, &reading, false);
+                    }
+                }
+                Err(outcome) => return Ok(outcome),
+            }
+        }
+        match self.visit(page, url).await {
+            Ok(reading) => self.record(url, depth, &reading, true),
+            Err(error) => {
+                // A fresh tab next time, whatever went wrong with this one.
+                if let Some(old) = page.take() {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), old.close()).await;
+                }
+                // A download aborts the navigation; read it plainly instead.
+                if render == Render::Always
+                    && error.to_string().contains("ERR_ABORTED")
+                    && let Ok(Plain::File(file)) = self.plain(url).await
+                {
+                    self.store.keep_file(&file)?;
+                    return Ok(Outcome::Saved { bytes: file.bytes });
+                }
+                Ok(Outcome::Failed {
+                    why: error.to_string(),
+                    retry: true,
+                })
+            }
+        }
+    }
+
+    async fn plain(&self, url: &str) -> Result<Plain, Outcome> {
+        let failed = |why: String, retry: bool| Outcome::Failed { why, retry };
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| failed(format!("request failed: {error}"), true))?;
+        let status = response.status().as_u16();
+        match status {
+            401 | 403 => {
+                return Err(failed(
+                    format!("refused ({status}); not retried, see RFC-0022 section 5"),
+                    false,
+                ));
+            }
+            404 | 410 => return Err(failed(format!("gone ({status})"), false)),
+            429 | 500..=599 => return Err(failed(format!("server said {status}"), true)),
+            _ if status >= 400 => return Err(failed(format!("server said {status}"), false)),
+            _ => {}
+        }
+        let final_url = response.url().clone();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("text/html")
+            .to_ascii_lowercase();
+        let html =
+            content_type.starts_with("text/html") || content_type.starts_with("application/xhtml");
+        if document_kind(url).is_some()
+            || document_kind(final_url.as_str()).is_some()
+            || (!html && document_type(&content_type))
+        {
+            if !self.scope.config.files {
+                return Ok(Plain::NotAPage("a file, and files are off".into()));
+            }
+            return self
+                .download(url, &final_url, &content_type, response)
+                .await
+                .map(Plain::File)
+                .map_err(|why| failed(why, true));
+        }
+        if !html {
+            return Ok(Plain::NotAPage(format!("not a page: {content_type}")));
+        }
+        let mut body = Vec::new();
+        let mut response = response;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| failed(format!("cannot read the page: {error}"), true))?
+        {
+            body.extend_from_slice(&chunk);
+            if body.len() > MAX_PAGE {
+                break;
+            }
+        }
+        let (reading, shell) = plain::read(&final_url, status, &String::from_utf8_lossy(&body));
+        Ok(Plain::Page { reading, shell })
+    }
+
+    async fn download(
+        &self,
+        url: &str,
+        final_url: &Url,
+        content_type: &str,
+        mut response: reqwest::Response,
+    ) -> Result<File, String> {
+        use tokio::io::AsyncWriteExt as _;
+        let dir = files_dir(&self.scope.config.db);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+        let part = dir.join(format!(
+            "{}.part",
+            crate::hex(&sha2::Sha256::digest(url.as_bytes()))
+        ));
+        let mut out = tokio::fs::File::create(&part)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut hasher = sha2::Sha256::new();
+        let mut bytes = 0u64;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("cannot read the file: {e}"))?
+        {
+            bytes += chunk.len() as u64;
+            if bytes > MAX_FILE {
+                drop(out);
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(format!("over {} MB", MAX_FILE / (1024 * 1024)));
+            }
+            hasher.update(&chunk);
+            out.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        }
+        out.flush().await.map_err(|e| e.to_string())?;
+        let sha256 = crate::hex(&hasher.finalize());
+        let kind = document_kind(final_url.as_str())
+            .or_else(|| document_kind(url))
+            .or_else(|| type_extension(content_type))
+            .unwrap_or("bin");
+        let path = dir.join(format!("{}.{kind}", &sha256[..16]));
+        tokio::fs::rename(&part, &path)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(File {
+            url: url.to_owned(),
+            final_url: final_url.to_string(),
+            content_type: Some(content_type.to_owned()),
+            bytes,
+            sha256,
+            path: path.display().to_string(),
+        })
+    }
+
+    /// Every page the seeds' sitemaps list that is in scope, at depth 1.
+    async fn seed_sitemaps(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let mut queue: Vec<String> = Vec::new();
+        for seed in &self.scope.config.seeds {
+            let Ok(url) = Url::parse(seed) else { continue };
+            let origin = url.origin().ascii_serialization();
+            queue.extend(self.robots(seed).await.sitemaps.iter().cloned());
+            queue.push(format!("{origin}/sitemap.xml"));
+        }
+        let (mut seen, mut read, mut added, mut listed) =
+            (std::collections::HashSet::new(), 0, 0, 0);
+        while let Some(map) = queue.pop() {
+            if !seen.insert(map.clone()) || read >= MAX_SITEMAPS || listed >= MAX_SITEMAP_URLS {
+                continue;
+            }
+            read += 1;
+            let Ok(response) = self.http.get(&map).send().await else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let Ok(bytes) = response.bytes().await else {
+                continue;
+            };
+            match sitemap::parse(&sitemap::text(&bytes)) {
+                sitemap::Sitemap::Index(maps) => queue.extend(maps),
+                sitemap::Sitemap::Pages(pages) => {
+                    for page in pages {
+                        listed += 1;
+                        let Some(next) = urls::normalise(&page) else {
+                            continue;
+                        };
+                        if self.scope.admits(&next, 1)
+                            && media_kind(&next).is_none()
+                            && self.store.add(
+                                &next,
+                                &urls::host(&next).unwrap_or_default(),
+                                1,
+                                Some(&map),
+                            )?
+                        {
+                            added += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(added)
     }
 
     async fn visit(&self, page: &mut Option<Page>, url: &str) -> Result<Reading, Error> {
@@ -367,7 +736,14 @@ impl Crawl {
         url: &str,
         depth: u32,
         reading: &Reading,
+        drawn: bool,
     ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
+        if soft_404(url, &reading.url) {
+            return Ok(Outcome::Failed {
+                why: format!("gone (sent on to {})", reading.url),
+                retry: false,
+            });
+        }
         match reading.status {
             Some(status @ (401 | 403)) => {
                 return Ok(Outcome::Failed {
@@ -401,9 +777,17 @@ impl Crawl {
                     continue;
                 }
                 let host = urls::host(&next).unwrap_or_default();
-                if let Some(kind) = file_kind(&next) {
+                if let Some(kind) = media_kind(&next) {
                     self.store
-                        .skip(&next, &host, depth + 1, &format!("file: {kind}"))?;
+                        .skip(&next, &host, depth + 1, &format!("media: {kind}"))?;
+                } else if let Some(kind) = document_kind(&next).filter(|_| !self.scope.config.files)
+                {
+                    self.store.skip(
+                        &next,
+                        &host,
+                        depth + 1,
+                        &format!("file, not saved: {kind}"),
+                    )?;
                 } else if self.store.add(&next, &host, depth + 1, Some(url))? {
                     added += 1;
                 }
@@ -413,6 +797,7 @@ impl Crawl {
             status: reading.status,
             links: added,
             duplicate,
+            drawn,
         })
     }
 }
@@ -435,6 +820,9 @@ mod tests {
             exclude: vec![],
             scroll: false,
             extension: None,
+            render: Render::Auto,
+            files: true,
+            sitemaps: true,
         };
         f(&mut config);
         Scope {
@@ -465,8 +853,45 @@ mod tests {
 
     #[test]
     fn files_are_recognised_by_extension() {
-        assert_eq!(file_kind("https://bnb.bg/a/b.XLSX?x=1"), Some("xlsx"));
-        assert_eq!(file_kind("https://bnb.bg/a/b.html"), None);
-        assert_eq!(file_kind("https://bnb.bg/"), None);
+        assert_eq!(document_kind("https://bnb.bg/a/b.XLSX?x=1"), Some("xlsx"));
+        assert_eq!(document_kind("https://bnb.bg/a/b.html"), None);
+        assert_eq!(document_kind("https://bnb.bg/"), None);
+        assert_eq!(
+            document_kind("https://bnb.bg/v1.2/page"),
+            None,
+            "a dot in a directory is not an extension"
+        );
+        assert_eq!(media_kind("https://bnb.bg/logo.PNG"), Some("png"));
+    }
+
+    #[test]
+    fn a_redirect_to_the_sites_404_page_is_gone() {
+        assert!(soft_404(
+            "https://parliament.bg/bg/MP/3264",
+            "https://parliament.bg/bg/404"
+        ));
+        assert!(soft_404(
+            "https://a.test/x",
+            "https://a.test/page-not-found?from=x"
+        ));
+        assert!(!soft_404("https://a.test/x", "https://a.test/x/"));
+        assert!(!soft_404(
+            "https://a.test/errors/404",
+            "https://a.test/errors/404"
+        ));
+        assert!(!soft_404("https://a.test/x", "https://a.test/y/4040"));
+    }
+
+    #[test]
+    fn a_response_type_can_say_it_is_a_document() {
+        assert!(document_type("application/pdf"));
+        assert!(document_type(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ));
+        assert!(!document_type("text/html; charset=utf-8"));
+        assert!(!document_type("image/png"));
+        assert!(document_type("text/xls;charset=utf-8"));
+        assert_eq!(type_extension("text/xls;charset=utf-8"), Some("xls"));
+        assert_eq!(type_extension("image/png"), None);
     }
 }

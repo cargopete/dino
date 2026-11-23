@@ -4,6 +4,8 @@
 pub struct Robots {
     rules: Vec<(bool, String)>,
     pub crawl_delay: Option<f64>,
+    /// `Sitemap:` lines, which belong to no group.
+    pub sitemaps: Vec<String>,
 }
 
 impl Robots {
@@ -11,6 +13,7 @@ impl Robots {
     pub fn parse(text: &str) -> Self {
         let mut groups: Vec<(Vec<String>, Self)> = Vec::new();
         let mut in_agents = false;
+        let mut sitemaps = Vec::new();
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or_default().trim();
             let Some((key, value)) = line.split_once(':') else {
@@ -38,6 +41,7 @@ impl Robots {
                         group.rules.push((key == "allow", value.to_owned()));
                     }
                 }
+                "sitemap" => sitemaps.push(value.to_owned()),
                 _ => {}
             }
         }
@@ -46,10 +50,12 @@ impl Robots {
                 .iter()
                 .find(|(agents, _)| agents.iter().any(|agent| agent == name))
         };
-        pick("dino")
+        let mut chosen = pick("dino")
             .or_else(|| pick("*"))
             .map(|(_, group)| group.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        chosen.sitemaps = sitemaps;
+        chosen
     }
 
     /// Whether `path` (with its query) may be fetched.
@@ -122,6 +128,17 @@ mod tests {
     fn our_own_group_beats_the_star() {
         let robots = Robots::parse("User-agent: dino\nDisallow: /\n\nUser-agent: *\nAllow: /\n");
         assert!(!robots.allows("/anything"));
+    }
+
+    #[test]
+    fn sitemaps_are_kept_whatever_the_group() {
+        let robots = Robots::parse(
+            "Sitemap: https://a.test/s.xml\nUser-agent: *\nDisallow: /x\nSitemap: https://a.test/t.xml\n",
+        );
+        assert_eq!(
+            robots.sitemaps,
+            ["https://a.test/s.xml", "https://a.test/t.xml"]
+        );
     }
 
     #[test]

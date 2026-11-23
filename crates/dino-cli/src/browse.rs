@@ -16,6 +16,7 @@ use dino_browser::Browser;
 use dino_browser::Chromium;
 use dino_browser::crawl::Config;
 use dino_browser::crawl::Crawl;
+use dino_browser::crawl::Render;
 use dino_browser::crawl::Store;
 use regex::Regex;
 
@@ -53,6 +54,7 @@ pub struct BrowseArgs {
     token: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct CrawlArgs {
     /// Pages to start from. Leave them out to carry on a crawl already in --db.
@@ -89,12 +91,29 @@ pub struct CrawlArgs {
     /// Scroll each page until it stops growing, for listings.
     #[arg(long)]
     scroll: bool,
+    /// When to draw a page in the browser: auto (only when its HTML is a
+    /// shell a script fills in), always, or never.
+    #[arg(long, value_enum, default_value_t = RenderArg::Auto)]
+    render: RenderArg,
+    /// Do not save linked PDFs, spreadsheets and archives.
+    #[arg(long)]
+    no_files: bool,
+    /// Do not read the seeds' sitemaps at the start.
+    #[arg(long)]
+    no_sitemaps: bool,
     /// Write the kept pages as JSON lines to this path ("-" for stdout) and exit.
     #[arg(long, value_name = "PATH")]
     export: Option<PathBuf>,
     /// Print the crawl's counts and recent failures and exit.
     #[arg(long, conflicts_with = "export")]
     status: bool,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RenderArg {
+    Auto,
+    Always,
+    Never,
 }
 
 async fn bridge(port: u16) -> Result<Bridge> {
@@ -216,6 +235,15 @@ pub async fn crawl(args: CrawlArgs) -> Result<ExitCode> {
         exclude: compile(&args.exclude)?,
         scroll: args.scroll,
         extension,
+        render: match args.render {
+            // Scrolling needs a page drawn in a browser.
+            RenderArg::Auto if args.scroll => Render::Always,
+            RenderArg::Auto => Render::Auto,
+            RenderArg::Always => Render::Always,
+            RenderArg::Never => Render::Never,
+        },
+        files: !args.no_files,
+        sitemaps: !args.no_sitemaps,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let crawl = Arc::new(Crawl::new(config, stop.clone()).map_err(|error| anyhow!(error))?);
@@ -233,8 +261,9 @@ pub async fn crawl(args: CrawlArgs) -> Result<ExitCode> {
     let summary = crawl.run().await.map_err(|error| anyhow!(error))?;
     let counts = summary.counts;
     eprintln!(
-        "{} kept, {} failed, {} skipped, {} still to go, in {}s; results in {}",
+        "{} kept ({} of them files), {} failed, {} skipped, {} still to go, in {}s; results in {}",
         counts.done,
+        counts.files,
         counts.failed,
         counts.skipped,
         counts.queued + counts.waiting + counts.taken,
