@@ -157,9 +157,9 @@ impl Store {
     /// # Errors
     ///
     /// Fails when SQLite does.
-    pub fn seed_hosts(&self) -> rusqlite::Result<Vec<String>> {
+    pub fn seed_urls(&self) -> rusqlite::Result<Vec<String>> {
         let db = self.db();
-        let mut query = db.prepare("SELECT DISTINCT host FROM frontier WHERE depth = 0")?;
+        let mut query = db.prepare("SELECT url FROM frontier WHERE depth = 0")?;
         query.query_map([], |row| row.get(0))?.collect()
     }
 
