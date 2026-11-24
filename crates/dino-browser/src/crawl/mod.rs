@@ -231,6 +231,8 @@ pub struct Crawl {
     hosts: Hosts,
     http: reqwest::Client,
     stop: Arc<AtomicBool>,
+    /// Pages taken and not yet recorded, counted against `max_pages` so open tabs cannot overshoot it.
+    open: Mutex<u64>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -295,6 +297,7 @@ impl Crawl {
             hosts: Hosts::default(),
             http,
             stop,
+            open: Mutex::new(0),
         })
     }
 
@@ -386,51 +389,70 @@ impl Crawl {
                 break;
             }
             let counts = self.store.counts()?;
-            if self
-                .scope
-                .config
-                .max_pages
-                .is_some_and(|max| counts.done >= max)
-            {
+            let max = self.scope.config.max_pages;
+            if max.is_some_and(|max| counts.done >= max) {
                 break;
             }
-            let Some((url, host, depth)) = self.store.take(|host| self.host_ready(host))? else {
+            let taken = {
+                let mut open = self.open.lock().expect("open lock");
+                if max.is_some_and(|max| counts.done + *open >= max) {
+                    None
+                } else {
+                    let taken = self.store.take(|host| self.host_ready(host))?;
+                    *open += u64::from(taken.is_some());
+                    taken
+                }
+            };
+            let Some((url, host, depth)) = taken else {
                 if counts.queued + counts.taken + counts.waiting == 0 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 continue;
             };
-            let robots = self.robots(&url).await;
-            let path = Url::parse(&url)
-                .map(|u| {
-                    u.query()
-                        .map_or_else(|| u.path().to_owned(), |q| format!("{}?{q}", u.path()))
-                })
-                .unwrap_or_default();
-            if !robots.allows(&path) {
-                self.store.set_skipped(&url, "disallowed by robots.txt")?;
-                continue;
-            }
-            let gap = robots
-                .crawl_delay
-                .map_or(self.scope.config.delay, |seconds| {
-                    self.scope
-                        .config
-                        .delay
-                        .max(Duration::from_secs_f64(seconds.clamp(0.0, 30.0)))
-                });
-            self.reserve(&host, gap);
-
-            let started = Instant::now();
-            let outcome = self.fetch(&mut page, &url, depth).await?;
-            let took = started.elapsed().as_secs_f32();
-            self.report(worker, &url, &host, took, outcome)?;
+            let result = self.visit_one(worker, &mut page, &url, &host, depth).await;
+            *self.open.lock().expect("open lock") -= 1;
+            result?;
         }
         if let Some(page) = page {
             let _ = tokio::time::timeout(Duration::from_secs(5), page.close()).await;
         }
         Ok(())
+    }
+
+    /// Checks robots.txt, waits the host's turn, then fetches and records one URL.
+    async fn visit_one(
+        &self,
+        worker: usize,
+        page: &mut Option<Page>,
+        url: &str,
+        host: &str,
+        depth: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let robots = self.robots(url).await;
+        let path = Url::parse(url)
+            .map(|u| {
+                u.query()
+                    .map_or_else(|| u.path().to_owned(), |q| format!("{}?{q}", u.path()))
+            })
+            .unwrap_or_default();
+        if !robots.allows(&path) {
+            self.store.set_skipped(url, "disallowed by robots.txt")?;
+            return Ok(());
+        }
+        let gap = robots
+            .crawl_delay
+            .map_or(self.scope.config.delay, |seconds| {
+                self.scope
+                    .config
+                    .delay
+                    .max(Duration::from_secs_f64(seconds.clamp(0.0, 30.0)))
+            });
+        self.reserve(host, gap);
+        let started = Instant::now();
+        let outcome = self.fetch(page, url, depth).await?;
+        let took = started.elapsed().as_secs_f32();
+        self.report(worker, url, host, took, outcome)
     }
 
     /// Records what became of one URL, says so, and gives up a host that keeps refusing.
@@ -829,6 +851,62 @@ mod tests {
             hosts: vec!["bnb.bg".into()],
             config,
         }
+    }
+
+    /// A site on loopback: each page links to ten others, and answers after a pause.
+    async fn site() -> String {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut head = [0u8; 2048];
+                    let n = stream.read(&mut head).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&head[..n]).into_owned();
+                    let body = if request.starts_with("GET /robots.txt") {
+                        String::new()
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let links = (0..10).fold(String::new(), |mut links, n| {
+                            use std::fmt::Write as _;
+                            let _ = write!(links, r#"<a href="/p{n}">Page {n}</a> "#);
+                            links
+                        });
+                        let text = "<p>Plain words a reader would read here. </p>".repeat(20);
+                        format!("<html><body>{text}{links}</body></html>")
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn open_tabs_do_not_carry_a_crawl_past_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = site().await;
+        let config = Config {
+            db: dir.path().join("c.sqlite"),
+            concurrency: 4,
+            max_pages: Some(2),
+            render: Render::Never,
+            sitemaps: false,
+            ..scope(|_| {}).config
+        };
+        let config = Config {
+            seeds: vec![seed],
+            ..config
+        };
+        let crawl = Arc::new(Crawl::new(config, Arc::default()).unwrap());
+        let summary = crawl.run().await.unwrap();
+        assert_eq!(summary.counts.done, 2, "{:?}", summary.counts);
     }
 
     #[test]
