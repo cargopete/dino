@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Dino",
+  "name": "Dino Code",
   "version": "0.1.0",
-  "description": "Lets Dino on this machine read and drive pages in tabs it opens, signed in as you. RFC-0022.",
+  "description": "Lets Dino Code on this machine read and drive pages in tabs it opens, signed in as you. RFC-0022.",
   "minimum_chrome_version": "116",
   "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Dino", "default_popup": "popup.html" }
+  "action": { "default_title": "Dino Code", "default_popup": "popup.html" }
 }

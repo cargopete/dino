@@ -90,7 +90,7 @@ use crate::settings::Source;
 #[command(
     name = "dino",
     version,
-    about = "A Rust-first terminal coding agent",
+    about = "Dino Code, a Rust-first terminal coding agent",
     args_conflicts_with_subcommands = true
 )]
 struct Cli {

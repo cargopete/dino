@@ -91,7 +91,7 @@ pub fn greeting(model: &str, workspace: &str) -> String {
     let _ = writeln!(
         drawn,
         "  {} {}  {}",
-        style::paint_with(EMBER, &[style::BOLD], "dino"),
+        style::paint_with(EMBER, &[style::BOLD], "dino code"),
         style::paint(FAINT, env!("CARGO_PKG_VERSION")),
         style::paint(TEXT, &format!("{model} · {workspace}")),
     );
