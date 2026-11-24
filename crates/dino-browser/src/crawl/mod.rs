@@ -220,6 +220,8 @@ struct Hosts {
     next: Mutex<HashMap<String, Instant>>,
     /// Refusals in a row, per host.
     refusals: Mutex<HashMap<String, u32>>,
+    /// Hosts that have answered at least once in this crawl.
+    answered: Mutex<std::collections::HashSet<String>>,
     robots: tokio::sync::Mutex<HashMap<String, Arc<Robots>>>,
 }
 
@@ -332,6 +334,20 @@ impl Crawl {
         })
     }
 
+    fn answered(&self, host: &str) -> bool {
+        self.hosts
+            .answered
+            .lock()
+            .expect("hosts lock")
+            .contains(host)
+    }
+
+    fn heard_from(&self, url: &str) {
+        if let Some(host) = urls::host(url) {
+            self.hosts.answered.lock().expect("hosts lock").insert(host);
+        }
+    }
+
     fn host_ready(&self, host: &str) -> bool {
         self.hosts
             .next
@@ -360,7 +376,11 @@ impl Crawl {
         }
         let mut robots = None;
         for _ in 0..2 {
-            match self.http.get(format!("{origin}/robots.txt")).send().await {
+            let response = self.http.get(format!("{origin}/robots.txt")).send().await;
+            if response.is_ok() {
+                self.heard_from(&origin);
+            }
+            match response {
                 Ok(response) if response.status().is_success() => {
                     robots = Some(Robots::parse(&response.text().await.unwrap_or_default()));
                     break;
@@ -369,7 +389,9 @@ impl Crawl {
                     robots = Some(Robots::default());
                     break;
                 }
-                Ok(_) | Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
+                // Unreachable is not flaky; the page's own retries will try the host again.
+                Err(_) => break,
+                Ok(_) => tokio::time::sleep(Duration::from_secs(2)).await,
             }
         }
         let robots = Arc::new(robots.unwrap_or_else(|| {
@@ -502,8 +524,18 @@ impl Crawl {
                 eprintln!("[{worker}] skipped {url}: {why} · {tally}");
             }
             Outcome::Failed { why, retry } => {
-                self.store.fail(url, &why, retry)?;
-                eprintln!("[{worker}] failed {url} {took:.1}s: {why} · {tally}");
+                // A host that has never answered is most likely not there at all: one more go, not eleven minutes.
+                let retries = match retry {
+                    false => 0,
+                    true if self.answered(host) => store::BACKOFF.len(),
+                    true => 1,
+                };
+                let next = match self.store.fail(url, &why, retries)? {
+                    Some(wait) => format!(", tried again in {wait}s"),
+                    None if retry => ", given up".to_owned(),
+                    None => String::new(),
+                };
+                eprintln!("[{worker}] failed {url} {took:.1}s: {why}{next} · {tally}");
                 if why.starts_with("refused") {
                     let mut refusals = self.hosts.refusals.lock().expect("hosts lock");
                     let count = refusals.entry(host.to_owned()).or_default();
@@ -546,7 +578,10 @@ impl Crawl {
             }
         }
         match self.visit(page, url).await {
-            Ok(reading) => self.record(url, depth, &reading, true),
+            Ok(reading) => {
+                self.heard_from(url);
+                self.record(url, depth, &reading, true)
+            }
             Err(error) => {
                 // A fresh tab next time, whatever went wrong with this one.
                 if let Some(old) = page.take() {
@@ -576,6 +611,7 @@ impl Crawl {
             .send()
             .await
             .map_err(|error| failed(format!("request failed: {error}"), true))?;
+        self.heard_from(url);
         let status = response.status().as_u16();
         match status {
             401 | 403 => {
