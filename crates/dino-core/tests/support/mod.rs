@@ -90,6 +90,7 @@ impl ModelSession for ScriptedSession {
     fn elide_tool_results(
         &mut self,
         keep_recent: usize,
+        _keep_bytes: usize,
     ) -> Result<dino_model::Elision, ModelError> {
         self.elide_requests.push(keep_recent);
         self.elision.ok_or_else(|| {

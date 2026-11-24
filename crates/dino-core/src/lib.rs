@@ -1526,10 +1526,10 @@ where
 
     /// Reduces history once, and says whether that reclaimed anything.
     fn elide(&mut self, model_turn: u32, events: &mut Vec<AgentEvent>) -> Result<bool, AgentError> {
-        match self
-            .session
-            .elide_tool_results(self.config.keep_recent_results)
-        {
+        match self.session.elide_tool_results(
+            self.config.keep_recent_results,
+            dino_model::ELIDED_MARKER_FLOOR,
+        ) {
             Ok(elision) if elision.results_elided + elision.calls_elided > 0 => {
                 self.tools.history_lost();
                 self.emit(

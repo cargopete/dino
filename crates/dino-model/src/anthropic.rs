@@ -403,7 +403,11 @@ impl ModelSession for AnthropicSession {
         Ok(())
     }
 
-    fn elide_tool_results(&mut self, keep_recent: usize) -> Result<Elision, ModelError> {
+    fn elide_tool_results(
+        &mut self,
+        keep_recent: usize,
+        keep_bytes: usize,
+    ) -> Result<Elision, ModelError> {
         let mut history = self
             .history
             .lock()
@@ -448,7 +452,7 @@ impl ModelSession for AnthropicSession {
                         .sum(),
                     _ => continue,
                 };
-                if bytes <= ELIDED_MARKER_FLOOR {
+                if bytes <= keep_bytes.max(ELIDED_MARKER_FLOOR) {
                     continue;
                 }
                 let replacement = elided_marker(bytes);
@@ -1527,7 +1531,7 @@ mod tests {
             }
         }
 
-        let elision = session.elide_tool_results(2).unwrap();
+        let elision = session.elide_tool_results(2, ELIDED_MARKER_FLOOR).unwrap();
 
         let history = session.history.lock().unwrap();
         assert_eq!(elision.results_elided, 2);
@@ -1565,7 +1569,7 @@ mod tests {
             },
         ]);
 
-        let elision = session.elide_tool_results(0).unwrap();
+        let elision = session.elide_tool_results(0, ELIDED_MARKER_FLOOR).unwrap();
 
         let history = session.history.lock().unwrap();
         let input = &history[0].content[0]["input"];
@@ -1600,7 +1604,7 @@ mod tests {
             })],
         });
 
-        let elision = session.elide_tool_results(0).unwrap();
+        let elision = session.elide_tool_results(0, ELIDED_MARKER_FLOOR).unwrap();
 
         // Replacing two bytes with a sentence reclaims nothing and loses the
         // only thing it had.
@@ -1637,7 +1641,7 @@ mod tests {
         let profile = crate::builtin_profile("claude-opus").unwrap();
         let mut session = AnthropicSession::new(AnthropicConfig::new("key", profile)).unwrap();
         session.history.lock().unwrap().push(pending);
-        let elision = session.elide_tool_results(0).unwrap();
+        let elision = session.elide_tool_results(0, ELIDED_MARKER_FLOOR).unwrap();
         assert_eq!(elision.results_elided, 1);
         assert!(
             session.history.lock().unwrap()[0].content[0]["content"]

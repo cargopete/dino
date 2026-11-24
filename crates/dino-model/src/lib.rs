@@ -57,7 +57,9 @@ pub trait ModelSession: Send {
         Box::pin(async { Ok(()) })
     }
 
-    /// Hollows out the oldest tool results, keeping the most recent intact.
+    /// Hollows out the oldest tool results, keeping the most recent intact,
+    /// and any of `keep_bytes` or less: [`ELIDED_MARKER_FLOOR`] where only
+    /// room matters.
     ///
     /// The adapter owns its native history, so the adapter does the work; the
     /// core decides when and how much. What is removed is the *content* of a
@@ -70,8 +72,12 @@ pub trait ModelSession: Send {
     /// Returns [`ModelError::Configuration`] where the provider keeps no local
     /// history to reduce. The default is that error rather than a silent
     /// success, so a provider that cannot do this cannot appear to have.
-    fn elide_tool_results(&mut self, keep_recent: usize) -> Result<Elision, ModelError> {
-        let _ = keep_recent;
+    fn elide_tool_results(
+        &mut self,
+        keep_recent: usize,
+        keep_bytes: usize,
+    ) -> Result<Elision, ModelError> {
+        let _ = (keep_recent, keep_bytes);
         Err(ModelError::Configuration(
             "this provider keeps no local history to elide".into(),
         ))
@@ -104,7 +110,7 @@ pub trait ModelSession: Send {
 
 /// Below this, a result is left alone: replacing it would reclaim nothing and
 /// would lose information for no gain.
-pub(crate) const ELIDED_MARKER_FLOOR: usize = 160;
+pub const ELIDED_MARKER_FLOOR: usize = 160;
 
 /// What replaces an elided tool result.
 ///
@@ -112,7 +118,7 @@ pub(crate) const ELIDED_MARKER_FLOOR: usize = 160;
 /// than conclude the file was empty.
 pub(crate) fn elided_marker(bytes: usize) -> String {
     format!(
-        "{ELIDED_PREFIX}{bytes}{ELIDED_INFIX} tool result to stay within the context window. \
+        "{ELIDED_PREFIX}{bytes}{ELIDED_INFIX} tool result to save room. \
          Run the tool again if you need it.]"
     )
 }
@@ -246,8 +252,12 @@ impl ModelSession for Box<dyn ModelSession> {
         (**self).discover_limits()
     }
 
-    fn elide_tool_results(&mut self, keep_recent: usize) -> Result<Elision, ModelError> {
-        (**self).elide_tool_results(keep_recent)
+    fn elide_tool_results(
+        &mut self,
+        keep_recent: usize,
+        keep_bytes: usize,
+    ) -> Result<Elision, ModelError> {
+        (**self).elide_tool_results(keep_recent, keep_bytes)
     }
 
     fn export_state(&self) -> Result<SessionState, ModelError> {
