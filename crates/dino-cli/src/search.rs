@@ -230,8 +230,12 @@ impl<S: ModelSession> ModelSession for Gated<S> {
         self.inner.discover_limits()
     }
 
-    fn elide_tool_results(&mut self, keep_recent: usize) -> Result<Elision, ModelError> {
-        self.inner.elide_tool_results(keep_recent)
+    fn elide_tool_results(
+        &mut self,
+        keep_recent: usize,
+        keep_bytes: usize,
+    ) -> Result<Elision, ModelError> {
+        self.inner.elide_tool_results(keep_recent, keep_bytes)
     }
 
     fn export_state(&self) -> Result<SessionState, ModelError> {

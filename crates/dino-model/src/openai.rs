@@ -829,7 +829,7 @@ mod tests {
         let profile = crate::builtin_profile("terra").unwrap();
         let mut session = OpenAiSession::new(OpenAiConfig::new("key", profile)).unwrap();
 
-        let error = session.elide_tool_results(4).unwrap_err();
+        let error = session.elide_tool_results(4, 0).unwrap_err();
 
         // It continues with previous_response_id and keeps no local history to
         // reduce. Returning a successful no-op would let a caller believe the

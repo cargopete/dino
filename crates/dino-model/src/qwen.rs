@@ -478,7 +478,11 @@ impl ModelSession for QwenSession {
         Ok(())
     }
 
-    fn elide_tool_results(&mut self, keep_recent: usize) -> Result<Elision, ModelError> {
+    fn elide_tool_results(
+        &mut self,
+        keep_recent: usize,
+        keep_bytes: usize,
+    ) -> Result<Elision, ModelError> {
         let mut history = self
             .history
             .lock()
@@ -501,7 +505,7 @@ impl ModelSession for QwenSession {
                 continue;
             };
             let bytes = content.len();
-            if bytes <= ELIDED_MARKER_FLOOR {
+            if bytes <= keep_bytes.max(ELIDED_MARKER_FLOOR) {
                 continue;
             }
             let replacement = elided_marker(bytes);
@@ -1236,7 +1240,7 @@ mod tests {
             ));
         }
 
-        let elision = session.elide_tool_results(2).unwrap();
+        let elision = session.elide_tool_results(2, ELIDED_MARKER_FLOOR).unwrap();
 
         let history = session.history.lock().unwrap();
         assert_eq!(elision.results_elided, 2);
@@ -1253,6 +1257,30 @@ mod tests {
             );
         }
         assert_eq!(history[4].content.as_deref(), Some("carrying on"));
+    }
+
+    #[test]
+    fn elision_keeps_results_under_the_floor_it_is_given() {
+        let profile = crate::builtin_profile("qwen3-coder-next").unwrap();
+        let mut session =
+            QwenSession::new(QwenConfig::new("http://127.0.0.1:8000/v1", profile)).unwrap();
+        session.history.lock().unwrap().extend([
+            ChatMessage::tool("diary".into(), "d".repeat(288)),
+            ChatMessage::tool("page".into(), "p".repeat(7_000)),
+        ]);
+
+        let elision = session.elide_tool_results(0, 1_024).unwrap();
+
+        let history = session.history.lock().unwrap();
+        assert_eq!(elision.results_elided, 1);
+        assert_eq!(history[0].content.as_deref().unwrap().len(), 288);
+        assert!(
+            history[1]
+                .content
+                .as_deref()
+                .unwrap()
+                .starts_with("[dino elided 7000 bytes")
+        );
     }
 
     #[test]
@@ -1284,7 +1312,7 @@ mod tests {
             result("new"),
         ]);
 
-        let elision = session.elide_tool_results(1).unwrap();
+        let elision = session.elide_tool_results(1, ELIDED_MARKER_FLOOR).unwrap();
 
         let history = session.history.lock().unwrap();
         assert_eq!(elision.calls_elided, 1);
@@ -1304,7 +1332,7 @@ mod tests {
         assert_eq!(new["content"].as_str().unwrap().len(), 5_000);
 
         drop(history);
-        let again = session.elide_tool_results(1).unwrap();
+        let again = session.elide_tool_results(1, ELIDED_MARKER_FLOOR).unwrap();
         assert_eq!(again.calls_elided, 0, "a marker is not elided again");
     }
 
