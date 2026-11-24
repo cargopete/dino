@@ -22,10 +22,12 @@ pub use self::robots::Robots;
 pub use self::store::Counts;
 pub use self::store::File;
 pub use self::store::Store;
+use crate::Admit;
 use crate::Bridge;
 use crate::Browser;
 use crate::Chromium;
 use crate::Error;
+use crate::Guard;
 use crate::Page;
 use crate::Reading;
 use crate::urls;
@@ -181,6 +183,14 @@ fn soft_404(requested: &str, landed: &str) -> bool {
     asked != got && missing(&got) && !missing(&asked)
 }
 
+/// What the guard said of a request, when the reply is its own rather than the site's.
+fn guarded(response: &reqwest::Response) -> Option<&str> {
+    response
+        .headers()
+        .get(crate::GUARD_HEADER)
+        .and_then(|value| value.to_str().ok())
+}
+
 /// What a plain GET found.
 enum Plain {
     Page { reading: Reading, shell: bool },
@@ -192,6 +202,7 @@ enum Plain {
 #[derive(Debug)]
 struct Pool {
     extension: Option<Bridge>,
+    guard: Guard,
     current: tokio::sync::Mutex<Option<Arc<Browser>>>,
 }
 
@@ -208,10 +219,18 @@ impl Pool {
             if current.is_some() {
                 eprintln!("the browser died; starting it again");
             }
-            Browser::Chromium(Box::new(Chromium::launch().await?))
+            Browser::Chromium(Box::new(Chromium::launch_guarded(Some(self.guard)).await?))
         });
         *current = Some(browser.clone());
         Ok(browser)
+    }
+}
+
+struct Reach(Admit);
+
+impl std::fmt::Debug for Reach {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reach")
     }
 }
 
@@ -220,6 +239,8 @@ struct Hosts {
     next: Mutex<HashMap<String, Instant>>,
     /// Refusals in a row, per host.
     refusals: Mutex<HashMap<String, u32>>,
+    /// Hosts that have answered at least once in this crawl.
+    answered: Mutex<std::collections::HashSet<String>>,
     robots: tokio::sync::Mutex<HashMap<String, Arc<Robots>>>,
 }
 
@@ -230,7 +251,11 @@ pub struct Crawl {
     pool: Pool,
     hosts: Hosts,
     http: reqwest::Client,
+    /// What the guard lets through, checked first so a refused page says why.
+    admit: Reach,
     stop: Arc<AtomicBool>,
+    /// Pages taken and not yet recorded, counted against `max_pages` so open tabs cannot overshoot it.
+    open: Mutex<u64>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -259,42 +284,53 @@ enum Outcome {
 }
 
 impl Crawl {
+    /// Every request goes through a guard that refuses loopback, the LAN, a
+    /// tailnet and link-local addresses, except a seed's own host and port.
+    ///
     /// # Errors
     ///
-    /// Fails when the crawl file cannot be opened.
-    pub fn new(
+    /// Fails when the crawl file cannot be opened or the guard cannot listen.
+    pub async fn new(
         config: Config,
         stop: Arc<AtomicBool>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let store = Store::open(&config.db)?;
-        let mut hosts = Vec::new();
+        let mut seeds = Vec::new();
         for seed in &config.seeds {
             let url = urls::normalise(seed).ok_or_else(|| format!("not a web address: {seed}"))?;
-            let host = urls::host(&url).unwrap_or_default();
-            store.add(&url, &host, 0, None)?;
-            hosts.push(host);
+            store.add(&url, &urls::host(&url).unwrap_or_default(), 0, None)?;
+            seeds.push(url);
         }
-        // A resumed crawl has no seeds on its command line; its hosts are the depth-0 rows.
-        if hosts.is_empty() {
-            hosts = store.seed_hosts()?;
+        // A resumed crawl has no seeds on its command line; they are its depth-0 rows.
+        if seeds.is_empty() {
+            seeds = store.seed_urls()?;
         }
+        let mut hosts: Vec<String> = seeds.iter().filter_map(|url| urls::host(url)).collect();
+        hosts.sort();
+        hosts.dedup();
+        let admit = crate::public_and(&seeds).await;
+        let guard = Guard::start_admitting(admit.clone()).await?;
         // No limit on the whole body: bnb.bg builds an export for over 15 s before its first byte,
         // and a large file takes as long as it takes, provided bytes keep coming.
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(90))
             .user_agent("dino-crawl (+https://github.com/cargopete/dino)")
+            .proxy(reqwest::Proxy::all(format!("http://{}", guard.addr))?)
             .build()?;
         Ok(Self {
             store,
             pool: Pool {
                 extension: config.extension.clone(),
+                guard,
                 current: tokio::sync::Mutex::new(None),
             },
             scope: Scope { hosts, config },
             hosts: Hosts::default(),
             http,
+            admit: Reach(admit),
             stop,
+            open: Mutex::new(0),
         })
     }
 
@@ -329,6 +365,20 @@ impl Crawl {
         })
     }
 
+    fn answered(&self, host: &str) -> bool {
+        self.hosts
+            .answered
+            .lock()
+            .expect("hosts lock")
+            .contains(host)
+    }
+
+    fn heard_from(&self, url: &str) {
+        if let Some(host) = urls::host(url) {
+            self.hosts.answered.lock().expect("hosts lock").insert(host);
+        }
+    }
+
     fn host_ready(&self, host: &str) -> bool {
         self.hosts
             .next
@@ -357,7 +407,11 @@ impl Crawl {
         }
         let mut robots = None;
         for _ in 0..2 {
-            match self.http.get(format!("{origin}/robots.txt")).send().await {
+            let response = self.http.get(format!("{origin}/robots.txt")).send().await;
+            if response.as_ref().is_ok_and(|r| guarded(r).is_none()) {
+                self.heard_from(&origin);
+            }
+            match response {
                 Ok(response) if response.status().is_success() => {
                     robots = Some(Robots::parse(&response.text().await.unwrap_or_default()));
                     break;
@@ -366,7 +420,9 @@ impl Crawl {
                     robots = Some(Robots::default());
                     break;
                 }
-                Ok(_) | Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
+                // Unreachable is not flaky; the page's own retries will try the host again.
+                Err(_) => break,
+                Ok(_) => tokio::time::sleep(Duration::from_secs(2)).await,
             }
         }
         let robots = Arc::new(robots.unwrap_or_else(|| {
@@ -386,51 +442,70 @@ impl Crawl {
                 break;
             }
             let counts = self.store.counts()?;
-            if self
-                .scope
-                .config
-                .max_pages
-                .is_some_and(|max| counts.done >= max)
-            {
+            let max = self.scope.config.max_pages;
+            if max.is_some_and(|max| counts.done >= max) {
                 break;
             }
-            let Some((url, host, depth)) = self.store.take(|host| self.host_ready(host))? else {
+            let taken = {
+                let mut open = self.open.lock().expect("open lock");
+                if max.is_some_and(|max| counts.done + *open >= max) {
+                    None
+                } else {
+                    let taken = self.store.take(|host| self.host_ready(host))?;
+                    *open += u64::from(taken.is_some());
+                    taken
+                }
+            };
+            let Some((url, host, depth)) = taken else {
                 if counts.queued + counts.taken + counts.waiting == 0 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 continue;
             };
-            let robots = self.robots(&url).await;
-            let path = Url::parse(&url)
-                .map(|u| {
-                    u.query()
-                        .map_or_else(|| u.path().to_owned(), |q| format!("{}?{q}", u.path()))
-                })
-                .unwrap_or_default();
-            if !robots.allows(&path) {
-                self.store.set_skipped(&url, "disallowed by robots.txt")?;
-                continue;
-            }
-            let gap = robots
-                .crawl_delay
-                .map_or(self.scope.config.delay, |seconds| {
-                    self.scope
-                        .config
-                        .delay
-                        .max(Duration::from_secs_f64(seconds.clamp(0.0, 30.0)))
-                });
-            self.reserve(&host, gap);
-
-            let started = Instant::now();
-            let outcome = self.fetch(&mut page, &url, depth).await?;
-            let took = started.elapsed().as_secs_f32();
-            self.report(worker, &url, &host, took, outcome)?;
+            let result = self.visit_one(worker, &mut page, &url, &host, depth).await;
+            *self.open.lock().expect("open lock") -= 1;
+            result?;
         }
         if let Some(page) = page {
             let _ = tokio::time::timeout(Duration::from_secs(5), page.close()).await;
         }
         Ok(())
+    }
+
+    /// Checks robots.txt, waits the host's turn, then fetches and records one URL.
+    async fn visit_one(
+        &self,
+        worker: usize,
+        page: &mut Option<Page>,
+        url: &str,
+        host: &str,
+        depth: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let robots = self.robots(url).await;
+        let path = Url::parse(url)
+            .map(|u| {
+                u.query()
+                    .map_or_else(|| u.path().to_owned(), |q| format!("{}?{q}", u.path()))
+            })
+            .unwrap_or_default();
+        if !robots.allows(&path) {
+            self.store.set_skipped(url, "disallowed by robots.txt")?;
+            return Ok(());
+        }
+        let gap = robots
+            .crawl_delay
+            .map_or(self.scope.config.delay, |seconds| {
+                self.scope
+                    .config
+                    .delay
+                    .max(Duration::from_secs_f64(seconds.clamp(0.0, 30.0)))
+            });
+        self.reserve(host, gap);
+        let started = Instant::now();
+        let outcome = self.fetch(page, url, depth).await?;
+        let took = started.elapsed().as_secs_f32();
+        self.report(worker, url, host, took, outcome)
     }
 
     /// Records what became of one URL, says so, and gives up a host that keeps refusing.
@@ -480,8 +555,18 @@ impl Crawl {
                 eprintln!("[{worker}] skipped {url}: {why} · {tally}");
             }
             Outcome::Failed { why, retry } => {
-                self.store.fail(url, &why, retry)?;
-                eprintln!("[{worker}] failed {url} {took:.1}s: {why} · {tally}");
+                // A host that has never answered is most likely not there at all: one more go, not eleven minutes.
+                let retries = match retry {
+                    false => 0,
+                    true if self.answered(host) => store::BACKOFF.len(),
+                    true => 1,
+                };
+                let next = match self.store.fail(url, &why, retries)? {
+                    Some(wait) => format!(", tried again in {wait}s"),
+                    None if retry => ", given up".to_owned(),
+                    None => String::new(),
+                };
+                eprintln!("[{worker}] failed {url} {took:.1}s: {why}{next} · {tally}");
                 if why.starts_with("refused") {
                     let mut refusals = self.hosts.refusals.lock().expect("hosts lock");
                     let count = refusals.entry(host.to_owned()).or_default();
@@ -507,6 +592,9 @@ impl Crawl {
         url: &str,
         depth: u32,
     ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(why) = self.reachable(url).await {
+            return Ok(Outcome::Failed { why, retry: false });
+        }
         let render = self.scope.config.render;
         if render != Render::Always || document_kind(url).is_some() {
             match self.plain(url).await {
@@ -524,7 +612,10 @@ impl Crawl {
             }
         }
         match self.visit(page, url).await {
-            Ok(reading) => self.record(url, depth, &reading, true),
+            Ok(reading) => {
+                self.heard_from(url);
+                self.record(url, depth, &reading, true)
+            }
             Err(error) => {
                 // A fresh tab next time, whatever went wrong with this one.
                 if let Some(old) = page.take() {
@@ -546,6 +637,27 @@ impl Crawl {
         }
     }
 
+    /// Whether the guard would let `url` through. It refuses anyway; this only says why, at once.
+    async fn reachable(&self, url: &str) -> Result<(), String> {
+        let Ok(parsed) = Url::parse(url) else {
+            return Ok(());
+        };
+        let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
+            return Ok(());
+        };
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        // A name that does not resolve fails as a request, and is retried as one.
+        let Ok(addrs) = tokio::net::lookup_host((bare, port)).await else {
+            return Ok(());
+        };
+        let addrs: Vec<_> = addrs.collect();
+        if addrs.iter().all(|addr| (self.admit.0)(*addr)) {
+            Ok(())
+        } else {
+            Err(format!("{host} is not a public address; not fetched"))
+        }
+    }
+
     async fn plain(&self, url: &str) -> Result<Plain, Outcome> {
         let failed = |why: String, retry: bool| Outcome::Failed { why, retry };
         let response = self
@@ -554,6 +666,19 @@ impl Crawl {
             .send()
             .await
             .map_err(|error| failed(format!("request failed: {error}"), true))?;
+        match guarded(&response) {
+            Some("not-public") => {
+                return Err(failed(
+                    "sent on to an address that is not public; not fetched".into(),
+                    false,
+                ));
+            }
+            Some(_) => {
+                let why = response.text().await.unwrap_or_default();
+                return Err(failed(format!("request failed: {why}"), true));
+            }
+            None => self.heard_from(url),
+        }
         let status = response.status().as_u16();
         match status {
             401 | 403 => {
@@ -829,6 +954,99 @@ mod tests {
             hosts: vec!["bnb.bg".into()],
             config,
         }
+    }
+
+    /// A site on loopback: each page links to ten others, and answers after a pause.
+    async fn site() -> String {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut head = [0u8; 2048];
+                    let n = stream.read(&mut head).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&head[..n]).into_owned();
+                    let body = if request.starts_with("GET /robots.txt") {
+                        String::new()
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let links = (0..10).fold(String::new(), |mut links, n| {
+                            use std::fmt::Write as _;
+                            let _ = write!(links, r#"<a href="/p{n}">Page {n}</a> "#);
+                            links
+                        });
+                        let text = "<p>Plain words a reader would read here. </p>".repeat(20);
+                        format!("<html><body>{text}{links}</body></html>")
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn open_tabs_do_not_carry_a_crawl_past_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = site().await;
+        let config = Config {
+            db: dir.path().join("c.sqlite"),
+            concurrency: 4,
+            max_pages: Some(2),
+            render: Render::Never,
+            sitemaps: false,
+            ..scope(|_| {}).config
+        };
+        let config = Config {
+            seeds: vec![seed],
+            ..config
+        };
+        let crawl = Arc::new(Crawl::new(config, Arc::default()).await.unwrap());
+        let summary = crawl.run().await.unwrap();
+        assert_eq!(summary.counts.done, 2, "{:?}", summary.counts);
+    }
+
+    #[tokio::test]
+    async fn only_the_seeds_own_private_address_is_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (seed, other) = (site().await, site().await);
+        let config = Config {
+            seeds: vec![seed.clone()],
+            db: dir.path().join("c.sqlite"),
+            depth: 0,
+            any_host: true,
+            render: Render::Never,
+            sitemaps: false,
+            ..scope(|_| {}).config
+        };
+        let crawl = Arc::new(Crawl::new(config, Arc::default()).await.unwrap());
+        for url in [other.clone(), "http://169.254.169.254/".to_owned()] {
+            crawl
+                .store()
+                .add(&url, &urls::host(&url).unwrap(), 0, None)
+                .unwrap();
+        }
+        let started = Instant::now();
+        let summary = crawl.clone().run().await.unwrap();
+        assert_eq!(summary.counts.done, 1, "{:?}", summary.counts);
+        let failures = crawl.store().failures(10).unwrap();
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(
+            failures
+                .iter()
+                .all(|(_, why)| why.contains("not a public address")),
+            "{failures:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "refused at once"
+        );
     }
 
     #[test]

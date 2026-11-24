@@ -23,8 +23,12 @@ pub use crate::page::Landing;
 pub use crate::page::Link;
 pub use crate::page::Page;
 pub use crate::page::Reading;
+pub use crate::proxy::Admit;
 pub use crate::proxy::Allow;
+pub use crate::proxy::GUARD_HEADER;
 pub use crate::proxy::Guard;
+pub use crate::proxy::is_public;
+pub use crate::proxy::public_and;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

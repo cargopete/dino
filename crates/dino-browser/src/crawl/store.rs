@@ -157,9 +157,9 @@ impl Store {
     /// # Errors
     ///
     /// Fails when SQLite does.
-    pub fn seed_hosts(&self) -> rusqlite::Result<Vec<String>> {
+    pub fn seed_urls(&self) -> rusqlite::Result<Vec<String>> {
         let db = self.db();
-        let mut query = db.prepare("SELECT DISTINCT host FROM frontier WHERE depth = 0")?;
+        let mut query = db.prepare("SELECT url FROM frontier WHERE depth = 0")?;
         query.query_map([], |row| row.get(0))?.collect()
     }
 
@@ -212,10 +212,13 @@ impl Store {
         )
     }
 
+    /// Puts `url` back to wait out the next step of [`BACKOFF`], at most
+    /// `retries` times in all, and returns the wait; `None` when it is given up.
+    ///
     /// # Errors
     ///
     /// Fails when SQLite does.
-    pub fn fail(&self, url: &str, error: &str, retry: bool) -> rusqlite::Result<()> {
+    pub fn fail(&self, url: &str, error: &str, retries: usize) -> rusqlite::Result<Option<i64>> {
         let db = self.db();
         let attempts: i64 = db.query_row(
             "SELECT attempts FROM frontier WHERE url = ?1",
@@ -224,8 +227,9 @@ impl Store {
         )?;
         let wait = usize::try_from(attempts)
             .ok()
+            .filter(|n| *n < retries)
             .and_then(|n| BACKOFF.get(n))
-            .filter(|_| retry);
+            .copied();
         match wait {
             Some(wait) => db.execute(
                 "UPDATE frontier SET state = 'queued', attempts = attempts + 1, not_before = ?2, error = ?3 WHERE url = ?1",
@@ -236,7 +240,7 @@ impl Store {
                 params![url, error],
             )?,
         };
-        Ok(())
+        Ok(wait)
     }
 
     /// Keeps a reading. A page whose text matches one already kept is stored by
@@ -464,12 +468,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("c.sqlite")).unwrap();
         store.add("https://a.test/1", "a.test", 0, None).unwrap();
-        for _ in 0..BACKOFF.len() {
-            store.fail("https://a.test/1", "boom", true).unwrap();
+        for wait in BACKOFF {
+            let waited = store
+                .fail("https://a.test/1", "boom", BACKOFF.len())
+                .unwrap();
+            assert_eq!(waited, Some(wait));
             assert_eq!(store.counts().unwrap().waiting, 1);
         }
-        store.fail("https://a.test/1", "boom", true).unwrap();
+        assert_eq!(
+            store
+                .fail("https://a.test/1", "boom", BACKOFF.len())
+                .unwrap(),
+            None
+        );
         assert_eq!(store.counts().unwrap().failed, 1);
+
+        store.add("https://b.test/1", "b.test", 0, None).unwrap();
+        assert_eq!(store.fail("https://b.test/1", "boom", 1).unwrap(), Some(30));
+        assert_eq!(store.fail("https://b.test/1", "boom", 1).unwrap(), None);
+        assert_eq!(store.counts().unwrap().failed, 2);
     }
 
     #[test]

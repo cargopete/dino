@@ -144,7 +144,11 @@ pub async fn browse(args: BrowseArgs) -> Result<ExitCode> {
         };
         (Browser::Extension(bridge), page)
     } else {
-        let chromium = Chromium::launch().await?;
+        // Only what was typed may be private; a page's links and scripts reach the public web alone.
+        let typed: Vec<String> = args.url.iter().cloned().collect();
+        let guard =
+            dino_browser::Guard::start_admitting(dino_browser::public_and(&typed).await).await?;
+        let chromium = Chromium::launch_guarded(Some(guard)).await?;
         let page = chromium.new_page().await?;
         (Browser::Chromium(Box::new(chromium)), page)
     };
@@ -246,7 +250,11 @@ pub async fn crawl(args: CrawlArgs) -> Result<ExitCode> {
         sitemaps: !args.no_sitemaps,
     };
     let stop = Arc::new(AtomicBool::new(false));
-    let crawl = Arc::new(Crawl::new(config, stop.clone()).map_err(|error| anyhow!(error))?);
+    let crawl = Arc::new(
+        Crawl::new(config, stop.clone())
+            .await
+            .map_err(|error| anyhow!(error))?,
+    );
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             eprintln!(
