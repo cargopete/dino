@@ -1,6 +1,6 @@
-# Dino
+# Dino Code
 
-Dino is an open-source terminal coding agent written in Rust and designed
+Dino Code is an open-source terminal coding agent written in Rust and designed
 for Rust work. By default it runs Kimi K3.1 Pro on Moonshot's API, which beat
 Qwen3.7-Max on the 2026-10-30 run of the whole corpus, 95 to 90 with no
 overlap (`evals/MODEL-CHOICE.md`). It is built to work with open-weight models
@@ -961,7 +961,8 @@ holds the conversation, and the conversation holds your source, because tool
 results are file contents. It is git-ignored and mode 0600, and it is worth
 knowing it is there.
 
-The command is `dino`; Dino is the project.
+The command is `dino`; Dino Code is the project. Its chat-app sibling is
+Dino Web, at [dino-web.online](https://dino-web.online).
 
 ## Design record
 

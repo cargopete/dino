@@ -43,7 +43,7 @@ async function group(tab) {
   try {
     const id = await chrome.tabs.group(existing ? { tabIds: tab, groupId: existing } : { tabIds: tab });
     if (!existing) {
-      await chrome.tabGroups.update(id, { title: "Dino", color: "grey", collapsed: true });
+      await chrome.tabGroups.update(id, { title: "Dino Code", color: "grey", collapsed: true });
       await chrome.storage.session.set({ group: id });
     }
   } catch {

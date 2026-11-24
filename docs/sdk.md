@@ -1,4 +1,4 @@
-# Driving Dino from a program
+# Driving Dino Code from a program
 
 There are two entry points. From Rust, the `dino-sdk` crate. From anything
 else, `dino run --json` and the JSON lines it writes.
