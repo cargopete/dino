@@ -11,12 +11,34 @@ use url::Url;
 use crate::Link;
 use crate::Reading;
 
-/// Less text than this, and the page is probably a shell a script fills in.
+/// Less text than this on a page with scripts, and it is probably a shell they fill in.
 const SHELL_TEXT: usize = 500;
 const TEXT_WIDTH: usize = 120;
 
 fn select(selector: &str) -> Selector {
     Selector::parse(selector).expect("a fixed selector parses")
+}
+
+/// Text a reader would see: `text()` alone also yields the source of every script and style.
+fn visible_text(element: ElementRef<'_>) -> usize {
+    element
+        .children()
+        .map(|child| match ElementRef::wrap(child) {
+            Some(child)
+                if matches!(
+                    child.value().name(),
+                    "script" | "style" | "noscript" | "template"
+                ) =>
+            {
+                0
+            }
+            Some(child) => visible_text(child),
+            None => child
+                .value()
+                .as_text()
+                .map_or(0, |text| text.split_whitespace().map(str::len).sum()),
+        })
+        .sum()
 }
 
 fn text_of(element: ElementRef<'_>) -> String {
@@ -208,11 +230,15 @@ pub fn read(url: &Url, status: u16, html: &str) -> (Reading, bool) {
     };
 
     // Counted before the furniture is cut, or an index page of links would look like a shell.
-    let visible = first("body").map_or(0, |body| text_of(body).len());
+    let visible = first("body").map_or(0, visible_text);
+    // Without a script nothing would fill the page in, so a browser draws what is already here.
+    let scripted = document
+        .select(&select(r#"script:not([type="application/ld+json"])"#))
+        .any(|script| {
+            script.value().attr("src").is_some() || !script.text().all(|t| t.trim().is_empty())
+        });
     let says_script = html.contains("enable JavaScript") || html.contains("requires JavaScript");
-    let shell = visible < SHELL_TEXT
-        || (links.len() < 3 && visible < 2_000)
-        || (says_script && visible < 2_000);
+    let shell = scripted && (visible < SHELL_TEXT || (says_script && visible < 2_000));
 
     let reading = Reading {
         url: url.to_string(),
@@ -322,6 +348,46 @@ mod tests {
         );
         let (_, shell) = read(&url(), 200, &index);
         assert!(!shell, "an index of links is a page, not a shell");
+    }
+
+    #[test]
+    fn a_page_a_script_fills_from_inline_data_asks_for_a_browser() {
+        let quotes =
+            r#"{"text": "The world as we have created it is a process of our thinking."}, "#
+                .repeat(60);
+        let html = format!(
+            r#"<html><head><title>Quotes to Scrape</title></head><body><div class="container">
+            <h1><a href="/">Quotes to Scrape</a></h1><a href="/login">Login</a>
+            <script src="jquery.js"></script><script>var data = [{quotes}]; render(data);</script>
+            <ul class="pager"><li><a href="/js/page/2/">Next</a></li></ul></div>
+            <footer>Quotes by: <a href="https://goodreads.com">GoodReads.com</a></footer></body></html>"#
+        );
+        let (_, shell) = read(&url(), 200, &html);
+        assert!(shell, "the script's data is not text a reader sees");
+    }
+
+    #[test]
+    fn a_shop_shell_with_a_tag_manager_asks_for_a_browser() {
+        let html = format!(
+            r#"<html><head><style>{}</style><script>{}</script></head><body>
+            <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-X"></iframe></noscript>
+            <div id="app"></div><script src="/app.js"></script></body></html>"#,
+            ".banner { color: red; } ".repeat(100),
+            "window.dataLayer = window.dataLayer || []; ".repeat(100),
+        );
+        let (_, shell) = read(&url(), 200, &html);
+        assert!(shell);
+    }
+
+    #[test]
+    fn a_short_page_without_scripts_is_not_drawn() {
+        let html = r#"<html><head><title>Example Domain</title><style>body { margin: 0 }</style></head>
+            <body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples
+            without needing permission. Avoid use in operations.</p>
+            <p><a href="https://iana.org/domains/example">Learn more</a></p></div></body></html>"#;
+        let (reading, shell) = read(&url(), 200, html);
+        assert!(!shell, "a browser would draw the same text");
+        assert!(reading.markdown.contains("documentation examples"));
     }
 
     #[test]
