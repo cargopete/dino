@@ -12,7 +12,7 @@ set any of this):
 
 ```toml
 [webhook]
-repos = { "cargopete/dino" = "/Users/me/src/dino" }  # owner/name = a clone whose remote is `origin`
+repos = { "cargopete/dino-code" = "/Users/me/src/dino" }  # owner/name = a clone whose remote is `origin`
 # secret = "..."      # or DINO_WEBHOOK_SECRET, which wins; at least 16 bytes
 # model = "claude-sonnet-5.5"  # default: review_model, then model
 # on_opened = true    # also review a pull request opened ready

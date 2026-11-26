@@ -17,7 +17,7 @@ ignore fields and `type`s it does not know rather than refuse them.
 
 ```toml
 [dependencies]
-dino-sdk = { git = "https://github.com/cargopete/dino" }
+dino-sdk = { git = "https://github.com/cargopete/dino-code" }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
