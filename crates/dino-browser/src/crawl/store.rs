@@ -1,4 +1,4 @@
-//! Every bit of crawl state in one SQLite file, so a killed crawl carries on.
+//! Every bit of crawl state in one `SQLite` file, so a killed crawl carries on.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -54,7 +54,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when the file cannot be opened as SQLite.
+    /// Fails when the file cannot be opened as `SQLite`.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let db = Connection::open(path)?;
         db.execute_batch(
@@ -110,7 +110,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn add(
         &self,
         url: &str,
@@ -130,7 +130,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn skip(&self, url: &str, host: &str, depth: u32, why: &str) -> rusqlite::Result<()> {
         self.db().execute(
             "INSERT OR IGNORE INTO frontier (url, host, depth, state, error) VALUES (?1, ?2, ?3, 'skipped', ?4)",
@@ -143,7 +143,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn set_skipped(&self, url: &str, why: &str) -> rusqlite::Result<()> {
         self.db().execute(
             "UPDATE frontier SET state = 'skipped', error = ?2 WHERE url = ?1",
@@ -156,7 +156,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn seed_urls(&self) -> rusqlite::Result<Vec<String>> {
         let db = self.db();
         let mut query = db.prepare("SELECT url FROM frontier WHERE depth = 0")?;
@@ -167,7 +167,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn take(
         &self,
         ready: impl Fn(&str) -> bool,
@@ -204,7 +204,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn skip_host(&self, host: &str, why: &str) -> rusqlite::Result<usize> {
         self.db().execute(
             "UPDATE frontier SET state = 'skipped', error = ?2 WHERE host = ?1 AND state = 'queued'",
@@ -217,7 +217,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn fail(&self, url: &str, error: &str, retries: usize) -> rusqlite::Result<Option<i64>> {
         let db = self.db();
         let attempts: i64 = db.query_row(
@@ -248,7 +248,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn keep(
         &self,
         url: &str,
@@ -291,7 +291,7 @@ impl Store {
 
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn counts(&self) -> rusqlite::Result<Counts> {
         let db = self.db();
         let mut counts = Counts::default();
@@ -324,7 +324,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn keep_file(&self, file: &File) -> rusqlite::Result<()> {
         let db = self.db();
         db.execute(
@@ -343,7 +343,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite or the writer does.
+    /// Fails when `SQLite` or the writer does.
     pub fn export(
         &self,
         out: &mut impl std::io::Write,
@@ -403,7 +403,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when SQLite does.
+    /// Fails when `SQLite` does.
     pub fn failures(&self, limit: u32) -> rusqlite::Result<Vec<(String, String)>> {
         let db = self.db();
         let mut query = db.prepare("SELECT url, coalesce(error, '') FROM frontier WHERE state = 'failed' ORDER BY rowid DESC LIMIT ?1")?;
