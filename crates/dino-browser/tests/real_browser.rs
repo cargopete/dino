@@ -60,7 +60,6 @@ async fn launched(guard: Option<dino_browser::Guard>) -> Option<Chromium> {
     }
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_real_tab_reads_clicks_types_and_scrolls() {
     let Some(browser) = launched(None).await else {
